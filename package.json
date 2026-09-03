@@ -1,0 +1,38 @@
+{
+  "name": "tiktok-sales-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for aggregating and reporting TikTok advertising campaign information and sales data",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "pw:signer": "npm run build && node dist/playwright-signer/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "tiktok",
+    "ads",
+    "marketing",
+    "analytics"
+  ],
+  "author": "ZPro METAZ",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@googleapis/sheets": "^13.0.1",
+    "axios": "^1.15.2",
+    "dotenv": "^17.4.2",
+    "node-cron": "^4.2.1",
+    "playwright": "^1.59.1",
+    "sqlite3": "^6.0.1",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}

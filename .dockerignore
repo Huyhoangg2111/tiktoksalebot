@@ -1,0 +1,10 @@
+node_modules
+dist
+artifacts
+runtime
+scratch
+.git
+.gitignore
+.env
+bot_data.db
+*.log

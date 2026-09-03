@@ -1,0 +1,25 @@
+.env
+.env.*
+*.env
+!.env.example
+*- Sao chép.env
+credentials*.json
+*.pem
+*.p12
+
+node_modules/
+dist/
+runtime/
+artifacts/
+scratch/
+
+*.db
+*.sqlite
+*.sqlite3
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+.DS_Store
+Thumbs.db
