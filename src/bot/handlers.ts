@@ -177,10 +177,12 @@ type CampaignMktGroup = {
 };
 
 type DuplicatedCampaignResult = {
-  campaignId: string;
+  campaignId?: string;
   advertiserId: string;
   campaignName?: string;
   overrideWarnings?: string[];
+  status?: 'created' | 'pending';
+  taskId?: string;
 };
 
 type XcampQueueJob = {
@@ -363,7 +365,13 @@ function formatDuplicatedCampaignResultLine(
   const campaignName = getCampaignShortName(result.campaignName || 'Không rõ tên camp');
   const accountSuffix = accountLabel ? ` · ${escapeHtml(accountLabel)}` : '';
 
-  return `🚀 ${escapeHtml(campaignName)} - <code>${escapeHtml(result.campaignId)}</code>${accountSuffix}`;
+  return `🚀 ${escapeHtml(campaignName)} - <code>${escapeHtml(result.campaignId || '')}</code>${accountSuffix}`;
+}
+
+function formatPendingDuplicatedCampaignLine(result: DuplicatedCampaignResult): string {
+  const expectedName = result.campaignName || 'không rõ';
+  const taskId = result.taskId || 'không rõ';
+  return `⏳ Task <code>${escapeHtml(taskId)}</code> · Tên dự kiến: ${escapeHtml(expectedName)}`;
 }
 
 function getAccountTrackingLabel(
@@ -2207,6 +2215,7 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
 
   try {
     const duplicatedCampaigns: DuplicatedCampaignResult[] = [];
+    const pendingCampaigns: DuplicatedCampaignResult[] = [];
     const errors: string[] = [];
 
     for (let i = 0; i < job.quantity; i++) {
@@ -2215,13 +2224,29 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
           overrideBudget: job.budget,
           overrideBid: job.bid,
         });
-        if (result) {
+        if (!result) {
+          errors.push(`Không nhận được kết quả nhân bản (lần ${i + 1}).`);
+          continue;
+        }
+
+        if (result.status === 'pending') {
+          pendingCampaigns.push(result);
+          continue;
+        }
+
+        if (result.campaignId) {
           duplicatedCampaigns.push(result);
           try {
-            await recordCampaignClone(job.campaignId, result);
+            await recordCampaignClone(job.campaignId, {
+              campaignId: result.campaignId,
+              advertiserId: result.advertiserId,
+              campaignName: result.campaignName,
+            });
           } catch (recordError) {
             console.error('Không ghi được bộ đếm nhân bản campaign:', recordError);
           }
+        } else {
+          errors.push(`Nhân bản lần ${i + 1} thiếu campaign ID.`);
         }
       } catch (err) {
         errors.push(err instanceof Error ? err.message : String(err));
@@ -2236,11 +2261,25 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
     }
     const permissionByAdvertiserId = buildAdvertiserPermissionMap(advertiserPermissions);
 
-    let finalMsg = `✅ <b>Kết quả nhân bản (${duplicatedCampaigns.length}/${job.quantity}):</b>\n\n`;
+    const createdCount = duplicatedCampaigns.length;
+    const pendingCount = pendingCampaigns.length;
+    const errorCount = errors.length;
+    const summaryIcon = errorCount > 0 && createdCount === 0 && pendingCount === 0
+      ? '❌'
+      : pendingCount > 0 && createdCount === 0
+        ? '⏳'
+        : '✅';
+
+    let finalMsg =
+      `${summaryIcon} <b>Kết quả nhân bản:</b> tạo <b>${createdCount}</b> · đang xử lý <b>${pendingCount}</b> · lỗi <b>${errorCount}</b> / tổng <b>${job.quantity}</b>\n\n`;
+
     if (duplicatedCampaigns.length > 0) {
       finalMsg += `Các camp mới:\n${duplicatedCampaigns.map(result =>
         formatDuplicatedCampaignResultLine(result, permissionByAdvertiserId)
       ).join('\n')}\n`;
+    }
+    if (pendingCampaigns.length > 0) {
+      finalMsg += `\n⏳ <b>Đang xử lý</b> (TikTok đã nhận task, camp có thể chưa hiện ngay):\n${pendingCampaigns.map(formatPendingDuplicatedCampaignLine).join('\n')}\n`;
     }
     const overrideWarnings = duplicatedCampaigns
       .flatMap(result => result.overrideWarnings || [])
@@ -2250,8 +2289,7 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
       if (overrideWarnings.length > 1) finalMsg += ` (và ${overrideWarnings.length - 1} cảnh báo khác)`;
     }
     if (errors.length > 0) {
-      finalMsg += `\n❌ <b>Lỗi:</b>\n${escapeHtml(errors[0])}`;
-      if (errors.length > 1) finalMsg += ` (và ${errors.length - 1} lỗi khác)`;
+      finalMsg += `\n❌ <b>Lỗi:</b>\n${errors.map(error => `• ${escapeHtml(error)}`).join('\n')}`;
     }
 
     await updateXcampQueueMessage(job, finalMsg);

@@ -182,10 +182,13 @@ export interface TikTokCampaignAdsStatus {
 }
 
 export interface TikTokDuplicateCampaignResult {
-  campaignId: string;
+  campaignId?: string;
   advertiserId: string;
   campaignName?: string;
   overrideWarnings?: string[];
+  /** Smart+ async: TikTok accepted the task but campaign_id is not ready yet */
+  status?: 'created' | 'pending';
+  taskId?: string;
 }
 
 export interface TikTokCampaignCloneDefaults {
@@ -1871,6 +1874,7 @@ export async function duplicateCampaign(
           campaignId: result.campaignId,
           advertiserId: result.advertiserId,
           campaignName: result.campaignName,
+          status: 'created',
         };
       }
 
@@ -1880,8 +1884,18 @@ export async function duplicateCampaign(
         );
       }
 
+      // Smart+ create_by_snap accepted the async task; campaign may still be settling.
+      if (result.status === 'queued') {
+        return {
+          advertiserId: result.advertiserId,
+          campaignName: result.campaignName,
+          taskId: result.taskId,
+          status: 'pending',
+        };
+      }
+
       throw new Error(
-        `TikTok moi tiep nhan yeu cau nhan ban Smart+ chua tao xong campaign that. Task ID: ${result.taskId || 'khong ro'}. Ten du kien: ${result.campaignName || 'khong ro'}`
+        `Nhan ban Smart+ khong ro trang thai. Task ID: ${result.taskId || 'khong ro'}. Ten du kien: ${result.campaignName || 'khong ro'}`
       );
     } catch (error: any) {
       console.error('[SmartPlus Duplicator] Error duplicating Smart+ campaign:', error);

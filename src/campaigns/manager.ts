@@ -23,6 +23,11 @@ export async function duplicateCampaign(
     throw new Error(`Could not duplicate campaign: ${originalCampaignId}`);
   }
 
+  // Pending Smart+ clones have no campaignId yet but are valid accepted results.
+  if (duplicateResult.status !== 'pending' && !duplicateResult.campaignId) {
+    throw new Error(`Could not duplicate campaign: ${originalCampaignId}`);
+  }
+
   return duplicateResult;
 }
 
