@@ -17,6 +17,16 @@ services:
       PW_SIGNER_CHROMIUM_ARGS: "${PW_SIGNER_CHROMIUM_ARGS:---disable-dev-shm-usage,--no-zygote}"
       DATABASE_PATH: "/app/runtime/bot_data.db"
       PW_SIGNER_STATE_PATH: "/app/runtime/playwright-signer/session.json"
+      HTTP_TIMEOUT_MS: "${HTTP_TIMEOUT_MS:-30000}"
+      HTTP_MAX_RETRIES: "${HTTP_MAX_RETRIES:-2}"
+      SCHEDULER_LEVEL1_TIMEOUT_MINUTES: "${SCHEDULER_LEVEL1_TIMEOUT_MINUTES:-10}"
+      SCHEDULER_LEVEL2_TIMEOUT_MINUTES: "${SCHEDULER_LEVEL2_TIMEOUT_MINUTES:-20}"
+      SCHEDULER_LEVEL3_TIMEOUT_MINUTES: "${SCHEDULER_LEVEL3_TIMEOUT_MINUTES:-30}"
     volumes:
       - ./runtime:/app/runtime
     shm_size: 1gb
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
