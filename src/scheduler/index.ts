@@ -9,6 +9,29 @@ import {
 } from '../settings/runtime.js';
 import type { Telegraf } from 'telegraf';
 
+type SchedulerLevel = 'level1' | 'level2' | 'level3';
+
+interface SchedulerLevelState {
+  running: boolean;
+  intervalMinutes: number;
+  timeoutMs: number;
+  lastStartedAt?: number;
+  lastFinishedAt?: number;
+  lastSuccessAt?: number;
+  lastFailureAt?: number;
+  lastDurationMs?: number;
+  lastError?: string;
+  consecutiveFailures: number;
+  runCount: number;
+  successCount: number;
+}
+
+export interface SchedulerHealthSnapshot {
+  generation: number;
+  restartRequested: boolean;
+  levels: Record<SchedulerLevel, SchedulerLevelState>;
+}
+
 let botInstance: Telegraf | undefined;
 let level1SchedulerHandle: NodeJS.Timeout | undefined;
 let level2SchedulerHandle: NodeJS.Timeout | undefined;
@@ -16,40 +39,64 @@ let level3SchedulerHandle: NodeJS.Timeout | undefined;
 let level1InitialHandle: NodeJS.Timeout | undefined;
 let level2InitialHandle: NodeJS.Timeout | undefined;
 let level3InitialHandle: NodeJS.Timeout | undefined;
-let isLevel1Running = false;
-let isLevel2Running = false;
-let isLevel3Running = false;
+let watchdogHandle: NodeJS.Timeout | undefined;
 let schedulerGeneration = 0;
-let scheduledTaskQueue: Promise<void> = Promise.resolve();
-const queuedSchedulerTasks = new Set<string>();
+let restartRequested = false;
 
 const LEVEL1_INITIAL_DELAY_MS = 2 * 60 * 1000;
 const LEVEL2_INITIAL_DELAY_MS = 5 * 60 * 1000;
 const LEVEL3_INITIAL_DELAY_MS = 8 * 60 * 1000;
+const WATCHDOG_INTERVAL_MS = 60 * 1000;
 
-function enqueueScheduledTask(
-  level: 'level1' | 'level2' | 'level3',
-  generation: number,
-  task: () => Promise<void>
-): void {
-  const queueKey = `${generation}:${level}`;
-  if (queuedSchedulerTasks.has(queueKey)) {
-    console.log(`Skipping ${level} enqueue because it is already running or queued`);
-    return;
+const DEFAULT_JOB_TIMEOUT_MINUTES: Record<SchedulerLevel, number> = {
+  level1: 10,
+  level2: 20,
+  level3: 30,
+};
+
+const levelStates: Record<SchedulerLevel, SchedulerLevelState> = {
+  level1: {
+    running: false,
+    intervalMinutes: RUNTIME_SETTING_DEFAULTS.level1IntervalMinutes,
+    timeoutMs: DEFAULT_JOB_TIMEOUT_MINUTES.level1 * 60 * 1000,
+    consecutiveFailures: 0,
+    runCount: 0,
+    successCount: 0,
+  },
+  level2: {
+    running: false,
+    intervalMinutes: RUNTIME_SETTING_DEFAULTS.level2IntervalMinutes,
+    timeoutMs: DEFAULT_JOB_TIMEOUT_MINUTES.level2 * 60 * 1000,
+    consecutiveFailures: 0,
+    runCount: 0,
+    successCount: 0,
+  },
+  level3: {
+    running: false,
+    intervalMinutes: RUNTIME_SETTING_DEFAULTS.level3IntervalMinutes,
+    timeoutMs: DEFAULT_JOB_TIMEOUT_MINUTES.level3 * 60 * 1000,
+    consecutiveFailures: 0,
+    runCount: 0,
+    successCount: 0,
+  },
+};
+
+class SchedulerJobTimeoutError extends Error {
+  constructor(level: SchedulerLevel, timeoutMs: number) {
+    super(`${level} exceeded hard timeout of ${Math.round(timeoutMs / 60_000)} minutes`);
+    this.name = 'SchedulerJobTimeoutError';
   }
+}
 
-  queuedSchedulerTasks.add(queueKey);
-  scheduledTaskQueue = scheduledTaskQueue
-    .catch(() => undefined)
-    .then(async () => {
-      if (generation !== schedulerGeneration) {
-        return;
-      }
-      await task();
-    })
-    .finally(() => {
-      queuedSchedulerTasks.delete(queueKey);
-    });
+function parsePositiveEnvNumber(name: string, fallback: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getJobTimeoutMs(level: SchedulerLevel): number {
+  const envName = `SCHEDULER_${level.toUpperCase()}_TIMEOUT_MINUTES`;
+  const minutes = parsePositiveEnvNumber(envName, DEFAULT_JOB_TIMEOUT_MINUTES[level]);
+  return Math.max(1, minutes) * 60 * 1000;
 }
 
 function minutesToMilliseconds(minutes: number, fallbackMinutes: number): number {
@@ -57,87 +104,144 @@ function minutesToMilliseconds(minutes: number, fallbackMinutes: number): number
   return Math.max(1, safeMinutes) * 60 * 1000;
 }
 
-async function runScheduledCheck(): Promise<void> {
-  if (!botInstance) {
-    console.error('Bot instance not available for scheduled task');
-    return;
+function formatError(error: unknown): string {
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}`;
   }
+  return String(error);
+}
 
-  if (isLevel1Running) {
-    console.log('Skipping level 1 scheduled task because the previous run is still in progress');
-    return;
-  }
+function requestProcessRestart(reason: string): void {
+  if (restartRequested) return;
+  restartRequested = true;
 
-  isLevel1Running = true;
-  console.log('Running level 1 scheduled task: Fetch TikTok Ads data and check alerts');
+  console.error(`[WATCHDOG] ${reason}`);
+  console.error('[WATCHDOG] Exiting process so Docker restart policy can recover the bot.');
+
+  setTimeout(() => process.exit(1), 1_000);
+}
+
+async function withHardTimeout<T>(
+  level: SchedulerLevel,
+  timeoutMs: number,
+  task: () => Promise<T>
+): Promise<T> {
+  let timeoutHandle: NodeJS.Timeout | undefined;
 
   try {
-    await checkAndSendAlerts(botInstance);
-    console.log('Level 1 scheduled task completed successfully');
-  } catch (error) {
-    console.error('Error in level 1 scheduled task:', error);
+    return await Promise.race([
+      task(),
+      new Promise<T>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new SchedulerJobTimeoutError(level, timeoutMs));
+        }, timeoutMs);
+      }),
+    ]);
   } finally {
-    isLevel1Running = false;
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
   }
+}
+
+async function runLevelJob(
+  level: SchedulerLevel,
+  label: string,
+  task: () => Promise<void>
+): Promise<void> {
+  if (!botInstance) {
+    console.error(`Bot instance not available for ${level} scheduled task`);
+    return;
+  }
+
+  const state = levelStates[level];
+  if (state.running) {
+    console.log(`Skipping ${level} scheduled task because the previous run is still in progress`);
+    return;
+  }
+
+  state.running = true;
+  state.runCount += 1;
+  state.lastStartedAt = Date.now();
+  state.timeoutMs = getJobTimeoutMs(level);
+  state.lastError = undefined;
+
+  console.log(`Running ${level} scheduled task: ${label}`);
+
+  try {
+    await withHardTimeout(level, state.timeoutMs, task);
+
+    state.lastSuccessAt = Date.now();
+    state.successCount += 1;
+    state.consecutiveFailures = 0;
+    console.log(`${level} scheduled task completed successfully`);
+  } catch (error) {
+    state.lastFailureAt = Date.now();
+    state.consecutiveFailures += 1;
+    state.lastError = formatError(error);
+    console.error(`Error in ${level} scheduled task:`, error);
+
+    if (error instanceof SchedulerJobTimeoutError) {
+      requestProcessRestart(`${level} is stuck: ${error.message}`);
+    }
+  } finally {
+    state.lastFinishedAt = Date.now();
+    state.lastDurationMs = state.lastStartedAt
+      ? state.lastFinishedAt - state.lastStartedAt
+      : undefined;
+    state.running = false;
+  }
+}
+
+async function runScheduledCheck(): Promise<void> {
+  await runLevelJob(
+    'level1',
+    'Fetch TikTok Ads data and check alerts',
+    async () => checkAndSendAlerts(botInstance!)
+  );
 }
 
 async function runLevel2ScheduledCheck(): Promise<void> {
-  if (!botInstance) {
-    console.error('Bot instance not available for level 2 scheduled task');
-    return;
-  }
-
-  if (isLevel2Running) {
-    console.log('Skipping level 2 scheduled task because the previous run is still in progress');
-    return;
-  }
-
-  isLevel2Running = true;
-  console.log('Running level 2 scheduled task: Check product CP ads alerts (today)');
-
-  try {
-    await checkAndSendLevel2Alerts(botInstance);
-    console.log('Level 2 scheduled task completed successfully');
-  } catch (error) {
-    console.error('Error in level 2 scheduled task:', error);
-  } finally {
-    isLevel2Running = false;
-  }
+  await runLevelJob(
+    'level2',
+    'Check product CP ads alerts (today)',
+    async () => checkAndSendLevel2Alerts(botInstance!)
+  );
 }
 
 async function runLevel3ScheduledCheck(): Promise<void> {
-  if (!botInstance) {
-    console.error('Bot instance not available for level 3 scheduled task');
-    return;
-  }
-
-  if (isLevel3Running) {
-    console.log('Skipping level 3 scheduled task because the previous run is still in progress');
-    return;
-  }
-
-  isLevel3Running = true;
-  console.log('Running level 3 scheduled task: Check product CP ads alerts (month-to-date)');
-
-  try {
-    await checkAndSendLevel3Alerts(botInstance);
-    console.log('Level 3 scheduled task completed successfully');
-  } catch (error) {
-    console.error('Error in level 3 scheduled task:', error);
-  } finally {
-    isLevel3Running = false;
-  }
+  await runLevelJob(
+    'level3',
+    'Check product CP ads alerts (month-to-date)',
+    async () => checkAndSendLevel3Alerts(botInstance!)
+  );
 }
 
-export function startScheduler(bot: Telegraf) {
-  botInstance = bot;
-  void restartScheduler();
+function startWatchdog(): void {
+  if (watchdogHandle) return;
+
+  watchdogHandle = setInterval(() => {
+    if (restartRequested) return;
+
+    const now = Date.now();
+    for (const level of ['level1', 'level2', 'level3'] as SchedulerLevel[]) {
+      const state = levelStates[level];
+      if (!state.running || !state.lastStartedAt) continue;
+
+      const runtimeMs = now - state.lastStartedAt;
+      if (runtimeMs > state.timeoutMs + WATCHDOG_INTERVAL_MS) {
+        requestProcessRestart(
+          `${level} watchdog detected a stuck job after ${Math.round(runtimeMs / 1000)} seconds`
+        );
+        return;
+      }
+    }
+  }, WATCHDOG_INTERVAL_MS);
+
+  watchdogHandle.unref();
 }
 
-export async function restartScheduler(): Promise<void> {
-  schedulerGeneration += 1;
-  const generation = schedulerGeneration;
-
+function clearSchedulerTimers(): void {
   if (level1InitialHandle) {
     clearTimeout(level1InitialHandle);
     level1InitialHandle = undefined;
@@ -167,6 +271,19 @@ export async function restartScheduler(): Promise<void> {
     clearInterval(level3SchedulerHandle);
     level3SchedulerHandle = undefined;
   }
+}
+
+export function startScheduler(bot: Telegraf): void {
+  botInstance = bot;
+  startWatchdog();
+  void restartScheduler();
+}
+
+export async function restartScheduler(): Promise<void> {
+  schedulerGeneration += 1;
+  const generation = schedulerGeneration;
+
+  clearSchedulerTimers();
 
   if (!botInstance) {
     return;
@@ -186,40 +303,64 @@ export async function restartScheduler(): Promise<void> {
     RUNTIME_SETTING_DEFAULTS.level3IntervalMinutes
   );
 
+  levelStates.level1.intervalMinutes = settings.level1IntervalMinutes;
+  levelStates.level2.intervalMinutes = settings.level2IntervalMinutes;
+  levelStates.level3.intervalMinutes = settings.level3IntervalMinutes;
+  levelStates.level1.timeoutMs = getJobTimeoutMs('level1');
+  levelStates.level2.timeoutMs = getJobTimeoutMs('level2');
+  levelStates.level3.timeoutMs = getJobTimeoutMs('level3');
+
   level1InitialHandle = setTimeout(() => {
     if (generation !== schedulerGeneration) return;
     level1InitialHandle = undefined;
     level1SchedulerHandle = setInterval(() => {
-      enqueueScheduledTask('level1', generation, runScheduledCheck);
+      void runScheduledCheck();
     }, level1IntervalMs);
-    enqueueScheduledTask('level1', generation, runScheduledCheck);
+    void runScheduledCheck();
   }, LEVEL1_INITIAL_DELAY_MS);
 
   level2InitialHandle = setTimeout(() => {
     if (generation !== schedulerGeneration) return;
     level2InitialHandle = undefined;
     level2SchedulerHandle = setInterval(() => {
-      enqueueScheduledTask('level2', generation, runLevel2ScheduledCheck);
+      void runLevel2ScheduledCheck();
     }, level2IntervalMs);
-    enqueueScheduledTask('level2', generation, runLevel2ScheduledCheck);
+    void runLevel2ScheduledCheck();
   }, LEVEL2_INITIAL_DELAY_MS);
 
   level3InitialHandle = setTimeout(() => {
     if (generation !== schedulerGeneration) return;
     level3InitialHandle = undefined;
     level3SchedulerHandle = setInterval(() => {
-      enqueueScheduledTask('level3', generation, runLevel3ScheduledCheck);
+      void runLevel3ScheduledCheck();
     }, level3IntervalMs);
-    enqueueScheduledTask('level3', generation, runLevel3ScheduledCheck);
+    void runLevel3ScheduledCheck();
   }, LEVEL3_INITIAL_DELAY_MS);
 
   console.log(
-    `Scheduler armed: level 1 starts after 2m then every ${settings.level1IntervalMinutes}m, ` +
+    `Scheduler armed independently: level 1 starts after 2m then every ${settings.level1IntervalMinutes}m, ` +
     `level 2 starts after 5m then every ${settings.level2IntervalMinutes}m, ` +
     `level 3 starts after 8m then every ${settings.level3IntervalMinutes}m`
   );
+  console.log(
+    `Scheduler hard timeouts: L1=${Math.round(levelStates.level1.timeoutMs / 60_000)}m, ` +
+    `L2=${Math.round(levelStates.level2.timeoutMs / 60_000)}m, ` +
+    `L3=${Math.round(levelStates.level3.timeoutMs / 60_000)}m`
+  );
 }
 
-export async function manualTriggerDataFetch() {
+export function getSchedulerHealthSnapshot(): SchedulerHealthSnapshot {
+  return {
+    generation: schedulerGeneration,
+    restartRequested,
+    levels: {
+      level1: { ...levelStates.level1 },
+      level2: { ...levelStates.level2 },
+      level3: { ...levelStates.level3 },
+    },
+  };
+}
+
+export async function manualTriggerDataFetch(): Promise<void> {
   await runScheduledCheck();
 }
