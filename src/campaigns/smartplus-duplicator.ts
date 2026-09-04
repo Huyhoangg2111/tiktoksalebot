@@ -5,12 +5,11 @@ const DEFAULT_SIGNER_URL = 'http://127.0.0.1:8092';
 const DEFAULT_SIGNER_TIMEOUT_MS = 30_000;         // timeout mỗi request API (30s)
 const SIGNER_STATUS_POLL_INTERVAL_MS = 2_000;     // poll login status mỗi 2s
 const CAMPAIGN_LOOKUP_PAGE_SIZE = 100;
-const DEFAULT_CAMPAIGN_SETTLE_TIMEOUT_MS = 300_000;    // tong thoi gian cho campaign on dinh (300s)
+const DEFAULT_CAMPAIGN_SETTLE_TIMEOUT_MS = 120_000;    // tong thoi gian cho campaign on dinh (120s)
 const DEFAULT_CAMPAIGN_POLL_INTERVAL_MS = 3_000;       // poll danh sách campaign mỗi 3s
-const DEFAULT_CAMPAIGN_DISCOVERY_TIMEOUT_MS = 90_000;  // tim campaign moi toi da 90s
+const DEFAULT_CAMPAIGN_DISCOVERY_TIMEOUT_MS = 60_000;  // tim campaign moi toi da 60s
 const DEFAULT_DRAFT_PUBLISH_TIMEOUT_MS = 60_000;       // UI publish draft toi da 60s
-const DEFAULT_TASK_RESULT_TIMEOUT_MS = 180_000;        // poll async task toi da 180s
-const DEFAULT_QUEUED_RETRY_TIMEOUT_MS = 60_000;        // them 1 lan poll ngan truoc khi tra queued
+const DEFAULT_TASK_RESULT_TIMEOUT_MS = 90_000;         // poll async task toi da 90s
 const CAMPAIGN_CREATE_TIME_GRACE_MS = 120_000;
 const MINIMUM_CAMPAIGN_DURATION_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_CLONE_START_DELAY_SECONDS = 120;
@@ -143,26 +142,6 @@ function buildUniqueCampaignName(baseName: string, originalCampaignId: string): 
   const truncatedBaseName = normalizedBaseName.slice(0, Math.max(1, maxBaseLength)).trim();
 
   return `${truncatedBaseName} ${suffix}`;
-}
-
-/** Exact match, or same unique suffix + shared name prefix (TikTok may lightly alter the display name). */
-function doesCampaignNameMatch(actualName: string, targetName: string): boolean {
-  const actual = String(actualName || '').trim();
-  const target = String(targetName || '').trim();
-  if (!actual || !target) return false;
-  if (actual === target) return true;
-
-  const suffixMatch = target.match(/(\d{8,}-\d{4})\s*$/);
-  if (!suffixMatch) return false;
-
-  const suffix = suffixMatch[1];
-  if (!actual.includes(suffix)) return false;
-
-  const targetPrefix = target.slice(0, target.length - suffix.length).trim();
-  if (!targetPrefix) return false;
-
-  const prefixLen = Math.min(24, targetPrefix.length);
-  return actual.startsWith(targetPrefix.slice(0, prefixLen));
 }
 
 function parseTikTokDateTime(value: unknown): Date | null {
@@ -345,10 +324,6 @@ function getSmartPlusSignerConfig() {
     campaignPollIntervalMs: parsePositiveNumber(process.env.SMARTPLUS_CAMPAIGN_POLL_INTERVAL_MS, DEFAULT_CAMPAIGN_POLL_INTERVAL_MS),
     draftPublishTimeoutMs: parsePositiveNumber(process.env.SMARTPLUS_DRAFT_PUBLISH_TIMEOUT_MS, DEFAULT_DRAFT_PUBLISH_TIMEOUT_MS),
     taskResultTimeoutMs: parsePositiveNumber(process.env.SMARTPLUS_TASK_RESULT_TIMEOUT_MS, DEFAULT_TASK_RESULT_TIMEOUT_MS),
-    queuedRetryTimeoutMs: parsePositiveNumber(
-      process.env.SMARTPLUS_QUEUED_RETRY_TIMEOUT_MS,
-      DEFAULT_QUEUED_RETRY_TIMEOUT_MS
-    ),
     cloneStartDelayMs: parsePositiveNumber(
       process.env.SMARTPLUS_CLONE_START_DELAY_SECONDS,
       DEFAULT_CLONE_START_DELAY_SECONDS
@@ -492,7 +467,7 @@ async function waitForCreatedCampaign(params: {
             !createdAtMs ||
             createdAtMs >= params.createdAfterMs - CAMPAIGN_CREATE_TIME_GRACE_MS
           ) &&
-          doesCampaignNameMatch(String(c.campaign_name || ''), params.targetCampaignName)
+          String(c.campaign_name || '').trim() === params.targetCampaignName
         );
       })
       .sort((a, b) => {
@@ -1563,60 +1538,6 @@ export async function duplicateSmartPlusCampaign(
     return {
       status: createdCampaign.status,
       campaignId: createdCampaign.campaignId,
-      taskId: asyncRequestId || campaignSnapId,
-      campaignName: targetCampaignName,
-      advertiserId,
-    };
-  }
-
-  // One capped extra wait before reporting queued/pending to Telegram.
-  const queuedRetryTimeoutMs = Math.max(cfg.campaignPollIntervalMs, cfg.queuedRetryTimeoutMs);
-  console.warn(
-    `[SmartPlus] Chua thay campaign sau settle. Thu poll them toi da ${queuedRetryTimeoutMs}ms (async_request_id=${asyncRequestId || 'n/a'}).`
-  );
-
-  if (asyncRequestId) {
-    const retryAsync = await pollAsyncTaskResult({
-      advertiserId,
-      asyncRequestId,
-      signerBaseUrl: cfg.baseUrl,
-      signerTimeoutMs: cfg.timeoutMs,
-      timeoutMs: queuedRetryTimeoutMs,
-      pollIntervalMs: cfg.campaignPollIntervalMs,
-      ignoredCampaignIds: existingCampaignIds,
-    });
-
-    if (retryAsync?.failed) {
-      throw new Error(`Async task bi loi: ${retryAsync.reason || 'Unknown'}`);
-    }
-
-    if (retryAsync?.campaignId && !existingCampaignIds.has(retryAsync.campaignId)) {
-      console.log(`[SmartPlus] Campaign xuat hien o lan poll them: ${retryAsync.campaignId}`);
-      return {
-        status: 'created',
-        campaignId: retryAsync.campaignId,
-        taskId: asyncRequestId,
-        campaignName: targetCampaignName,
-        advertiserId,
-      };
-    }
-  }
-
-  const retryCampaign = await waitForCreatedCampaign({
-    advertiserId,
-    originalCampaignId,
-    targetCampaignName,
-    timeoutMs: queuedRetryTimeoutMs,
-    pollIntervalMs: cfg.campaignPollIntervalMs,
-    returnDraftImmediately: true,
-    existingCampaignIds,
-    createdAfterMs: duplicateStartedAtMs,
-  });
-
-  if (retryCampaign) {
-    return {
-      status: retryCampaign.status,
-      campaignId: retryCampaign.campaignId,
       taskId: asyncRequestId || campaignSnapId,
       campaignName: targetCampaignName,
       advertiserId,

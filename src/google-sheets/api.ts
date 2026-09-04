@@ -62,6 +62,13 @@ interface SalesSheetTarget {
   aliases: string[];
 }
 
+/**
+ * Tabs doanh số được cộng vào báo cáo chốt.
+ *
+ * Không gồm Hàn Quốc: tab này đang đẩy tổng chốt lệch so với kiểm tra tay
+ * (tháng/ngày MKT80 cao hơn đúng bằng các dòng HÀN QUỐC / VNKR).
+ * Chỉ lấy các tab sale chính đã dùng khi đối soát sheet.
+ */
 const SALES_SHEET_TARGETS: SalesSheetTarget[] = [
   {
     displayName: 'ĐÀI LOAN',
@@ -74,10 +81,6 @@ const SALES_SHEET_TARGETS: SalesSheetTarget[] = [
   {
     displayName: 'NHẬT',
     aliases: ['nhật', 'nhat'],
-  },
-  {
-    displayName: 'HÀN QUỐC',
-    aliases: ['hàn quốc', 'han quoc'],
   },
 ];
 
@@ -184,41 +187,102 @@ function parseNumber(value: unknown): number {
   return Number(normalized.replace(/[^\d.-]/g, ''));
 }
 
-export function parseSalesDate(value: unknown): Date | undefined {
-  if (typeof value === 'number' && value > 20000) {
+function isValidCalendarDate(year: number, month: number, day: number): boolean {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return false;
+  }
+
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    return false;
+  }
+
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  return (
+    probe.getUTCFullYear() === year &&
+    probe.getUTCMonth() === month - 1 &&
+    probe.getUTCDate() === day
+  );
+}
+
+/**
+ * Parse a sheet date into calendar parts (dd/mm/yyyy or Excel serial).
+ * Time-of-day is ignored so day boundaries stay stable on UTC VPS.
+ */
+export function parseSalesDateParts(
+  value: unknown
+): { year: number; month: number; day: number } | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 20000) {
     const wholeDays = Math.floor(value);
+    // Excel/Google serial epoch 1899-12-30, anchor at UTC noon.
     const timestamp = (wholeDays - 25569) * 86400 * 1000 + 12 * 60 * 60 * 1000;
-    return new Date(timestamp);
+    const serialDate = new Date(timestamp);
+
+    return {
+      year: serialDate.getUTCFullYear(),
+      month: serialDate.getUTCMonth() + 1,
+      day: serialDate.getUTCDate(),
+    };
   }
 
   const rawValue = String(value ?? '').trim();
-
   if (!rawValue) {
     return undefined;
   }
 
-  const dateMatch = rawValue.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
-  if (dateMatch) {
-    const day = Number(dateMatch[1]);
-    const month = Number(dateMatch[2]);
-    const yearValue = Number(dateMatch[3]);
+  // Vietnamese sheet format: dd/mm/yyyy [hh:mm[:ss]] — ignore time for day key.
+  const dmyMatch = rawValue.match(
+    /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/
+  );
+  if (dmyMatch) {
+    const day = Number(dmyMatch[1]);
+    const month = Number(dmyMatch[2]);
+    const yearValue = Number(dmyMatch[3]);
     const year = yearValue < 100 ? yearValue + 2000 : yearValue;
-    const hour = Number(dateMatch[4] || 0);
-    const minute = Number(dateMatch[5] || 0);
-    const second = Number(dateMatch[6] || 0);
-    const parsedDate = new Date(year, month - 1, day, hour, minute, second);
 
-    if (
-      parsedDate.getFullYear() === year &&
-      parsedDate.getMonth() === month - 1 &&
-      parsedDate.getDate() === day
-    ) {
-      return parsedDate;
+    if (isValidCalendarDate(year, month, day)) {
+      return { year, month, day };
     }
   }
 
-  const directDate = new Date(rawValue);
-  return Number.isNaN(directDate.getTime()) ? undefined : directDate;
+  // ISO date (optionally with time): yyyy-mm-dd
+  const isoMatch = rawValue.match(
+    /^(\d{4})-(\d{2})-(\d{2})(?:[T\s].*)?$/
+  );
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+
+    if (isValidCalendarDate(year, month, day)) {
+      return { year, month, day };
+    }
+  }
+
+  return undefined;
+}
+
+export function formatSalesDateKey(value: unknown): string | undefined {
+  // Dates created by parseSalesDate() are UTC noon of the calendar day.
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return `${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, '0')}-${String(value.getUTCDate()).padStart(2, '0')}`;
+  }
+
+  const parts = parseSalesDateParts(value);
+  if (!parts) {
+    return undefined;
+  }
+
+  return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
+}
+
+export function parseSalesDate(value: unknown): Date | undefined {
+  const parts = parseSalesDateParts(value);
+  if (!parts) {
+    return undefined;
+  }
+
+  // UTC noon keeps the calendar day stable under Asia/Ho_Chi_Minh formatting.
+  return new Date(Date.UTC(parts.year, parts.month - 1, parts.day, 12, 0, 0));
 }
 
 // Define interface for sales data
@@ -255,7 +319,7 @@ export interface MktScopeOptions {
   includeAllMkt?: boolean;
 }
 
-export type AlertComparisonOperator = 'gt' | 'lt' | 'eq' | 'gte' | 'lte';
+export type AlertComparisonOperator = 'gt' | 'lt' | 'eq' | 'gte' | 'lte' | 'between';
 export type AlertEntity = 'campaign' | 'ad';
 export type AlertMetric = 'cpa' | 'spend';
 export type AlertAction = 'pause' | 'enable' | 'notify';
@@ -267,6 +331,8 @@ export interface AlertActionRuleSheetRow {
   metric: AlertMetric;
   metricOperator: AlertComparisonOperator;
   metricThreshold: number;
+  /** Lower bound for metric range (used with operator `between` or as floor with upper threshold). */
+  metricMinThreshold?: number;
   conversionsOperator: AlertComparisonOperator;
   conversionsThreshold: number;
   action: AlertAction;
@@ -283,8 +349,12 @@ export interface PageMapping {
 }
 
 export interface SpMapping {
-  variantName: string; // Tên dài trên sheet doanh số
-  shortName: string;   // Tên ngắn (KEY MAP) trên tên chiến dịch
+  /** DANH MỤC — tên trên sheet doanh số (cột F). */
+  variantName: string;
+  /** KEY MAP — key trên tên campaign TikTok. */
+  shortName: string;
+  /** Tên vật tư chi tiết (SpMap cột B), dùng fallback khi sheet ghi SKU. */
+  materialName?: string;
 }
 
 export interface AdvertiserPermission {
@@ -418,13 +488,27 @@ function normalizeAlertAction(value: unknown): AlertAction | undefined {
   const normalized = String(value ?? '')
     .trim()
     .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
     .replace(/[\s-]+/g, '_');
 
   if (['pause', 'disable', 'stop', 'tat'].includes(normalized)) {
     return 'pause';
   }
 
-  if (['enable', 'start', 'bat'].includes(normalized)) {
+  // Re-enable paused campaigns (sheet may use enable / active / bat).
+  // "acitve" = typo thường gặp trên sheet.
+  if ([
+    'enable',
+    'start',
+    'bat',
+    'active',
+    'acitve',
+    'bat_lai',
+    'batlai',
+    'reenable',
+    're_enable',
+  ].includes(normalized)) {
     return 'enable';
   }
 
@@ -464,6 +548,8 @@ function normalizeComparisonOperator(
   const normalized = String(value ?? '')
     .trim()
     .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
     .replace(/\s+/g, '');
 
   if (['gt', '>', 'greaterthan'].includes(normalized)) {
@@ -486,7 +572,58 @@ function normalizeComparisonOperator(
     return 'eq';
   }
 
+  if ([
+    'between',
+    'range',
+    'inrange',
+    'in_range',
+    'trongkhoang',
+    'trong_khoang',
+    '~',
+    '..',
+  ].includes(normalized)) {
+    return 'between';
+  }
+
   return undefined;
+}
+
+/**
+ * Parse metric threshold that may be a single number or a range.
+ * Supported range forms: `0.5-1.2`, `0.5~1.2`, `0.5..1.2`, `0.5,1.2`, `0.5 – 1.2`.
+ */
+function parseMetricThresholdBounds(value: unknown): {
+  min?: number;
+  max?: number;
+  single?: number;
+} {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return { single: value };
+  }
+
+  const rawValue = String(value ?? '').trim();
+  if (!rawValue) {
+    return {};
+  }
+
+  const rangeMatch = rawValue.match(
+    /^([+-]?\d+(?:[.,]\d+)?)\s*(?:-|~|\.\.|,|–|—)\s*([+-]?\d+(?:[.,]\d+)?)$/
+  );
+
+  if (rangeMatch) {
+    const first = parseNumber(rangeMatch[1]);
+    const second = parseNumber(rangeMatch[2]);
+
+    if (Number.isFinite(first) && Number.isFinite(second)) {
+      return {
+        min: Math.min(first, second),
+        max: Math.max(first, second),
+      };
+    }
+  }
+
+  const single = parseNumber(rawValue);
+  return Number.isFinite(single) ? { single } : {};
 }
 
 function parseAlertEnabled(value: unknown): boolean {
@@ -507,6 +644,123 @@ function parseAlertEnabled(value: unknown): boolean {
   return true;
 }
 
+/**
+ * Parse one side of an alert rule (metric operator/threshold + conversions).
+ * Supports single number or range threshold (between).
+ */
+function parseMetricSide(
+  operatorValue: unknown,
+  thresholdValue: unknown,
+  conversionsOperatorValue: unknown,
+  conversionsThresholdValue: unknown,
+  metricMinValue?: unknown
+): {
+  metricOperator?: AlertComparisonOperator;
+  threshold: number;
+  metricMinThreshold?: number;
+  conversionsOperator?: AlertComparisonOperator;
+  conversionsThreshold: number;
+} {
+  let metricOperator = normalizeComparisonOperator(operatorValue);
+  const thresholdBounds = parseMetricThresholdBounds(thresholdValue);
+  const conversionsOperator = normalizeComparisonOperator(conversionsOperatorValue);
+  const conversionsThreshold = parseNumber(conversionsThresholdValue);
+  const explicitMetricMin = parseNumber(metricMinValue);
+
+  if (thresholdBounds.min !== undefined && thresholdBounds.max !== undefined) {
+    metricOperator = 'between';
+  }
+
+  let threshold = Number.NaN;
+  let metricMinThreshold: number | undefined;
+
+  if (metricOperator === 'between') {
+    metricMinThreshold = thresholdBounds.min;
+    threshold = thresholdBounds.max ?? Number.NaN;
+
+    if (
+      !Number.isFinite(metricMinThreshold) &&
+      Number.isFinite(explicitMetricMin) &&
+      thresholdBounds.single !== undefined &&
+      Number.isFinite(thresholdBounds.single)
+    ) {
+      const singleThreshold = thresholdBounds.single;
+      metricMinThreshold = Math.min(explicitMetricMin, singleThreshold);
+      threshold = Math.max(explicitMetricMin, singleThreshold);
+    }
+  } else {
+    threshold = thresholdBounds.single ?? thresholdBounds.max ?? Number.NaN;
+    if (Number.isFinite(explicitMetricMin)) {
+      metricMinThreshold = explicitMetricMin;
+    } else if (thresholdBounds.min !== undefined) {
+      metricMinThreshold = thresholdBounds.min;
+    }
+  }
+
+  return {
+    metricOperator,
+    threshold,
+    metricMinThreshold,
+    conversionsOperator,
+    conversionsThreshold,
+  };
+}
+
+function isValidParsedAlertSide(side: {
+  metricOperator?: AlertComparisonOperator;
+  threshold: number;
+  metricMinThreshold?: number;
+  conversionsOperator?: AlertComparisonOperator;
+  conversionsThreshold: number;
+  action?: AlertAction;
+}): boolean {
+  return Boolean(
+    side.metricOperator &&
+    side.conversionsOperator &&
+    side.action &&
+    Number.isFinite(side.threshold) &&
+    Number.isFinite(side.conversionsThreshold) &&
+    (side.metricOperator !== 'between' || Number.isFinite(side.metricMinThreshold))
+  );
+}
+
+/**
+ * Dual-action row (pause + active trên 1 dòng), đúng format sheet:
+ * entity | match | metric |
+ *   pause_op | pause_thr | pause_cv_op | pause_cv_thr | pause |
+ *   active_op | active_thr | active_cv_op | active_cv_thr | active |
+ *   [enabled] | [note]
+ *
+ * Ví dụ:
+ * campaign | Mặt nạ mắt - ID | cpa | > | 0.7 | >= | 1 | pause | < | 0.7 | >= | 1 | active
+ */
+function isDualActionAlertRow(row: any[]): boolean {
+  const leftAction = normalizeAlertAction(row[7]);
+  const rightMetricOperator = normalizeComparisonOperator(row[8]);
+  const rightAction = normalizeAlertAction(row[12]);
+
+  return Boolean(
+    leftAction &&
+    (leftAction === 'pause' || leftAction === 'enable') &&
+    rightMetricOperator &&
+    rightAction &&
+    (rightAction === 'pause' || rightAction === 'enable') &&
+    leftAction !== rightAction
+  );
+}
+
+function defaultCampaignStatusForAction(action: AlertAction): AlertCampaignStatus | undefined {
+  if (action === 'enable') {
+    return 'paused';
+  }
+
+  if (action === 'pause') {
+    return 'active';
+  }
+
+  return undefined;
+}
+
 function parseAlertRuleRows(rows: any[][]): AlertActionRuleSheetRow[] {
   type ParsedAlertRow = {
     entity?: AlertEntity;
@@ -514,6 +768,7 @@ function parseAlertRuleRows(rows: any[][]): AlertActionRuleSheetRow[] {
     metric?: AlertMetric;
     metricOperator?: AlertComparisonOperator;
     threshold: number;
+    metricMinThreshold?: number;
     conversionsOperator?: AlertComparisonOperator;
     conversionsThreshold: number;
     action?: AlertAction;
@@ -522,47 +777,94 @@ function parseAlertRuleRows(rows: any[][]): AlertActionRuleSheetRow[] {
     note?: string;
   };
 
-  return rows
-    .slice(1)
-    .map<ParsedAlertRow>(row => {
-      const entity = normalizeAlertEntity(row[0]);
-      const nameContains = String(row[1] || '').trim() || undefined;
-      const metric = normalizeAlertMetric(row[2]);
-      const metricOperator = normalizeComparisonOperator(row[3]);
-      const threshold = parseNumber(row[4]);
-      const conversionsOperator = normalizeComparisonOperator(row[5]);
-      const conversionsThreshold = parseNumber(row[6]);
-      const inlineStatus = normalizeAlertCampaignStatus(row[7]);
-      const actionInDefaultColumn = normalizeAlertAction(row[7]);
-      const action = actionInDefaultColumn || normalizeAlertAction(row[8]);
-      const campaignStatus = actionInDefaultColumn
-        ? normalizeAlertCampaignStatus(row[10])
-        : inlineStatus;
-      const enabledIndex = actionInDefaultColumn ? 8 : 9;
-      const noteIndex = actionInDefaultColumn ? 9 : 10;
+  const parsedRows = rows.slice(1).flatMap<ParsedAlertRow>((row) => {
+    const entity = normalizeAlertEntity(row[0]);
+    const nameContains = String(row[1] || '').trim() || undefined;
+    const metric = normalizeAlertMetric(row[2]);
 
-      return {
-        entity,
-        nameContains,
-        metric,
-        metricOperator,
-        threshold,
-        conversionsOperator,
-        conversionsThreshold,
-        action,
-        campaignStatus,
-        isActive: parseAlertEnabled(row[enabledIndex]),
-        note: String(row[noteIndex] || '').trim() || undefined,
-      };
-    })
+    // ---- Format 1 dòng = tắt + bật lại ----
+    if (isDualActionAlertRow(row)) {
+      const leftAction = normalizeAlertAction(row[7]);
+      const rightAction = normalizeAlertAction(row[12]);
+      const leftSide = parseMetricSide(row[3], row[4], row[5], row[6]);
+      const rightSide = parseMetricSide(row[8], row[9], row[10], row[11]);
+      const isActive = parseAlertEnabled(row[13]);
+      const note = String(row[14] || '').trim() || undefined;
+
+      return [
+        {
+          entity,
+          nameContains,
+          metric,
+          metricOperator: leftSide.metricOperator,
+          threshold: leftSide.threshold,
+          metricMinThreshold: leftSide.metricMinThreshold,
+          conversionsOperator: leftSide.conversionsOperator,
+          conversionsThreshold: leftSide.conversionsThreshold,
+          action: leftAction,
+          campaignStatus: defaultCampaignStatusForAction(leftAction!),
+          isActive,
+          note: note ? `${note} [${leftAction}]` : undefined,
+        },
+        {
+          entity,
+          nameContains,
+          metric,
+          metricOperator: rightSide.metricOperator,
+          threshold: rightSide.threshold,
+          metricMinThreshold: rightSide.metricMinThreshold,
+          conversionsOperator: rightSide.conversionsOperator,
+          conversionsThreshold: rightSide.conversionsThreshold,
+          action: rightAction,
+          campaignStatus: defaultCampaignStatusForAction(rightAction!),
+          isActive,
+          note: note ? `${note} [${rightAction}]` : undefined,
+        },
+      ];
+    }
+
+    // ---- Format 1 action / 1 dòng (cũ) ----
+    const leftSide = parseMetricSide(row[3], row[4], row[5], row[6], row[11]);
+    let metricOperator = leftSide.metricOperator;
+    let threshold = leftSide.threshold;
+    let metricMinThreshold = leftSide.metricMinThreshold;
+    const conversionsOperator = leftSide.conversionsOperator;
+    const conversionsThreshold = leftSide.conversionsThreshold;
+
+    const inlineStatus = normalizeAlertCampaignStatus(row[7]);
+    const actionInDefaultColumn = normalizeAlertAction(row[7]);
+    const action = actionInDefaultColumn || normalizeAlertAction(row[8]);
+    let campaignStatus = actionInDefaultColumn
+      ? normalizeAlertCampaignStatus(row[10])
+      : inlineStatus;
+    const enabledIndex = actionInDefaultColumn ? 8 : 9;
+    const noteIndex = actionInDefaultColumn ? 9 : 10;
+
+    if (action && !campaignStatus) {
+      campaignStatus = defaultCampaignStatusForAction(action);
+    }
+
+    return [{
+      entity,
+      nameContains,
+      metric,
+      metricOperator,
+      threshold,
+      metricMinThreshold,
+      conversionsOperator,
+      conversionsThreshold,
+      action,
+      campaignStatus,
+      isActive: parseAlertEnabled(row[enabledIndex]),
+      note: String(row[noteIndex] || '').trim() || undefined,
+    }];
+  });
+
+  return parsedRows
     .filter((rule): rule is Required<Pick<ParsedAlertRow, 'entity' | 'metric' | 'metricOperator' | 'conversionsOperator' | 'action'>> & ParsedAlertRow =>
       Boolean(rule.entity) &&
       Boolean(rule.metric) &&
-      Boolean(rule.metricOperator) &&
-      Boolean(rule.conversionsOperator) &&
-      Boolean(rule.action) &&
-      Number.isFinite(rule.threshold) &&
-      Number.isFinite(rule.conversionsThreshold)
+      isValidParsedAlertSide(rule)
     )
     .map(rule => ({
       entity: rule.entity,
@@ -570,6 +872,7 @@ function parseAlertRuleRows(rows: any[][]): AlertActionRuleSheetRow[] {
       metric: rule.metric,
       metricOperator: rule.metricOperator,
       metricThreshold: rule.threshold,
+      metricMinThreshold: rule.metricMinThreshold,
       conversionsOperator: rule.conversionsOperator,
       conversionsThreshold: rule.conversionsThreshold,
       action: rule.action,
@@ -641,7 +944,7 @@ export async function getAlertRulesConfig(): Promise<AlertActionRuleSheetRow[]> 
 
   const response = await sheetsClient.spreadsheets.values.get({
     spreadsheetId: getConfigSheetId(),
-    range: 'Alerts!A:K',
+    range: 'Alerts!A:O',
   });
 
   return parseAlertRuleRows(response.data.values || []);
@@ -684,6 +987,15 @@ export async function getAccountBotCredentials(): Promise<AccountBotCredentials 
 }
 
 const ALERTS_SHEET_NAME = 'Alerts';
+/**
+ * Dual row (1 sản phẩm = tắt + bật lại):
+ * A entity | B campaign_match | C metric |
+ * D-G pause side | H pause |
+ * I-L active side | M active |
+ * N enabled | O note
+ *
+ * Single row (cũ) vẫn dùng: A-H action + enabled/note/status...
+ */
 const ALERTS_SHEET_HEADERS = [[
   'entity',
   'campaign_match',
@@ -693,21 +1005,19 @@ const ALERTS_SHEET_HEADERS = [[
   'conversions_operator',
   'conversions_threshold',
   'action',
+  'enable_metric_operator',
+  'enable_metric_threshold',
+  'enable_conversions_operator',
+  'enable_conversions_threshold',
+  'enable_action',
   'enabled',
   'note',
-  'campaign_status',
 ]];
 
 const ALERTS_SHEET_DEMO_ROWS = [
-  ['campaign', 'VN', 'cpa', '>', '1.20', '<', '3', 'pause', 'true', 'Camp VN CPA cao thi tat', ''],
-  ['campaign', 'VN', 'cpa', '<', '0.90', '>=', '3', 'enable', 'true', 'Camp VN CPA tot thi bat lai', ''],
-  ['campaign', 'VN', 'cpa', '<', '0.70', '>=', '1', 'notify', 'true', 'Camp VN CPA tot dang pause thi bao', 'paused'],
-  ['campaign', 'ID', 'cpa', '>', '1.60', '<', '3', 'pause', 'true', 'Camp ID CPA cao thi tat', ''],
-  ['campaign', 'ID', 'cpa', '<', '1.10', '>=', '3', 'enable', 'true', 'Camp ID CPA tot thi bat lai', ''],
-  ['ad', 'VN', 'cpa', '>', '1.20', '<', '3', 'notify', 'true', 'Ad thuoc camp VN CPA cao thi bao', ''],
-  ['ad', 'VN', 'cpa', '<', '0.90', '>=', '3', 'notify', 'true', 'Ad thuoc camp VN CPA tot thi bao', ''],
-  ['ad', 'ID', 'cpa', '>', '1.60', '<', '3', 'notify', 'true', 'Ad thuoc camp ID CPA cao thi bao', ''],
-  ['ad', 'ID', 'cpa', '<', '1.10', '>=', '3', 'notify', 'true', 'Ad thuoc camp ID CPA tot thi bao', ''],
+  // 1 dòng = pause + active. Phía active PHẢI dùng < / <= (metric tốt), KHÔNG dùng > (sẽ bị bot bỏ qua).
+  ['campaign', 'Mặt nạ mắt - ID', 'cpa', '>', '0.7', '>=', '1', 'pause', '<', '0.7', '>=', '3', 'active', 'true', 'CPA cao tat, CPA tot bat lai'],
+  ['campaign', 'VN', 'cpa', '<', '0.70', '>=', '5', 'notify', '', '', '', '', '', 'true', 'Chi bao CPA tot VN'],
 ];
 
 function normalizeSheetCell(value: unknown): string {
@@ -776,7 +1086,7 @@ export async function ensureAlertsSheetTemplate(): Promise<{
 
   await sheetsClient.spreadsheets.values.update({
     spreadsheetId,
-    range: `${ALERTS_SHEET_NAME}!A1:K1`,
+    range: `${ALERTS_SHEET_NAME}!A1:O1`,
     valueInputOption: 'RAW',
     requestBody: {
       values: ALERTS_SHEET_HEADERS,
@@ -785,7 +1095,7 @@ export async function ensureAlertsSheetTemplate(): Promise<{
 
   const currentRows = await sheetsClient.spreadsheets.values.get({
     spreadsheetId,
-    range: `${ALERTS_SHEET_NAME}!A2:K`,
+    range: `${ALERTS_SHEET_NAME}!A2:O`,
   });
 
   const dataRows = currentRows.data.values || [];
@@ -794,11 +1104,36 @@ export async function ensureAlertsSheetTemplate(): Promise<{
   if (clearedLegacyDemo) {
     await sheetsClient.spreadsheets.values.clear({
       spreadsheetId,
-      range: `${ALERTS_SHEET_NAME}!A2:K`,
+      range: `${ALERTS_SHEET_NAME}!A2:O`,
     });
   }
 
   return { created, clearedLegacyDemo };
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function runWorker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await worker(items[currentIndex]);
+    }
+  }
+
+  await Promise.all(Array.from({ length: limit }, () => runWorker()));
+  return results;
 }
 
 /**
@@ -811,102 +1146,107 @@ export async function getSalesData(options: MktScopeOptions = {}): Promise<Sales
 
   // Get configuration data first
   const configData = await getConfigData(configSheetId, sheetsClient, options);
-  
-  const salesData: SalesData[] = [];
 
-  // Read from each team sheet
-  for (const teamSheetId of configData.sources) {
+  // Read team sheets in parallel (bounded) — concurrency from /settings.
+  const sheetsConcurrency = await getRuntimeSettingNumber(
+    'sheets_concurrency',
+    RUNTIME_SETTING_DEFAULTS.sheetsConcurrency
+  );
+  const perSourceRows = await mapWithConcurrency(configData.sources, sheetsConcurrency, async (teamSheetId) => {
+    const salesData: SalesData[] = [];
+
     try {
-      // Get all sheet names in the team spreadsheet to find supported market tabs.
       const spreadsheet = await sheetsClient.spreadsheets.get({
         spreadsheetId: teamSheetId,
       });
       const spreadsheetName = spreadsheet.data.properties?.title || teamSheetId;
-
       const salesSheets = findSalesSheets(spreadsheet.data.sheets || []);
 
       if (salesSheets.length === 0) {
         console.warn(`Could not find supported sales tabs in sheet: ${teamSheetId}`);
-        continue;
+        return salesData;
       }
 
-      for (const salesSheet of salesSheets) {
-        const sheetName = salesSheet.sheet.properties?.title;
+      // Fetch market tabs in parallel within one source workbook.
+      const tabResults = await Promise.all(
+        salesSheets.map(async (salesSheet) => {
+          const sheetName = salesSheet.sheet.properties?.title;
+          if (!sheetName) {
+            return [] as SalesData[];
+          }
 
-        if (!sheetName) {
-          continue;
-        }
-
-        // Fetch data from the market tab
-        const response = await sheetsClient.spreadsheets.values.get({
-          spreadsheetId: teamSheetId,
-          range: formatSheetRange(sheetName, 'A:Z'), // Read from columns A to Z
-          valueRenderOption: 'UNFORMATTED_VALUE',
-          dateTimeRenderOption: 'SERIAL_NUMBER',
-        });
-
-        const rows = response.data.values;
-        if (!rows || rows.length === 0) {
-          console.log(`No data found in sheet: ${teamSheetId}, tab: ${sheetName}`);
-          continue;
-        }
-
-        for (let i = 1; i < rows.length; i++) { // Skip header row
-          const row = rows[i];
-
-          // Check if row has enough columns
-          if (row.length < 15) continue;
-
-          // Extract data according to your specification:
-          // A(0)=Time, D(3)=Shop Name, E(4)=MKT Code, F(5)=Product, G(6)=Channel Link, O(14)=Sales Amount, Q(16)=Status
-          const date = row[0]; // Column A (time)
-          const shopName = row[3]; // Column D (shop name)
-          const mktCode = String(row[4] || '').trim(); // Column E (MKT code)
-          const productName = row[5]; // Column F (product)
-          const channelLink = String(row[6] || '').trim(); // Column G (channel link)
-          const rawAmount = row[14]; // Column O (sales amount VND)
-          const status = String(row[16] || '').trim(); // Column Q (status)
-
-          // Verify that we have the required data
-          if (!date) continue;
-          if (!options.includeAllMkt && normalizeKey(mktCode) !== targetMktCode) continue;
-
-          // Convert the raw amount to a number
-          const hasAmount = String(rawAmount ?? '').trim() !== '';
-          const amountVnd = hasAmount ? parseNumber(rawAmount) : 0;
-
-          if (hasAmount && !Number.isFinite(amountVnd)) continue;
-
-          // Convert VND to USD using the exchange rate from config
-          const usdAmount = amountVnd / configData.exchangeRate;
-          const pageMapping = findPageMapping(configData.pageMap, channelLink, shopName);
-
-          salesData.push({
-            date: date,
-            amount: usdAmount, // Store amount in USD
-            amountVnd,
-            source: teamSheetId,
-            sourceName: spreadsheetName,
-            sourceTabName: sheetName,
-            sourceRowNumber: i + 1,
-            shopName: shopName,
-            mktCode: mktCode,
-            productName: productName,
-            channelLink: channelLink,
-            status: status,
-            pageHandle: pageMapping?.pageHandle,
-            pageName: pageMapping?.pageName,
-            marketCode: pageMapping?.marketCode,
+          const response = await sheetsClient.spreadsheets.values.get({
+            spreadsheetId: teamSheetId,
+            range: formatSheetRange(sheetName, 'A:Z'),
+            valueRenderOption: 'UNFORMATTED_VALUE',
+            dateTimeRenderOption: 'SERIAL_NUMBER',
           });
-        }
+
+          const rows = response.data.values;
+          if (!rows || rows.length === 0) {
+            return [] as SalesData[];
+          }
+
+          const tabSales: SalesData[] = [];
+
+          for (let i = 1; i < rows.length; i++) {
+            const row = rows[i];
+
+            const date = row[0];
+            const shopName = row[3];
+            const mktCode = String(row[4] || '').trim();
+            const productName = row[5];
+            const channelLink = String(row[6] || '').trim();
+            // O = DT thực, Q = status. Do not require length >= 15: Google omits
+            // trailing empty cells, so blank DT thực rows were being dropped.
+            const rawAmount = row.length > 14 ? row[14] : undefined;
+            const status = row.length > 16 ? String(row[16] || '').trim() : '';
+
+            if (!date) continue;
+            if (!options.includeAllMkt && normalizeKey(mktCode) !== targetMktCode) continue;
+
+            const hasAmount = String(rawAmount ?? '').trim() !== '';
+            const amountVnd = hasAmount ? parseNumber(rawAmount) : 0;
+            if (hasAmount && !Number.isFinite(amountVnd)) continue;
+
+            const usdAmount = amountVnd / configData.exchangeRate;
+            const pageMapping = findPageMapping(configData.pageMap, channelLink, shopName);
+
+            tabSales.push({
+              date,
+              amount: usdAmount,
+              amountVnd,
+              source: teamSheetId,
+              sourceName: spreadsheetName,
+              sourceTabName: sheetName,
+              sourceRowNumber: i + 1,
+              shopName,
+              mktCode,
+              productName,
+              channelLink,
+              status,
+              pageHandle: pageMapping?.pageHandle,
+              pageName: pageMapping?.pageName,
+              marketCode: pageMapping?.marketCode,
+            });
+          }
+
+          return tabSales;
+        })
+      );
+
+      for (const tabSales of tabResults) {
+        salesData.push(...tabSales);
       }
     } catch (error) {
       console.error(`Error reading team sheet ${teamSheetId}:`, error);
-      continue; // Continue with next sheet
     }
-  }
 
-  // Sort by date (assuming various date formats)
+    return salesData;
+  });
+
+  const salesData = perSourceRows.flat();
+
   salesData.sort((a, b) => {
     const dateA = parseSalesDate(a.date)?.getTime() || 0;
     const dateB = parseSalesDate(b.date)?.getTime() || 0;
@@ -1005,6 +1345,8 @@ async function getConfigData(
   }
 
   // Get SpMap from "SpMap" tab
+  // Layout thực tế: A=STT | B=Tên vật tư | C=DANH MỤC | D=? | E=KEY MAP
+  // Sales sheet cột F map với DANH MỤC (C); campaign name map với KEY MAP (E).
   let spMap: SpMapping[] = [];
   try {
     const spMapResponse = await sheetsClient.spreadsheets.values.get({
@@ -1012,17 +1354,31 @@ async function getConfigData(
       range: 'SpMap!A:E',
     });
 
-    const spMapRows = (spMapResponse.data.values || []).slice(1);
-    for (const row of spMapRows) {
-      const variantName = String(row[2] || row[1] || row[0] || '').trim();
-      const shortName = String(row[4] || row[3] || row[1] || '').trim();
+    const spMapHeaderPattern =
+      /^(stt|no\.?|#|tên vật tư|ten vat tu|danh mục|danh muc|key\s*map|keymap)$/i;
 
-      if (variantName && shortName && !/^(stt|no\.?|#)$/i.test(variantName)) {
-        spMap.push({
-          variantName,
-          shortName,
-        });
+    for (const row of spMapResponse.data.values || []) {
+      const materialName = String(row[1] || '').trim();
+      const categoryName = String(row[2] || '').trim();
+      const keyMap = String(row[4] || '').trim();
+
+      const variantName = categoryName || materialName;
+      if (!variantName || spMapHeaderPattern.test(variantName)) {
+        continue;
       }
+
+      // Prefer KEY MAP for campaign join; fall back to DANH MỤC (not SKU col B)
+      // so one category is not forced onto the first SKU name (e.g. 500G).
+      const shortName = keyMap || categoryName || materialName;
+      if (!shortName || spMapHeaderPattern.test(shortName)) {
+        continue;
+      }
+
+      spMap.push({
+        variantName,
+        shortName,
+        materialName: materialName || undefined,
+      });
     }
   } catch (error) {
     console.warn('Could not fetch spMap from SpMap tab');

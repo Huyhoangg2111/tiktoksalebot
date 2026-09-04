@@ -176,6 +176,7 @@ export async function connectDB() {
       metric TEXT NOT NULL,
       metric_operator TEXT NOT NULL,
       metric_threshold REAL NOT NULL,
+      metric_min_threshold REAL,
       conversions_operator TEXT NOT NULL,
       conversions_threshold REAL NOT NULL,
       action TEXT NOT NULL,
@@ -188,6 +189,14 @@ export async function connectDB() {
 
   try {
     await db.run('ALTER TABLE alert_action_rules ADD COLUMN campaign_status TEXT');
+  } catch (error) {
+    if (!String(error).includes('duplicate column name')) {
+      throw error;
+    }
+  }
+
+  try {
+    await db.run('ALTER TABLE alert_action_rules ADD COLUMN metric_min_threshold REAL');
   } catch (error) {
     if (!String(error).includes('duplicate column name')) {
       throw error;
@@ -213,6 +222,24 @@ export async function connectDB() {
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (date_key, advertiser_id, campaign_id)
     )
+  `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS product_pause_callbacks (
+      token TEXT PRIMARY KEY,
+      created_at_ms INTEGER NOT NULL,
+      product_short_name TEXT NOT NULL,
+      market_code TEXT NOT NULL,
+      target_mkt_code TEXT,
+      alert_level TEXT NOT NULL,
+      item_number INTEGER NOT NULL,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_product_pause_callbacks_created_at
+    ON product_pause_callbacks(created_at_ms)
   `);
 
   await db.exec(`

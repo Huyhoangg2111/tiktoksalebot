@@ -12,16 +12,20 @@ import {
 import { getTrackedAdvertiserIdSet } from '../accounts/tracking.js';
 import {
   getTikTokAccountBalance,
+  getActiveCampaigns,
   getTodaySpentAds,
   getTodaySpentCampaigns,
-  setCampaignAdsStatus,
+  setCampaignStatus,
+  setCampaignStatusesBatch,
   type TikTokAccountBalance,
+  type TikTokCampaign,
   type TikTokSpentAd,
   type TikTokSpentCampaign,
 } from '../tiktok/api.js';
 import { getCampaignCloneCountMap } from '../campaigns/clone-tracking.js';
 import {
   buildBcProductMarketSummaries,
+  getMonthBcReportPeriod,
   getTodayBcReportPeriod,
   type ProductMarketSummary,
 } from '../sales/bc-report.js';
@@ -47,6 +51,7 @@ interface AlertActionRule {
   metric: AlertMetric;
   metric_operator: AlertComparisonOperator;
   metric_threshold: number;
+  metric_min_threshold?: number | null;
   conversions_operator: AlertComparisonOperator;
   conversions_threshold: number;
   action: AlertAction;
@@ -115,10 +120,54 @@ const CAMPAIGN_ACTION_CALLBACK_PREFIX = 'campaign_action';
 const CAMPAIGN_DAILY_ALERT_CALLBACK_PREFIX = 'cad';
 const CAMPAIGN_QUALIFIED_NOTIFICATION_RULE_ID = -100;
 const LEVEL2_PRODUCT_CP_ADS_RULE_ID = -200;
+const LEVEL3_PRODUCT_CP_ADS_MONTH_RULE_ID = -300;
 const GROUPED_CAMPAIGN_ACTION_BUTTONS_PER_ROW = 5;
 const ALERT_TELEGRAM_COOLDOWN_MS = 10 * 60 * 1000;
 const CAMPAIGN_QUALIFIED_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
 const LEVEL2_PRODUCT_CP_ADS_COOLDOWN_MS = 30 * 60 * 1000;
+const LEVEL3_PRODUCT_CP_ADS_COOLDOWN_MS = 60 * 60 * 1000;
+/** Callback tắt toàn bộ camp của 1 SP trong alert cấp 2/3. */
+export const PRODUCT_PAUSE_CALLBACK_PREFIX = 'ppause';
+export const PRODUCT_PAUSE_DONE_CALLBACK_PREFIX = 'ppause_done';
+const PRODUCT_PAUSE_CALLBACK_TTL_MS = 6 * 60 * 60 * 1000;
+const PRODUCT_PAUSE_BUTTONS_MAX = 10;
+
+export interface ProductPauseCampaignRef {
+  advertiserId: string;
+  campaignId: string;
+}
+
+export interface ProductPausePayload {
+  createdAt: number;
+  productShortName: string;
+  marketCode: string;
+  targetMktCode?: string;
+  level: 'level2' | 'level3';
+  itemNumber: number;
+}
+
+export interface ProductPauseResult {
+  productLabel: string;
+  itemNumber: number;
+  token: string;
+  total: number;
+  success: number;
+  failed: number;
+  allPaused: boolean;
+  errors: string[];
+}
+
+interface ProductPauseCallbackRow {
+  token: string;
+  created_at_ms: number;
+  product_short_name: string;
+  market_code: string;
+  target_mkt_code?: string;
+  alert_level: 'level2' | 'level3';
+  item_number: number;
+}
+
+const productPauseCallbacksInFlight = new Set<string>();
 
 function chunkArray<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -171,25 +220,63 @@ function escapeHtml(value: string): string {
 function compareValues(
   currentValue: number,
   operator: AlertComparisonOperator,
-  threshold: number
+  threshold: number,
+  minThreshold?: number | null
 ): boolean {
+  if (operator === 'between') {
+    const lowerBound = Number.isFinite(minThreshold) ? Number(minThreshold) : Number.NEGATIVE_INFINITY;
+    const upperBound = Number.isFinite(threshold) ? threshold : Number.POSITIVE_INFINITY;
+    return currentValue >= lowerBound && currentValue <= upperBound;
+  }
+
   if (operator === 'gt') {
-    return currentValue > threshold;
+    if (!(currentValue > threshold)) {
+      return false;
+    }
+  } else if (operator === 'gte') {
+    if (!(currentValue >= threshold)) {
+      return false;
+    }
+  } else if (operator === 'lt') {
+    if (!(currentValue < threshold)) {
+      return false;
+    }
+  } else if (operator === 'lte') {
+    if (!(currentValue <= threshold)) {
+      return false;
+    }
+  } else if (!(currentValue === threshold)) {
+    return false;
   }
 
-  if (operator === 'gte') {
-    return currentValue >= threshold;
+  // Optional floor bound: e.g. CPA < 1.2 AND CPA >= 0.5 via metric_min column.
+  if (Number.isFinite(minThreshold)) {
+    return currentValue >= Number(minThreshold);
   }
 
-  if (operator === 'lt') {
-    return currentValue < threshold;
+  return true;
+}
+
+/**
+ * Chỉ dùng status CẤP CAMPAIGN (không còn suy ra từ ads).
+ */
+function getCampaignEffectiveStatus(
+  campaign: Pick<TikTokSpentCampaign, 'status' | 'ad_status'>
+): TikTokSpentCampaign['status'] {
+  return campaign.status || 'active';
+}
+
+function resolveRuleCampaignStatus(rule: AlertActionRule): AlertCampaignStatus | undefined {
+  if (rule.campaign_status) {
+    return rule.campaign_status;
   }
 
-  if (operator === 'lte') {
-    return currentValue <= threshold;
+  // Default: enable/active only re-enables paused delivery.
+  if (rule.action === 'enable') {
+    return 'paused';
   }
 
-  return currentValue === threshold;
+  return undefined;
 }
 
 function calculateAlertSeverity(currentValue: number, threshold: number): AlertSeverity {
@@ -234,8 +321,9 @@ function normalizeSearchValue(value: string | undefined): string {
 }
 
 function getCampaignRuleKey(campaignName: string | undefined): string {
+  // Hỗ trợ cả "SP - VN" và "SP-VN".
   const parts = String(campaignName || '')
-    .split(/\s+-\s+/)
+    .split(/\s*-\s*/)
     .map(part => part.trim())
     .filter(Boolean);
 
@@ -257,14 +345,21 @@ function matchesCampaignKey(rule: AlertActionRule, campaignName: string | undefi
     return false;
   }
 
-  if (ruleMatch.includes(' - ')) {
-    const campaignKey = getCampaignRuleKey(campaignName);
-    return campaignKey === ruleMatch;
+  const campaignKey = getCampaignRuleKey(campaignName);
+  const campaignFullName = normalizeSearchValue(campaignName);
+  const normalizedRuleKey = ruleMatch.includes(' - ')
+    ? ruleMatch
+    : getCampaignRuleKey(rule.name_contains);
+
+  // Exact key "SP - MARKET"
+  if (ruleMatch.includes(' - ') || ruleMatch.includes('-')) {
+    if (campaignKey === normalizedRuleKey || campaignKey === ruleMatch) {
+      return true;
+    }
   }
 
-  const campaignFullName = normalizeSearchValue(campaignName);
-
-  return campaignFullName.includes(ruleMatch);
+  // Fallback: contains (VN, ID, tên ngắn…)
+  return campaignFullName.includes(ruleMatch) || campaignKey.includes(ruleMatch);
 }
 
 function getCampaignSubjectKey(campaign: TikTokSpentCampaign): string {
@@ -349,7 +444,7 @@ function getActionLabel(action: AlertAction): string {
   }
 
   if (action === 'enable') {
-    return 'enable';
+    return 'active';
   }
 
   return 'notify';
@@ -372,6 +467,10 @@ function formatComparisonOperator(operator: AlertComparisonOperator): string {
     return '<=';
   }
 
+  if (operator === 'between') {
+    return 'trong khoảng';
+  }
+
   return '=';
 }
 
@@ -389,8 +488,24 @@ async function getLevel2ProductCpAdsThreshold(): Promise<number> {
   return getRuntimeSettingNumber('level2_cp_ads_threshold', envValue);
 }
 
+async function getLevel3ProductCpAdsThreshold(): Promise<number> {
+  const rawValue = process.env.ALERT_LEVEL3_CP_ADS_THRESHOLD || process.env.LEVEL3_CP_ADS_THRESHOLD;
+  const parsedValue = rawValue ? Number(rawValue) : Number.NaN;
+  const envValue = Number.isFinite(parsedValue) && parsedValue > 0
+    ? parsedValue
+    : RUNTIME_SETTING_DEFAULTS.level3CpAdsThreshold;
+
+  return getRuntimeSettingNumber('level3_cp_ads_threshold', envValue);
+}
+
 function isLevel2ProductCpAdsEnabled(): boolean {
   const rawValue = process.env.ALERT_LEVEL2_CP_ADS_ENABLED || process.env.LEVEL2_CP_ADS_ENABLED;
+
+  return !rawValue || !['0', 'false', 'off', 'no'].includes(rawValue.trim().toLowerCase());
+}
+
+function isLevel3ProductCpAdsEnabled(): boolean {
+  const rawValue = process.env.ALERT_LEVEL3_CP_ADS_ENABLED || process.env.LEVEL3_CP_ADS_ENABLED;
 
   return !rawValue || !['0', 'false', 'off', 'no'].includes(rawValue.trim().toLowerCase());
 }
@@ -403,6 +518,24 @@ function getRuleMetricValue(
 }
 
 function formatRuleMetricThreshold(rule: AlertActionRule): string {
+  if (
+    rule.metric_operator === 'between' ||
+    Number.isFinite(rule.metric_min_threshold)
+  ) {
+    const minValue = Number.isFinite(rule.metric_min_threshold)
+      ? Number(rule.metric_min_threshold)
+      : undefined;
+    const maxValue = rule.metric_threshold;
+
+    if (rule.metric_operator === 'between' && minValue !== undefined) {
+      return `${getRuleMetricLabel(rule.metric)} trong khoảng ${formatUsd(minValue)} - ${formatUsd(maxValue)}`;
+    }
+
+    if (minValue !== undefined) {
+      return `${getRuleMetricLabel(rule.metric)} ${formatComparisonOperator(rule.metric_operator)} ${formatUsd(maxValue)} (min ${formatUsd(minValue)})`;
+    }
+  }
+
   return `${getRuleMetricLabel(rule.metric)} ${formatComparisonOperator(rule.metric_operator)} ${formatUsd(rule.metric_threshold)}`;
 }
 
@@ -660,10 +793,7 @@ function createCampaignAlertContent(
   const conditionLabel = getCampaignConditionLabel(rule);
   const campaignDisplayName = getCampaignDisplayName(campaign.campaign_name);
   const accountSuffix = getCampaignAccountSuffix(campaign);
-  const titleIcon =
-    rule.action === 'enable'
-      ? '✅'
-      : '⚠️';
+  const titleIcon = '🔔';
   const conditionIcon = conditionLabel === 'vượt giới hạn' ? '📈' : '✅';
   const metricThreshold = formatRuleMetricThreshold(rule);
   const conversionThreshold =
@@ -705,7 +835,7 @@ function createCampaignAlertGroupContent(
   rule: AlertActionRule
 ): CampaignAlertContent {
   const conditionLabel = getCampaignConditionLabel(rule);
-  const titleIcon = conditionLabel === 'vượt giới hạn' ? '⚠️' : '✅';
+  const titleIcon = '🔔';
   const conditionIcon = conditionLabel === 'vượt giới hạn' ? '📈' : '✅';
   const metricThreshold = formatRuleMetricThreshold(rule);
   const conversionThreshold =
@@ -790,8 +920,11 @@ function createQualifiedCampaignAlertGroupContent(
   };
 }
 
-function getProductSummarySubjectKey(summary: ProductMarketSummary): string {
-  return `level2:product_cp_ads:${normalizeSearchValue(summary.productShortName)}:${normalizeSearchValue(summary.marketCode)}`;
+function getProductSummarySubjectKey(
+  summary: ProductMarketSummary,
+  level: 'level2' | 'level3' = 'level2'
+): string {
+  return `${level}:product_cp_ads:${normalizeSearchValue(summary.productShortName)}:${normalizeSearchValue(summary.marketCode)}`;
 }
 
 function getProductSummaryCpAds(summary: ProductMarketSummary): number {
@@ -832,23 +965,300 @@ function formatProductSummaryCpAds(summary: ProductMarketSummary): string {
     return formatPercent((summary.spendVnd / summary.grossSalesVnd) * 100);
   }
 
+  // Thiếu một trong hai dữ liệu chi tiêu/doanh số → cảnh báo dữ liệu chưa đủ.
   if (summary.spendVnd > 0 && summary.grossSalesVnd <= 0) {
-    return '🧾❌';
+    return '‼️';
   }
 
   if (summary.spendVnd <= 0 && summary.grossSalesVnd > 0) {
-    return '💸❌';
+    return '‼️';
   }
 
-  return '';
+  return '0%';
 }
 
-function createLevel2ProductCpAdsAlertContent(
+function formatSalesVndDisplay(amountVnd: number): string {
+  // Luôn hiện số tiền; không DS = 0đ (không để trống / ❌).
+  return formatCompactVnd(Number.isFinite(amountVnd) ? amountVnd : 0);
+}
+
+async function clearExpiredProductPauseCallbacks(): Promise<void> {
+  await db.run(
+    'DELETE FROM product_pause_callbacks WHERE created_at_ms < ?',
+    [Date.now() - PRODUCT_PAUSE_CALLBACK_TTL_MS]
+  );
+}
+
+async function loadProductPausePayload(token: string): Promise<ProductPausePayload | undefined> {
+  const row = await db.get<ProductPauseCallbackRow>(
+    `SELECT token, created_at_ms, product_short_name, market_code,
+            target_mkt_code, alert_level, item_number
+     FROM product_pause_callbacks
+     WHERE token = ?`,
+    [token]
+  );
+
+  if (!row) {
+    return undefined;
+  }
+
+  return {
+    createdAt: Number(row.created_at_ms),
+    productShortName: row.product_short_name,
+    marketCode: row.market_code,
+    targetMktCode: row.target_mkt_code || undefined,
+    level: row.alert_level,
+    itemNumber: Number(row.item_number),
+  };
+}
+
+async function createProductPauseToken(
+  summary: ProductMarketSummary,
+  level: 'level2' | 'level3',
+  itemNumber: number
+): Promise<string> {
+  await clearExpiredProductPauseCallbacks();
+
+  const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  await db.run(
+    `INSERT INTO product_pause_callbacks (
+       token, created_at_ms, product_short_name, market_code,
+       target_mkt_code, alert_level, item_number, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+    [
+      token,
+      Date.now(),
+      summary.productShortName,
+      summary.marketCode,
+      process.env.TARGET_MKT_CODE?.trim() || null,
+      level,
+      itemNumber,
+    ]
+  );
+
+  return token;
+}
+
+/** Trước thao tác chỉ hiện 🟢; 🟡 chỉ được gắn sau khi đã xác nhận tất cả camp đều pause. */
+function getProductAlertStatusIcon(summary: ProductMarketSummary): string {
+  if (summary.spendVnd > 0) {
+    return '\u{1F7E2}'; // green
+  }
+
+  return '\u26AA'; // white
+}
+
+function getProductPauseButtonText(itemNumber: number, state: 'active' | 'paused' | 'pending'): string {
+  if (state === 'pending') {
+    return `\u23F3 ${itemNumber}`;
+  }
+
+  if (state === 'paused') {
+    return `\u{1F7E1} ${itemNumber}`; // yellow = paused (như /campaigns)
+  }
+
+  return `\u{1F7E2} ${itemNumber}`; // green = active
+}
+
+/** Nút dạng "🟢 1" như /campaigns, tối đa 5 nút / hàng. */
+async function buildProductPauseReplyMarkup(
   summaries: ProductMarketSummary[],
-  threshold: number
-): CampaignAlertContent {
-  const titleLine = `⚠️ Cảnh báo cấp 2 (${summaries.length} sản phẩm)`;
-  const conditionLine = `📈 %CP ads vượt ngưỡng ${formatPercent(threshold)}`;
+  level: 'level2' | 'level3'
+): Promise<TelegramInlineKeyboardMarkup | undefined> {
+  const buttons: TelegramInlineKeyboardButton[] = [];
+  const displaySummaries = summaries
+    .filter(summary => summary.spendVnd > 0 || summary.grossSalesVnd > 0)
+    .slice(0, PRODUCT_PAUSE_BUTTONS_MAX);
+
+  for (const [index, summary] of displaySummaries.entries()) {
+    const itemNumber = index + 1;
+    const token = await createProductPauseToken(summary, level, itemNumber);
+    buttons.push({
+      text: getProductPauseButtonText(itemNumber, 'active'),
+      callback_data: `${PRODUCT_PAUSE_CALLBACK_PREFIX}:${token}`,
+    });
+  }
+
+  if (buttons.length === 0) {
+    return undefined;
+  }
+
+  return {
+    inline_keyboard: chunkArray(buttons, GROUPED_CAMPAIGN_ACTION_BUTTONS_PER_ROW),
+  };
+}
+
+/**
+ * Sau khi tắt SP thành công: đổi nút 🟢 N → 🟡 N (giống /campaigns paused).
+ * callback chuyển sang noop để không bấm lại.
+ */
+export function updateProductPauseKeyboardAfterSuccess(
+  replyMarkup: TelegramInlineKeyboardMarkup | undefined,
+  token: string,
+  itemNumber: number
+): TelegramInlineKeyboardMarkup | undefined {
+  if (!replyMarkup?.inline_keyboard) {
+    return undefined;
+  }
+
+  const targetCallback = `${PRODUCT_PAUSE_CALLBACK_PREFIX}:${token}`;
+  const doneCallback = `${PRODUCT_PAUSE_DONE_CALLBACK_PREFIX}:${itemNumber}`;
+  let changed = false;
+
+  const inline_keyboard = replyMarkup.inline_keyboard.map(row =>
+    row.map(button => {
+      if (button.callback_data !== targetCallback) {
+        return button;
+      }
+
+      changed = true;
+      return {
+        text: getProductPauseButtonText(itemNumber, 'paused'),
+        callback_data: doneCallback,
+      };
+    })
+  );
+
+  return changed ? { inline_keyboard } : undefined;
+}
+
+/**
+ * Đồng bộ chấm màu trên dòng SP trong nội dung tin: "N. 🟢" → "N. 🟡".
+ */
+export function updateProductAlertMessageIconAfterPause(
+  messageText: string,
+  itemNumber: number
+): string {
+  // Khớp "1. 🟢" / "1. 🟡" / "1. ⚪" (emoji chấm màu).
+  const pattern = new RegExp(
+    `(^|\\n)(${itemNumber})\\.\\s*(?:\\u{1F7E2}|\\u{1F7E1}|\\u26AA|\\u{1F7E0})`,
+    'gu'
+  );
+
+  return messageText.replace(pattern, `$1$2. \u{1F7E1}`);
+}
+
+function campaignMatchesProductPausePayload(
+  campaign: Pick<TikTokCampaign, 'name'>,
+  payload: ProductPausePayload
+): boolean {
+  const campaignParts = String(campaign.name || '')
+    .split('-')
+    .map(part => normalizeSearchValue(part))
+    .filter(Boolean);
+  const productKey = normalizeSearchValue(payload.productShortName);
+  const marketKey = normalizeSearchValue(payload.marketCode);
+
+  return campaignParts[0] === productKey && campaignParts.slice(1).includes(marketKey);
+}
+
+async function getActiveProductCampaignRefs(
+  payload: ProductPausePayload
+): Promise<ProductPauseCampaignRef[]> {
+  const activeCampaigns = await getActiveCampaigns({ strict: true });
+
+  return activeCampaigns
+    .filter(campaign => campaignMatchesProductPausePayload(campaign, payload))
+    .map(campaign => ({
+      advertiserId: campaign.advertiser_id,
+      campaignId: campaign.id,
+    }));
+}
+
+/**
+ * Tắt toàn bộ campaign thuộc 1 SP (token từ nút alert cấp 2/3).
+ */
+export async function executeProductPauseByToken(token: string): Promise<ProductPauseResult> {
+  await clearExpiredProductPauseCallbacks();
+
+  const payload = await loadProductPausePayload(token);
+  if (!payload) {
+    throw new Error('Nút đã hết hạn hoặc SP đã được tắt. Chờ cảnh báo cấp 2/3 mới.');
+  }
+
+  if (productPauseCallbacksInFlight.has(token)) {
+    throw new Error('Sản phẩm này đang được xử lý. Vui lòng chờ kết quả.');
+  }
+
+  productPauseCallbacksInFlight.add(token);
+
+  try {
+    const productLabel = `${payload.productShortName} (${payload.marketCode})`;
+    const activeBefore = await getActiveProductCampaignRefs(payload);
+
+    if (activeBefore.length === 0) {
+      await db.run('DELETE FROM product_pause_callbacks WHERE token = ?', [token]);
+      return {
+        productLabel,
+        itemNumber: payload.itemNumber,
+        token,
+        total: 0,
+        success: 0,
+        failed: 0,
+        allPaused: true,
+        errors: [],
+      };
+    }
+
+    const batchResult = await setCampaignStatusesBatch(activeBefore, 'DISABLE');
+
+    // Chỉ hoàn tất sau khi đọc lại TikTok và xác nhận không còn campaign active.
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    const activeAfter = await getActiveProductCampaignRefs(payload);
+    const remainingKeys = new Set(
+      activeAfter.map(campaign => `${campaign.advertiserId}:${campaign.campaignId}`)
+    );
+    const allTargetKeys = new Set([
+      ...activeBefore.map(campaign => `${campaign.advertiserId}:${campaign.campaignId}`),
+      ...remainingKeys,
+    ]);
+    const failureByKey = new Map(
+      batchResult.failed.map(failure => [
+        `${failure.advertiserId}:${failure.campaignId}`,
+        failure.error,
+      ])
+    );
+    const errors = activeAfter.map(campaign => {
+      const key = `${campaign.advertiserId}:${campaign.campaignId}`;
+      return `${campaign.campaignId}: ${failureByKey.get(key) || 'vẫn đang active sau khi kiểm tra lại'}`;
+    });
+    const total = allTargetKeys.size;
+    const failed = remainingKeys.size;
+    const success = Math.max(0, total - failed);
+    const allPaused = failed === 0;
+
+    if (allPaused) {
+      await db.run('DELETE FROM product_pause_callbacks WHERE token = ?', [token]);
+    }
+
+    return {
+      productLabel,
+      itemNumber: payload.itemNumber,
+      token,
+      total,
+      success,
+      failed,
+      allPaused,
+      errors,
+    };
+  } finally {
+    productPauseCallbacksInFlight.delete(token);
+  }
+}
+
+async function createProductCpAdsAlertContent(
+  summaries: ProductMarketSummary[],
+  threshold: number,
+  options: {
+    level: 'level2' | 'level3';
+    levelLabel: string;
+    periodLabel: string;
+  }
+): Promise<CampaignAlertContent> {
+  // Cấp 2: ⚠️ · Cấp 3: 🚨
+  const titleIcon = options.level === 'level3' ? '🚨' : '⚠️';
+  const titleLine = `${titleIcon} Cảnh báo ${options.levelLabel} (${summaries.length} sản phẩm)`;
+  const conditionLine = `📈 %CP ads vượt ngưỡng ${formatPercent(threshold)} · ${options.periodLabel}`;
   const plainLines = [
     titleLine,
     conditionLine,
@@ -860,26 +1270,47 @@ function createLevel2ProductCpAdsAlertContent(
     '',
   ];
 
-  summaries
-    .filter(summary => summary.spendVnd > 0 || summary.grossSalesVnd > 0)
-    .forEach((summary, index) => {
+  const displaySummaries = summaries
+    .filter(summary => summary.spendVnd > 0 || summary.grossSalesVnd > 0);
+
+  displaySummaries.forEach((summary, index) => {
     const cpaVnd = getProductSummaryCpaVnd(summary);
     const cpAdsText = formatProductSummaryCpAds(summary);
+    const itemNumber = index + 1;
+    const statusIcon = getProductAlertStatusIcon(summary);
     const productTitle =
-      `${index + 1}. ${summary.productShortName} (${summary.marketCode}) · ${formatProductCampaignSuffix(summary)}`;
-    const metrics = [
+      `${itemNumber}. ${statusIcon} ${summary.productShortName} (${summary.marketCode}) · ${formatProductCampaignSuffix(summary)}`;
+
+    // Metrics theo cấp (icon thống nhất: 🧾 = doanh số, 📦 = số đơn):
+    // - Cấp 2: spend · click/CTR · CV · CPA · DS · %CP (không số đơn)
+    // - Cấp 3: spend · CV · CPA · DS · số đơn · %CP (không click/CTR)
+    const metrics: string[] = [
       `💸 ${formatCompactVnd(summary.spendVnd)}`,
+    ];
+
+    if (options.level === 'level2') {
+      metrics.push(
+        `👆 ${summary.clicks.toLocaleString('vi-VN')}/${formatPercent(summary.impressions > 0 ? (summary.clicks / summary.impressions) * 100 : 0)}`
+      );
+    }
+
+    metrics.push(
       `🎯 ${summary.conversions.toLocaleString('vi-VN')}`,
       `💰 ${formatCompactVnd(cpaVnd)}`,
-      `🧾 ${formatCompactVnd(summary.grossSalesVnd)}`,
-      `📦 ${summary.orders.toLocaleString('vi-VN')}`,
-      ...(cpAdsText ? [`📈 ${cpAdsText}`] : []),
-    ];
+      `🧾 ${formatSalesVndDisplay(summary.grossSalesVnd)}`,
+    );
+
+    if (options.level === 'level3') {
+      metrics.push(`📦 ${summary.orders.toLocaleString('vi-VN')}`);
+    }
+
+    metrics.push(`📈 ${cpAdsText}`);
+
     const metricsLine = metrics.join(' · ');
 
     plainLines.push(productTitle, metricsLine);
     htmlLines.push(
-      `<b>${escapeHtml(productTitle)}</b>`,
+      `${itemNumber}. ${statusIcon} <b>${escapeHtml(summary.productShortName)} (${escapeHtml(summary.marketCode)})</b> · ${escapeHtml(formatProductCampaignSuffix(summary))}`,
       escapeHtml(metricsLine)
     );
   });
@@ -887,13 +1318,15 @@ function createLevel2ProductCpAdsAlertContent(
   return {
     plainText: plainLines.join('\n'),
     htmlText: htmlLines.join('\n'),
+    replyMarkup: await buildProductPauseReplyMarkup(displaySummaries, options.level),
   };
 }
 
 function ruleSummary(rule: AlertActionRule): string {
   const nameFilter = rule.name_contains ? ` | Match ${rule.name_contains}` : '';
-  const statusFilter = rule.campaign_status ? ` | Status ${rule.campaign_status}` : '';
-  return `${getRuleMetricLabel(rule.metric)} ${rule.metric_operator} ${formatUsd(rule.metric_threshold)} | CV ${rule.conversions_operator} ${rule.conversions_threshold}${nameFilter}${statusFilter}`;
+  const resolvedStatus = resolveRuleCampaignStatus(rule);
+  const statusFilter = resolvedStatus ? ` | Status ${resolvedStatus}` : '';
+  return `${formatRuleMetricThreshold(rule)} | CV ${rule.conversions_operator} ${rule.conversions_threshold}${nameFilter}${statusFilter}`;
 }
 
 function createLowBalanceAlertMessage(accounts: TikTokAccountBalance[]): string {
@@ -953,7 +1386,7 @@ async function saveAndSendAlert(
   message: string,
   severity: AlertSeverity,
   options?: AlertSendOptions
-): Promise<void> {
+): Promise<boolean> {
   await db.run(
     'INSERT INTO alerts (type, message, severity) VALUES (?, ?, ?)',
     [type, message, severity]
@@ -961,7 +1394,7 @@ async function saveAndSendAlert(
 
   const adminChatId = process.env.ADMIN_CHAT_ID;
   if (!adminChatId) {
-    return;
+    return false;
   }
 
   try {
@@ -975,18 +1408,20 @@ async function saveAndSendAlert(
         }
       );
       console.log(`Alert sent: ${type}`);
-      return;
+      return true;
     }
 
     const alertTitle = getAlertTitle(type);
     await bot.telegram.sendMessage(
       adminChatId,
-      `🚨 <b>${alertTitle}</b> - ${severity.toUpperCase()}\n${escapeHtml(message)}`,
+      `🔔 <b>${alertTitle}</b> - ${severity.toUpperCase()}\n${escapeHtml(message)}`,
       { parse_mode: 'HTML' }
     );
     console.log(`Alert sent: ${type}`);
+    return true;
   } catch (error) {
     console.error(`Error sending ${type} alert via Telegram:`, error);
+    return false;
   }
 }
 
@@ -1019,11 +1454,33 @@ async function upsertBalanceAlertRule(): Promise<void> {
   );
 }
 
+async function ensureAlertActionRuleColumns(): Promise<void> {
+  try {
+    await db.run('ALTER TABLE alert_action_rules ADD COLUMN campaign_status TEXT');
+  } catch (error) {
+    if (!String(error).includes('duplicate column name')) {
+      throw error;
+    }
+  }
+
+  try {
+    await db.run('ALTER TABLE alert_action_rules ADD COLUMN metric_min_threshold REAL');
+  } catch (error) {
+    if (!String(error).includes('duplicate column name')) {
+      throw error;
+    }
+  }
+}
+
 async function replaceActionRules(rules: AlertActionRuleSheetRow[]): Promise<void> {
+  await ensureAlertActionRuleColumns();
   await db.run('DELETE FROM alert_action_state');
   await db.run('DELETE FROM alert_action_rules');
 
   for (const rule of rules) {
+    const campaignStatus =
+      rule.campaignStatus || (rule.action === 'enable' ? 'paused' : null);
+
     await db.run(
       `INSERT INTO alert_action_rules (
         entity,
@@ -1031,6 +1488,7 @@ async function replaceActionRules(rules: AlertActionRuleSheetRow[]): Promise<voi
         metric,
         metric_operator,
         metric_threshold,
+        metric_min_threshold,
         conversions_operator,
         conversions_threshold,
         action,
@@ -1038,17 +1496,18 @@ async function replaceActionRules(rules: AlertActionRuleSheetRow[]): Promise<voi
         is_active,
         note,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
       [
         rule.entity,
         rule.nameContains || null,
         rule.metric,
         rule.metricOperator,
         rule.metricThreshold,
+        Number.isFinite(rule.metricMinThreshold) ? rule.metricMinThreshold : null,
         rule.conversionsOperator,
         rule.conversionsThreshold,
         rule.action,
-        rule.campaignStatus || null,
+        campaignStatus,
         rule.isActive ? 1 : 0,
         rule.note || null,
       ]
@@ -1099,11 +1558,17 @@ function matchesCampaignRule(rule: AlertActionRule, campaign: TikTokSpentCampaig
     return false;
   }
 
-  if (rule.campaign_status && campaign.status !== rule.campaign_status) {
+  const requiredStatus = resolveRuleCampaignStatus(rule);
+  if (requiredStatus && getCampaignEffectiveStatus(campaign) !== requiredStatus) {
     return false;
   }
 
-  return compareValues(getRuleMetricValue(campaign, rule.metric), rule.metric_operator, rule.metric_threshold) &&
+  return compareValues(
+    getRuleMetricValue(campaign, rule.metric),
+    rule.metric_operator,
+    rule.metric_threshold,
+    rule.metric_min_threshold
+  ) &&
     compareValues(campaign.conversions, rule.conversions_operator, rule.conversions_threshold);
 }
 
@@ -1112,7 +1577,12 @@ function matchesAdRule(rule: AlertActionRule, ad: EnrichedSpentAd): boolean {
     return false;
   }
 
-  return compareValues(getRuleMetricValue(ad, rule.metric), rule.metric_operator, rule.metric_threshold) &&
+  return compareValues(
+    getRuleMetricValue(ad, rule.metric),
+    rule.metric_operator,
+    rule.metric_threshold,
+    rule.metric_min_threshold
+  ) &&
     compareValues(ad.conversions, rule.conversions_operator, rule.conversions_threshold);
 }
 
@@ -1224,7 +1694,7 @@ async function processCampaignRule(
     const shouldAlert = shouldSendTelegramAlert(lastAlertedAt, now);
 
     if (rule.action === 'notify') {
-      if (isExceeding && campaign.status === 'paused') {
+      if (isExceeding && getCampaignEffectiveStatus(campaign) === 'paused') {
         continue;
       }
 
@@ -1240,14 +1710,16 @@ async function processCampaignRule(
       continue;
     }
 
-    if (campaign.status === 'deleted') {
+    const effectiveStatus = getCampaignEffectiveStatus(campaign);
+
+    if (effectiveStatus === 'deleted') {
       matchedKeys.add(subjectKey);
       await saveRuleState(rule.id, subjectKey);
       continue;
     }
 
     const targetStatus = rule.action === 'pause' ? 'paused' : 'active';
-    if (campaign.status === targetStatus) {
+    if (effectiveStatus === targetStatus) {
       matchedKeys.add(subjectKey);
       await saveRuleState(rule.id, subjectKey);
       continue;
@@ -1260,12 +1732,11 @@ async function processCampaignRule(
     let failureReason: string | undefined;
 
     try {
-      const result = await setCampaignAdsStatus(
+      nextStatus = await setCampaignStatus(
         campaign.advertiser_id,
         campaign.campaign_id,
         rule.action === 'pause' ? 'DISABLE' : 'ENABLE'
       );
-      nextStatus = result.status || (rule.action === 'pause' ? 'paused' : 'active');
     } catch (error) {
       failureReason = error instanceof Error ? error.message : String(error);
     }
@@ -1273,7 +1744,7 @@ async function processCampaignRule(
     const wasSuccessful = Boolean(nextStatus);
     const alertCampaign: TikTokSpentCampaign = {
       ...campaign,
-      status: (nextStatus || campaign.status) as TikTokSpentCampaign['status'],
+      status: (nextStatus || effectiveStatus) as TikTokSpentCampaign['status'],
     };
     const alertContent = createCampaignAlertContent(alertCampaign, rule, {
       result: {
@@ -1438,16 +1909,27 @@ async function processAdRule(
   await clearRuleStates(rule.id, matchedKeys);
 }
 
-async function checkLevel2ProductCpAdsAlerts(bot: Telegraf): Promise<void> {
-  if (!isLevel2ProductCpAdsEnabled()) {
-    await clearRuleStates(LEVEL2_PRODUCT_CP_ADS_RULE_ID, new Set());
+async function checkProductCpAdsAlertsForPeriod(
+  bot: Telegraf,
+  options: {
+    level: 'level2' | 'level3';
+    ruleId: number;
+    cooldownMs: number;
+    period: { startDate: string; endDate: string; label: string };
+    levelLabel: string;
+    alertType: string;
+    enabled: boolean;
+    threshold: number;
+  }
+): Promise<void> {
+  if (!options.enabled) {
+    await clearRuleStates(options.ruleId, new Set());
     return;
   }
 
-  const threshold = await getLevel2ProductCpAdsThreshold();
-  const period = getTodayBcReportPeriod();
+  const threshold = options.threshold;
   const summaries = await buildBcProductMarketSummaries({
-    ...period,
+    ...options.period,
     targetMktCode: process.env.TARGET_MKT_CODE,
   });
   const matchedSummaries = summaries
@@ -1458,46 +1940,90 @@ async function checkLevel2ProductCpAdsAlerts(bot: Telegraf): Promise<void> {
         ? getProductSummaryCpAds(summaryB) - getProductSummaryCpAds(summaryA) || summaryB.spendVnd - summaryA.spendVnd
         : Number.isFinite(getProductSummaryCpAds(summaryB)) ? -1 : 1
     );
-  const matchedKeys = new Set(matchedSummaries.map(getProductSummarySubjectKey));
-  const notificationSubjectKey = getRuleNotificationSubjectKey(LEVEL2_PRODUCT_CP_ADS_RULE_ID);
+  const matchedKeys = new Set(
+    matchedSummaries.map(summary => getProductSummarySubjectKey(summary, options.level))
+  );
+  const notificationSubjectKey = getRuleNotificationSubjectKey(options.ruleId);
 
   if (matchedSummaries.length === 0) {
-    await clearRuleStates(LEVEL2_PRODUCT_CP_ADS_RULE_ID, new Set());
+    await clearRuleStates(options.ruleId, new Set());
     return;
   }
 
   matchedKeys.add(notificationSubjectKey);
-  const existingStates = await getRuleStateKeys(LEVEL2_PRODUCT_CP_ADS_RULE_ID);
+  const existingStates = await getRuleStateKeys(options.ruleId);
   const now = Date.now();
 
   if (!shouldSendTelegramAlert(
     existingStates.get(notificationSubjectKey),
     now,
-    LEVEL2_PRODUCT_CP_ADS_COOLDOWN_MS
+    options.cooldownMs
   )) {
-    await clearRuleStates(LEVEL2_PRODUCT_CP_ADS_RULE_ID, matchedKeys);
+    await clearRuleStates(options.ruleId, matchedKeys);
     return;
   }
 
   const maxCpAds = Math.max(...matchedSummaries.map(getProductSummaryCpAds));
   const severity = calculateAlertSeverity(maxCpAds, threshold);
-  const alertContent = createLevel2ProductCpAdsAlertContent(matchedSummaries, threshold);
-
-  await saveAndSendAlert(bot, 'level2_product_cp_ads', alertContent.plainText, severity, {
-    telegramHtml: alertContent.htmlText,
+  // Chỉ hiện nhãn ngắn: "Hôm nay" / "Tháng này" — không kèm khoảng ngày.
+  const periodLabel = options.period.label;
+  const alertContent = await createProductCpAdsAlertContent(matchedSummaries, threshold, {
+    level: options.level,
+    levelLabel: options.levelLabel,
+    periodLabel,
   });
 
-  for (const summary of matchedSummaries) {
-    await saveRuleState(LEVEL2_PRODUCT_CP_ADS_RULE_ID, getProductSummarySubjectKey(summary));
-  }
-  await saveRuleState(LEVEL2_PRODUCT_CP_ADS_RULE_ID, notificationSubjectKey);
+  const wasSent = await saveAndSendAlert(bot, options.alertType, alertContent.plainText, severity, {
+    telegramHtml: alertContent.htmlText,
+    replyMarkup: alertContent.replyMarkup,
+  });
 
-  await clearRuleStates(LEVEL2_PRODUCT_CP_ADS_RULE_ID, matchedKeys);
+  if (!wasSent) {
+    return;
+  }
+
+  for (const summary of matchedSummaries) {
+    await saveRuleState(options.ruleId, getProductSummarySubjectKey(summary, options.level));
+  }
+  await saveRuleState(options.ruleId, notificationSubjectKey);
+
+  await clearRuleStates(options.ruleId, matchedKeys);
+}
+
+async function checkLevel2ProductCpAdsAlerts(bot: Telegraf): Promise<void> {
+  await checkProductCpAdsAlertsForPeriod(bot, {
+    level: 'level2',
+    ruleId: LEVEL2_PRODUCT_CP_ADS_RULE_ID,
+    cooldownMs: LEVEL2_PRODUCT_CP_ADS_COOLDOWN_MS,
+    period: getTodayBcReportPeriod(),
+    levelLabel: 'cấp 2',
+    alertType: 'level2_product_cp_ads',
+    enabled: isLevel2ProductCpAdsEnabled(),
+    threshold: await getLevel2ProductCpAdsThreshold(),
+  });
+}
+
+async function checkLevel3ProductCpAdsMonthAlerts(bot: Telegraf): Promise<void> {
+  await checkProductCpAdsAlertsForPeriod(bot, {
+    level: 'level3',
+    ruleId: LEVEL3_PRODUCT_CP_ADS_MONTH_RULE_ID,
+    cooldownMs: LEVEL3_PRODUCT_CP_ADS_COOLDOWN_MS,
+    period: getMonthBcReportPeriod(),
+    levelLabel: 'cấp 3',
+    alertType: 'level3_product_cp_ads_month',
+    enabled: isLevel3ProductCpAdsEnabled(),
+    threshold: await getLevel3ProductCpAdsThreshold(),
+  });
 }
 
 export async function checkAndSendLevel2Alerts(bot: Telegraf): Promise<void> {
-  console.log('Checking level 2 product CP ads alerts...');
+  console.log('Checking level 2 product CP ads alerts (today)...');
   await checkLevel2ProductCpAdsAlerts(bot);
+}
+
+export async function checkAndSendLevel3Alerts(bot: Telegraf): Promise<void> {
+  console.log('Checking level 3 product CP ads alerts (month-to-date)...');
+  await checkLevel3ProductCpAdsMonthAlerts(bot);
 }
 
 export async function checkAndSendAlerts(bot: Telegraf): Promise<void> {
@@ -1560,19 +2086,32 @@ export async function checkAndSendAlerts(bot: Telegraf): Promise<void> {
     await checkLowBalanceAlerts(bot, filteredBalances, balanceRule);
   }
 
+  // Chỉ dùng status cấp campaign (getTodaySpentCampaigns → campaign/get map).
+  // Không enrich / không bật-tắt theo ad.
+  const campaignsForActionRules = filteredCampaigns;
+
   const qualifiedCampaignNotifyRules = actionRules.filter(isQualifiedCampaignNotifyRule);
-  await processQualifiedCampaignNotifyRules(bot, qualifiedCampaignNotifyRules, filteredCampaigns);
+  await processQualifiedCampaignNotifyRules(bot, qualifiedCampaignNotifyRules, campaignsForActionRules);
 
   for (const rule of actionRules) {
     if (isQualifiedCampaignNotifyRule(rule)) {
       continue;
     }
 
-    if (rule.entity === 'campaign') {
-      await processCampaignRule(bot, rule, filteredCampaigns);
+    // Rule entity=ad: chỉ notify, không auto pause/enable ad.
+    if (rule.entity === 'ad') {
+      if (rule.action === 'notify') {
+        await processAdRule(bot, rule, enrichedAds);
+      } else {
+        console.warn(
+          `[alerts] Bỏ qua rule #${rule.id} entity=ad action=${rule.action} — hệ thống chỉ bật/tắt ở cấp campaign.`
+        );
+      }
       continue;
     }
 
-    await processAdRule(bot, rule, enrichedAds);
+    if (rule.entity === 'campaign') {
+      await processCampaignRule(bot, rule, campaignsForActionRules);
+    }
   }
 }

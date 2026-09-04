@@ -1,5 +1,14 @@
-import { getConfigSnapshot, getSalesData, parseSalesDate, type ConfigData, type SalesData } from '../google-sheets/api.js';
+import {
+  formatSalesDateKey,
+  getConfigSnapshot,
+  getSalesData,
+  parseSalesDate,
+  type ConfigData,
+  type SalesData,
+  type SpMapping,
+} from '../google-sheets/api.js';
 import { getTodaySpentCampaigns, type TikTokSpentCampaign } from '../tiktok/api.js';
+import { getRuntimeSettingNumber, RUNTIME_SETTING_DEFAULTS } from '../settings/runtime.js';
 
 const DEFAULT_TARGET_MKT_CODE = 'MKT80.HOÀNG-TH';
 const REPORT_TIME_ZONE = 'Asia/Ho_Chi_Minh';
@@ -231,11 +240,11 @@ function formatCpAdsPercent(spendVnd: number, grossSalesVnd: number): string {
   }
 
   if (spendVnd > 0 && grossSalesVnd <= 0) {
-    return 'Không DS';
+    return '‼️';
   }
 
   if (spendVnd <= 0 && grossSalesVnd > 0) {
-    return 'Không ads';
+    return '‼️';
   }
 
   return 'N/A';
@@ -266,21 +275,66 @@ function splitShortNames(shortName: string): string[] {
     .filter(Boolean);
 }
 
-function findSalesProductMapping(productName: string | undefined, config: ConfigData) {
+function findSalesProductMappings(
+  productName: string | undefined,
+  config: ConfigData
+): SpMapping[] {
   const normalizedProductName = normalizeKey(productName);
 
   if (!normalizedProductName) {
-    return undefined;
+    return [];
   }
 
-  return config.spMap.find(sp => normalizeKey(sp.variantName) === normalizedProductName);
+  const byCategory = config.spMap.filter(
+    sp => normalizeKey(sp.variantName) === normalizedProductName
+  );
+  if (byCategory.length > 0) {
+    return byCategory;
+  }
+
+  // Fallback: sheet F sometimes stores Tên vật tư (SpMap col B).
+  return config.spMap.filter(
+    sp => normalizeKey(sp.materialName) === normalizedProductName
+  );
 }
 
-function getSalesProductShortName(productName: string | undefined, config: ConfigData): string {
-  const mappedProduct = findSalesProductMapping(productName, config);
-  const firstShortName = mappedProduct ? splitShortNames(mappedProduct.shortName)[0] : undefined;
+function findSalesProductMapping(productName: string | undefined, config: ConfigData) {
+  return findSalesProductMappings(productName, config)[0];
+}
 
-  return firstShortName || String(productName || 'Unknown').trim() || 'Unknown';
+/**
+ * Canonical product key used to join sheet sales with TikTok campaigns.
+ * - 1 KEY MAP for the DANH MỤC → use that KEY MAP (matches campaign prefix)
+ * - many KEY MAPs for same DANH MỤC → group by DANH MỤC so sales are not
+ *   forced onto the first SKU only (e.g. 500G vs 300G)
+ */
+function getSalesProductShortName(productName: string | undefined, config: ConfigData): string {
+  const mappings = findSalesProductMappings(productName, config);
+  if (mappings.length === 0) {
+    return String(productName || 'Unknown').trim() || 'Unknown';
+  }
+
+  const shortNames = [
+    ...new Set(
+      mappings.flatMap(mapping => splitShortNames(mapping.shortName)).filter(Boolean)
+    ),
+  ];
+
+  if (shortNames.length === 1) {
+    return shortNames[0];
+  }
+
+  return mappings[0].variantName || shortNames[0] || String(productName || 'Unknown').trim() || 'Unknown';
+}
+
+function getSalesDateKey(salesDate: unknown): string | undefined {
+  const directKey = formatSalesDateKey(salesDate);
+  if (directKey) {
+    return directKey;
+  }
+
+  const parsed = parseSalesDate(salesDate);
+  return parsed ? formatSalesDateKey(parsed) : undefined;
 }
 
 function getKnownMarketCodes(config: ConfigData): Set<string> {
@@ -315,8 +369,61 @@ function extractCampaignMarketCode(campaignName: string, knownMarketCodes: Set<s
   return marketInName || 'UNKNOWN';
 }
 
-function extractCampaignProductShortName(campaignName: string): string {
-  return campaignName.split('-')[0]?.trim() || 'Unknown';
+function extractCampaignProductShortName(campaignName: string, config: ConfigData): string {
+  const rawName = String(campaignName || '').trim();
+  if (!rawName) {
+    return 'Unknown';
+  }
+
+  const firstPart = rawName.split('-')[0]?.trim() || rawName;
+  const normalizedFirst = normalizeKey(firstPart);
+  const normalizedFull = normalizeKey(rawName);
+
+  let bestMatch:
+    | { score: number; variantName: string }
+    | undefined;
+
+  for (const mapping of config.spMap) {
+    const candidates = [
+      ...splitShortNames(mapping.shortName),
+      mapping.variantName,
+      mapping.materialName || '',
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      const normalizedCandidate = normalizeKey(candidate);
+      if (!normalizedCandidate) {
+        continue;
+      }
+
+      let score = 0;
+      if (normalizedFirst === normalizedCandidate) {
+        score = 200 + normalizedCandidate.length;
+      } else if (
+        normalizedFull.startsWith(`${normalizedCandidate} -`) ||
+        normalizedFull.startsWith(`${normalizedCandidate}-`)
+      ) {
+        score = 150 + normalizedCandidate.length;
+      } else if (normalizedFirst.startsWith(normalizedCandidate) && normalizedCandidate.length >= 3) {
+        score = 50 + normalizedCandidate.length;
+      } else {
+        continue;
+      }
+
+      if (!bestMatch || score > bestMatch.score) {
+        bestMatch = {
+          score,
+          variantName: mapping.variantName || candidate,
+        };
+      }
+    }
+  }
+
+  if (bestMatch) {
+    return getSalesProductShortName(bestMatch.variantName, config);
+  }
+
+  return firstPart || 'Unknown';
 }
 
 function getSummaryKey(productShortName: string, marketCode: string): string {
@@ -396,12 +503,8 @@ function addSalesRowsToSummary(
       continue;
     }
 
-    const salesDate = parseSalesDate(salesRow.date);
-    if (!salesDate) {
-      continue;
-    }
-
-    if (!isDateInRange(formatDateKey(salesDate), period)) {
+    const salesDateKey = getSalesDateKey(salesRow.date);
+    if (!salesDateKey || !isDateInRange(salesDateKey, period)) {
       continue;
     }
 
@@ -432,12 +535,8 @@ function collectSalesDataIssues(
       continue;
     }
 
-    const salesDate = parseSalesDate(salesRow.date);
-    if (!salesDate) {
-      continue;
-    }
-
-    if (!isDateInRange(formatDateKey(salesDate), period)) {
+    const salesDateKey = getSalesDateKey(salesRow.date);
+    if (!salesDateKey || !isDateInRange(salesDateKey, period)) {
       continue;
     }
 
@@ -446,7 +545,7 @@ function collectSalesDataIssues(
 
     if (!productName) {
       reasons.push('Thiếu tên sản phẩm trong sheet');
-    } else if (!findSalesProductMapping(productName, config)) {
+    } else if (findSalesProductMappings(productName, config).length === 0) {
       reasons.push('Sản phẩm chưa có trong SpMap');
     }
 
@@ -483,7 +582,7 @@ function addCampaignsToSummary(
   const knownMarketCodes = getKnownMarketCodes(config);
 
   for (const campaign of campaigns) {
-    const productShortName = extractCampaignProductShortName(campaign.campaign_name);
+    const productShortName = extractCampaignProductShortName(campaign.campaign_name, config);
     const marketCode = extractCampaignMarketCode(campaign.campaign_name, knownMarketCodes);
     const summary = ensureSummary(summaryMap, productShortName, marketCode);
 
@@ -695,19 +794,46 @@ function getRawSalesProductName(productName: string | undefined): string {
   return String(productName || '').trim() || 'Unknown';
 }
 
+async function getBcTikTokFetchOptions(
+  advertiserIds: string[],
+  advertiserAccounts?: Array<{ advertiserId: string; advertiserName?: string; mktCode?: string }>
+) {
+  const concurrency = await getRuntimeSettingNumber(
+    'tiktok_concurrency',
+    RUNTIME_SETTING_DEFAULTS.tiktokConcurrency
+  );
+
+  return {
+    includeCache: false as const,
+    skipStatusMap: true,
+    skipAdSupplement: true,
+    concurrency,
+    advertiserIds,
+    advertiserAccounts,
+  };
+}
+
 export async function buildBcProductMarketSummaries(options: BcReportOptions): Promise<ProductMarketSummary[]> {
   const targetMktCode = options.targetMktCode?.trim() || getTargetMktCode();
   const config = await getConfigSnapshot({ targetMktCode });
-  const salesRows = await getSalesData({ targetMktCode });
-  const advertiserIds = new Set(
-    config.permissions
-      .filter(permission => normalizeKey(permission.mktCode) === normalizeKey(targetMktCode) && permission.enabled)
-      .map(permission => permission.advertiserId)
-  );
-  const campaigns = (await getTodaySpentCampaigns(options.startDate, options.endDate, { includeCache: false }))
-    .filter(campaign => advertiserIds.has(campaign.advertiser_id));
-  const summaryMap = new Map<string, ProductMarketSummary>();
+  const advertiserAccounts = config.permissions
+    .filter(permission => normalizeKey(permission.mktCode) === normalizeKey(targetMktCode) && permission.enabled)
+    .map(permission => ({
+      advertiserId: permission.advertiserId,
+      advertiserName: permission.advertiserName,
+      mktCode: permission.mktCode,
+    }));
+  const advertiserIds = advertiserAccounts.map(account => account.advertiserId);
 
+  const tiktokOptions = await getBcTikTokFetchOptions(advertiserIds, advertiserAccounts);
+  const [salesRows, campaigns] = await Promise.all([
+    getSalesData({ targetMktCode }),
+    advertiserIds.length > 0
+      ? getTodaySpentCampaigns(options.startDate, options.endDate, tiktokOptions)
+      : Promise.resolve([] as Awaited<ReturnType<typeof getTodaySpentCampaigns>>),
+  ]);
+
+  const summaryMap = new Map<string, ProductMarketSummary>();
   addSalesRowsToSummary(summaryMap, salesRows, config, options, targetMktCode);
   addCampaignsToSummary(summaryMap, campaigns, config);
 
@@ -736,8 +862,8 @@ function addAllMktSalesRowsToSummary(
       continue;
     }
 
-    const salesDate = parseSalesDate(salesRow.date);
-    if (!salesDate || !isDateInRange(formatDateKey(salesDate), period)) {
+    const salesDateKey = getSalesDateKey(salesRow.date);
+    if (!salesDateKey || !isDateInRange(salesDateKey, period)) {
       continue;
     }
 
@@ -849,7 +975,6 @@ function renderBcallProductReport(
 
 export async function buildBcAllSalesReport(period: BcReportPeriod): Promise<BcAllSalesReportResult> {
   const config = await getConfigSnapshot({ includeAllMkt: true });
-  const salesRows = await getSalesData({ includeAllMkt: true });
   const permissions = getConfiguredBcallPermissions(config);
   const configuredMktKeys = new Set(permissions.map(permission => getBcallMktKey(permission.mktCode)));
   const summaryMap = new Map<string, BcAllMktSummary>();
@@ -859,16 +984,22 @@ export async function buildBcAllSalesReport(period: BcReportPeriod): Promise<BcA
     .filter((mktCode, index, mktCodes) => mktCodes.findIndex(item => getBcallMktKey(item) === getBcallMktKey(mktCode)) === index)
     .forEach(mktCode => ensureBcallMktSummary(summaryMap, mktCode));
 
+  const advertiserAccounts = permissions.map(permission => ({
+    advertiserId: permission.advertiserId,
+    advertiserName: permission.advertiserName,
+    mktCode: permission.mktCode,
+  }));
+  const advertiserIds = advertiserAccounts.map(account => account.advertiserId);
+
+  const tiktokOptions = await getBcTikTokFetchOptions(advertiserIds, advertiserAccounts);
+  const [salesRows, campaigns] = await Promise.all([
+    getSalesData({ includeAllMkt: true }),
+    advertiserIds.length > 0
+      ? getTodaySpentCampaigns(period.startDate, period.endDate, tiktokOptions)
+      : Promise.resolve([] as Awaited<ReturnType<typeof getTodaySpentCampaigns>>),
+  ]);
+
   addAllMktSalesRowsToSummary(summaryMap, configuredMktKeys, salesRows, period);
-
-  const campaigns = permissions.length > 0
-    ? await getTodaySpentCampaigns(period.startDate, period.endDate, {
-      includeCache: false,
-      advertiserIds: permissions.map(permission => permission.advertiserId),
-      advertiserAccounts: permissions,
-    })
-    : [];
-
   addAllMktCampaignsToSummary(summaryMap, campaigns, config);
 
   return renderBcallReport([...summaryMap.values()], period);
@@ -887,8 +1018,8 @@ export async function buildBcAllMktProductReport(
       continue;
     }
 
-    const salesDate = parseSalesDate(salesRow.date);
-    if (!salesDate || !isDateInRange(formatDateKey(salesDate), period)) {
+    const salesDateKey = getSalesDateKey(salesRow.date);
+    if (!salesDateKey || !isDateInRange(salesDateKey, period)) {
       continue;
     }
 
@@ -914,17 +1045,27 @@ export async function buildBcAllMktProductReport(
 
 export async function buildBcSalesReport(options: BcReportOptions): Promise<BcSalesReportResult> {
   const targetMktCode = options.targetMktCode?.trim() || getTargetMktCode();
+  const startedAt = Date.now();
   const config = await getConfigSnapshot({ targetMktCode });
-  const salesRows = await getSalesData({ targetMktCode });
-  const advertiserIds = new Set(
-    config.permissions
-      .filter(permission => normalizeKey(permission.mktCode) === normalizeKey(targetMktCode) && permission.enabled)
-      .map(permission => permission.advertiserId)
-  );
-  const campaigns = (await getTodaySpentCampaigns(options.startDate, options.endDate, { includeCache: false }))
-    .filter(campaign => advertiserIds.has(campaign.advertiser_id));
-  const summaryMap = new Map<string, ProductMarketSummary>();
+  const advertiserAccounts = config.permissions
+    .filter(permission => normalizeKey(permission.mktCode) === normalizeKey(targetMktCode) && permission.enabled)
+    .map(permission => ({
+      advertiserId: permission.advertiserId,
+      advertiserName: permission.advertiserName,
+      mktCode: permission.mktCode,
+    }));
+  const advertiserIds = advertiserAccounts.map(account => account.advertiserId);
 
+  // Sales sheets + TikTok reports run in parallel (main /bc latency win).
+  const tiktokOptions = await getBcTikTokFetchOptions(advertiserIds, advertiserAccounts);
+  const [salesRows, campaigns] = await Promise.all([
+    getSalesData({ targetMktCode }),
+    advertiserIds.length > 0
+      ? getTodaySpentCampaigns(options.startDate, options.endDate, tiktokOptions)
+      : Promise.resolve([] as Awaited<ReturnType<typeof getTodaySpentCampaigns>>),
+  ]);
+
+  const summaryMap = new Map<string, ProductMarketSummary>();
   addSalesRowsToSummary(summaryMap, salesRows, config, options, targetMktCode);
   addCampaignsToSummary(summaryMap, campaigns, config);
 
@@ -938,6 +1079,12 @@ export async function buildBcSalesReport(options: BcReportOptions): Promise<BcSa
   if (issues.length > 0) {
     message += `\n\n⚠️ Có ${issues.length.toLocaleString('vi-VN')} dòng dữ liệu sale cần kiểm tra.`;
   }
+
+  console.log(
+    `[bc] report ${options.label || options.startDate} mkt=${targetMktCode} ` +
+    `sales=${salesRows.length} camps=${campaigns.length} advertisers=${advertiserIds.length} ` +
+    `in ${Date.now() - startedAt}ms`
+  );
 
   return {
     message,

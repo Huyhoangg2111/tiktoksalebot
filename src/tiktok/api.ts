@@ -141,6 +141,12 @@ interface TikTokAdvertiserAccountOption {
 interface TikTokSpentCampaignOptions {
   includeCache?: boolean;
   includeActiveNoSpend?: boolean;
+  /** Skip campaign/get status pages (faster for /bc reports that only need spend metrics). */
+  skipStatusMap?: boolean;
+  /** Skip ad-level report enrichment (faster for sales reports). */
+  skipAdSupplement?: boolean;
+  /** Max concurrent advertiser API workers (default 4). */
+  concurrency?: number;
   advertiserIds?: string[];
   advertiserAccounts?: TikTokAdvertiserAccountOption[];
 }
@@ -168,6 +174,20 @@ const TIKTOK_WEB_RISK_INFO = {
 };
 export type TikTokCampaignOperationStatus = 'ENABLE' | 'DISABLE';
 
+export interface TikTokCampaignStatusRef {
+  advertiserId: string;
+  campaignId: string;
+}
+
+export interface TikTokCampaignStatusFailure extends TikTokCampaignStatusRef {
+  error: string;
+}
+
+export interface TikTokCampaignStatusBatchResult {
+  succeeded: TikTokCampaignStatusRef[];
+  failed: TikTokCampaignStatusFailure[];
+}
+
 export interface TikTokAdStatusUpdateResult {
   advertiserId: string;
   campaignId: string;
@@ -182,13 +202,10 @@ export interface TikTokCampaignAdsStatus {
 }
 
 export interface TikTokDuplicateCampaignResult {
-  campaignId?: string;
+  campaignId: string;
   advertiserId: string;
   campaignName?: string;
   overrideWarnings?: string[];
-  /** Smart+ async: TikTok accepted the task but campaign_id is not ready yet */
-  status?: 'created' | 'pending';
-  taskId?: string;
 }
 
 export interface TikTokCampaignCloneDefaults {
@@ -348,7 +365,23 @@ function buildMultipartFormData(fields: Record<string, string>): { body: string;
 }
 
 function isSmartPlusCreativeStatusError(message: string): boolean {
-  return /auto[-\s]?generated|creative assets|smart\+/i.test(message);
+  return /auto[-\s]?generated|creative assets|smart\+|upgraded_smart_plus|permission error/i.test(message)
+    || /\b40002\b/.test(message);
+}
+
+function isSmartPlusCampaignRecord(campaign: TikTokCampaignRecord | null | undefined): boolean {
+  if (!campaign) {
+    return false;
+  }
+
+  const campaignRecord = campaign as TikTokCampaignRecord & { automation_type?: unknown };
+  const automationType = String(
+    campaignRecord.campaign_automation_type ||
+    campaignRecord.automation_type ||
+    ''
+  ).toUpperCase();
+
+  return automationType.includes('SMART_PLUS') || automationType.includes('SMART+');
 }
 
 function getAdvertiserCampaignKey(advertiserId: string, campaignId: string): string {
@@ -986,6 +1019,31 @@ export async function getTikTokAccountBalance(): Promise<TikTokAccountBalance[]>
   return balances;
 }
 
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function runWorker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  }
+
+  await Promise.all(Array.from({ length: limit }, () => runWorker()));
+  return results;
+}
+
 /**
  * Get campaigns that have spend today from reporting data.
  *
@@ -1008,12 +1066,18 @@ export async function getTodaySpentCampaigns(
   const today = getTodayDate();
   const fetchStart = startDate || today;
   const fetchEnd = endDate || today;
-  const campaigns: TikTokSpentCampaign[] = [];
   const campaignStatusMaps = new Map<string, Map<string, CampaignStatusInfo>>();
+  const concurrency = Math.max(1, Math.min(options.concurrency || 4, 8));
+  const skipStatusMap = options.skipStatusMap === true;
+  const skipAdSupplement = options.skipAdSupplement === true;
 
-  for (const advertiserId of advertiserIds) {
-    const campaignStatusMap = await getCampaignStatusMap(accessToken, advertiserId);
+  const perAdvertiserCampaigns = await mapWithConcurrency(advertiserIds, concurrency, async (advertiserId) => {
+    const campaignStatusMap = skipStatusMap
+      ? new Map<string, CampaignStatusInfo>()
+      : await getCampaignStatusMap(accessToken, advertiserId);
     campaignStatusMaps.set(advertiserId, campaignStatusMap);
+
+    const advertiserCampaigns: TikTokSpentCampaign[] = [];
     let page = 1;
     let hasMore = true;
 
@@ -1055,7 +1119,7 @@ export async function getTodaySpentCampaigns(
         const reportRows = responseData?.list || [];
         const advertiserAccount = advertiserAccountById.get(advertiserId);
 
-        campaigns.push(
+        advertiserCampaigns.push(
           ...reportRows
             .map((row: any) => {
               const dimensions = row.dimensions || row;
@@ -1082,7 +1146,8 @@ export async function getTodaySpentCampaigns(
                 advertiser_id: advertiserId,
                 advertiser_name: advertiserAccount?.advertiserName,
                 mkt_code: advertiserAccount?.mktCode,
-                status: campaignStatus?.status || 'deleted',
+                // When status map is skipped (BC path), treat as active for aggregation only.
+                status: campaignStatus?.status || (skipStatusMap ? 'active' : 'deleted'),
                 raw_status: campaignStatus?.rawStatus,
                 date: String(dimensions.stat_time_day || today),
                 spend,
@@ -1113,9 +1178,17 @@ export async function getTodaySpentCampaigns(
         break;
       }
     }
-  }
 
-  const shouldSupplementWithTodayAds = fetchStart <= today && fetchEnd >= today;
+    return advertiserCampaigns;
+  });
+
+  const campaigns = perAdvertiserCampaigns.flat();
+
+  const shouldSupplementWithTodayAds =
+    !skipAdSupplement &&
+    !skipStatusMap &&
+    fetchStart <= today &&
+    fetchEnd >= today;
   const supplementedCampaigns = shouldSupplementWithTodayAds
     ? await supplementSpentCampaignsFromAds(campaigns, campaignStatusMaps, advertiserAccounts)
     : campaigns;
@@ -1198,7 +1271,7 @@ export async function getTodaySpentAds(options: TikTokSpentAdOptions = {}): Prom
 /**
  * Get all campaigns for configured advertisers
  */
-export async function getCampaigns(): Promise<TikTokCampaign[]> {
+export async function getCampaigns(options: { strict?: boolean } = {}): Promise<TikTokCampaign[]> {
   const { accessToken, advertiserIds } = await getTikTokConfig();
 
   const campaigns: TikTokCampaign[] = [];
@@ -1246,7 +1319,14 @@ export async function getCampaigns(): Promise<TikTokCampaign[]> {
           hasMore = currentPage * pageSize < totalRecords;
           page++;
         } else {
+          const message = getTikTokApiErrorMessage(
+            response.data,
+            `Failed to get campaigns for advertiser ${advertiserId}`
+          );
           console.error(`Failed to get campaigns for advertiser ${advertiserId}:`, response.data);
+          if (options.strict) {
+            throw new Error(message);
+          }
           // Break the loop if there's an error
           hasMore = false;
         }
@@ -1261,10 +1341,19 @@ export async function getCampaigns(): Promise<TikTokCampaign[]> {
       } else if (error.request) {
         console.error(`Request data:`, error.request);
       }
+      if (options.strict) {
+        throw error;
+      }
     }
   }
 
   return campaigns;
+}
+
+/** Return every currently active campaign from the configured advertiser accounts. */
+export async function getActiveCampaigns(options: { strict?: boolean } = {}): Promise<TikTokCampaign[]> {
+  const campaigns = await getCampaigns(options);
+  return campaigns.filter(campaign => normalizeCampaignStatus(campaign.status) === 'active');
 }
 
 /**
@@ -1874,7 +1963,6 @@ export async function duplicateCampaign(
           campaignId: result.campaignId,
           advertiserId: result.advertiserId,
           campaignName: result.campaignName,
-          status: 'created',
         };
       }
 
@@ -1884,18 +1972,8 @@ export async function duplicateCampaign(
         );
       }
 
-      // Smart+ create_by_snap accepted the async task; campaign may still be settling.
-      if (result.status === 'queued') {
-        return {
-          advertiserId: result.advertiserId,
-          campaignName: result.campaignName,
-          taskId: result.taskId,
-          status: 'pending',
-        };
-      }
-
       throw new Error(
-        `Nhan ban Smart+ khong ro trang thai. Task ID: ${result.taskId || 'khong ro'}. Ten du kien: ${result.campaignName || 'khong ro'}`
+        `TikTok moi tiep nhan yeu cau nhan ban Smart+ chua tao xong campaign that. Task ID: ${result.taskId || 'khong ro'}. Ten du kien: ${result.campaignName || 'khong ro'}`
       );
     } catch (error: any) {
       console.error('[SmartPlus Duplicator] Error duplicating Smart+ campaign:', error);
@@ -2035,6 +2113,91 @@ export async function setCampaignStatus(
 
     throw new Error(errorMessage);
   }
+}
+
+const CAMPAIGN_STATUS_BATCH_SIZE = 20;
+
+/**
+ * Update many campaigns while reading the write token only once.
+ * Requests are grouped by advertiser and sent in conservative batches. If a
+ * batch fails, retry each campaign in that batch so callers receive exact
+ * campaign-level failures and can safely retry only what remains active.
+ */
+export async function setCampaignStatusesBatch(
+  campaigns: TikTokCampaignStatusRef[],
+  operationStatus: TikTokCampaignOperationStatus
+): Promise<TikTokCampaignStatusBatchResult> {
+  const uniqueCampaigns = new Map<string, TikTokCampaignStatusRef>();
+
+  for (const campaign of campaigns) {
+    const advertiserId = String(campaign.advertiserId || '').trim();
+    const campaignId = String(campaign.campaignId || '').trim();
+    if (!advertiserId || !campaignId) {
+      continue;
+    }
+    uniqueCampaigns.set(`${advertiserId}:${campaignId}`, { advertiserId, campaignId });
+  }
+
+  const normalizedCampaigns = [...uniqueCampaigns.values()];
+  if (normalizedCampaigns.length === 0) {
+    return { succeeded: [], failed: [] };
+  }
+
+  const accessToken = await getTikTokWriteAccessToken();
+  const byAdvertiser = new Map<string, TikTokCampaignStatusRef[]>();
+
+  for (const campaign of normalizedCampaigns) {
+    const items = byAdvertiser.get(campaign.advertiserId) || [];
+    items.push(campaign);
+    byAdvertiser.set(campaign.advertiserId, items);
+  }
+
+  const succeeded: TikTokCampaignStatusRef[] = [];
+  const failed: TikTokCampaignStatusFailure[] = [];
+
+  const updateChunk = async (
+    advertiserId: string,
+    chunk: TikTokCampaignStatusRef[]
+  ): Promise<void> => {
+    await postTikTokWriteApi(accessToken, 'campaign/status/update/', {
+      advertiser_id: advertiserId,
+      campaign_ids: chunk.map(campaign => campaign.campaignId),
+      operation_status: operationStatus,
+    });
+  };
+
+  for (const [advertiserId, advertiserCampaigns] of byAdvertiser.entries()) {
+    for (let index = 0; index < advertiserCampaigns.length; index += CAMPAIGN_STATUS_BATCH_SIZE) {
+      const chunk = advertiserCampaigns.slice(index, index + CAMPAIGN_STATUS_BATCH_SIZE);
+
+      try {
+        await updateChunk(advertiserId, chunk);
+        succeeded.push(...chunk);
+      } catch (batchError) {
+        if (chunk.length === 1) {
+          failed.push({
+            ...chunk[0],
+            error: batchError instanceof Error ? batchError.message : String(batchError),
+          });
+          continue;
+        }
+
+        for (const campaign of chunk) {
+          try {
+            await updateChunk(advertiserId, [campaign]);
+            succeeded.push(campaign);
+          } catch (campaignError) {
+            failed.push({
+              ...campaign,
+              error: campaignError instanceof Error ? campaignError.message : String(campaignError),
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return { succeeded, failed };
 }
 
 async function getAdsByCampaignId(
@@ -2222,61 +2385,83 @@ async function setCampaignAdsStatusViaAdsManager(
   };
 }
 
+async function setCampaignAdsStatusViaOpenApiAds(
+  accessToken: string,
+  advertiserId: string,
+  campaignId: string,
+  adIds: string[],
+  operationStatus: TikTokCampaignOperationStatus
+): Promise<void> {
+  const response = await axios.post(
+    `${TIKTOK_API_BASE_URL}/ad/status/update/`,
+    {
+      advertiser_id: advertiserId,
+      ad_ids: adIds,
+      operation_status: operationStatus,
+    },
+    {
+      headers: {
+        'Access-Token': accessToken,
+        'Content-Type': 'application/json',
+      },
+      validateStatus: () => true,
+    }
+  );
+
+  if (!response.data || response.data.code !== 0) {
+    const errorMessage = getTikTokApiErrorMessage(response.data);
+    console.error(`Failed to update ad status for campaign ${campaignId}:`, response.data);
+    throw new Error(errorMessage);
+  }
+}
+
+async function setCampaignStatusViaOpenApi(
+  accessToken: string,
+  advertiserId: string,
+  campaignId: string,
+  operationStatus: TikTokCampaignOperationStatus
+): Promise<void> {
+  const response = await axios.post(
+    `${TIKTOK_API_BASE_URL}/campaign/status/update/`,
+    {
+      advertiser_id: advertiserId,
+      campaign_ids: [campaignId],
+      operation_status: operationStatus,
+    },
+    {
+      headers: {
+        'Access-Token': accessToken,
+        'Content-Type': 'application/json',
+      },
+      validateStatus: () => true,
+    }
+  );
+
+  if (!response.data || response.data.code !== 0) {
+    const errorMessage = getTikTokApiErrorMessage(response.data);
+    console.error(`Failed to update campaign status for ${campaignId}:`, response.data);
+    throw new Error(errorMessage);
+  }
+}
+
+/**
+ * Bật/tắt delivery — CHỈ ở cấp campaign (`campaign/status/update`).
+ * Không còn ad/status/update hay Ads Manager creative list.
+ *
+ * Tên giữ setCampaignAdsStatus để tương thích call-site; hành vi = campaign only.
+ */
 export async function setCampaignAdsStatus(
   advertiserId: string,
   campaignId: string,
   operationStatus: TikTokCampaignOperationStatus
 ): Promise<TikTokAdStatusUpdateResult> {
-  const readConfig = await getTikTokConfig();
-  const accessToken = await getTikTokWriteAccessToken();
-  const ads = await getAdsByCampaignId(readConfig.accessToken || accessToken, advertiserId, campaignId);
-  const adIds = ads.map(ad => ad.adId);
-
-  if (adIds.length === 0) {
-    throw new Error(`Không tìm thấy quảng cáo trong campaign ${campaignId}`);
-  }
-
-  try {
-    const response = await axios.post(
-      `${TIKTOK_API_BASE_URL}/ad/status/update/`,
-      {
-        advertiser_id: advertiserId,
-        ad_ids: adIds,
-        operation_status: operationStatus,
-      },
-      {
-        headers: {
-          'Access-Token': accessToken,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    if (!response.data || response.data.code !== 0) {
-      const errorMessage = getTikTokApiErrorMessage(response.data);
-      console.error(`Failed to update ad status for campaign ${campaignId}:`, response.data);
-      throw new Error(errorMessage);
-    }
-  } catch (error: any) {
-    const errorMessage = axios.isAxiosError(error)
-      ? getTikTokApiErrorMessage(error.response?.data, error.message)
-      : error instanceof Error
-        ? error.message
-        : String(error);
-
-    if (!isSmartPlusCreativeStatusError(errorMessage)) {
-      throw new Error(errorMessage);
-    }
-
-    console.warn(`[TikTok Ads Manager fallback] ${operationStatus} ads for Smart+ campaign ${campaignId}: ${errorMessage}`);
-    return setCampaignAdsStatusViaAdsManager(advertiserId, campaignId, adIds, operationStatus);
-  }
+  const status = await setCampaignStatus(advertiserId, campaignId, operationStatus);
 
   return {
     advertiserId,
     campaignId,
-    adIds,
-    status: normalizeCampaignStatus(operationStatus),
+    adIds: [],
+    status,
   };
 }
 
@@ -2289,7 +2474,14 @@ export async function setCampaignAdsStatusByCampaignId(
     throw new Error(`Không tìm thấy chiến dịch ${campaignId}`);
   }
 
-  return setCampaignAdsStatus(campaign.advertiser_id, campaignId, operationStatus);
+  const status = await setCampaignStatus(campaign.advertiser_id, campaignId, operationStatus);
+
+  return {
+    advertiserId: campaign.advertiser_id,
+    campaignId,
+    adIds: [],
+    status,
+  };
 }
 
 /**

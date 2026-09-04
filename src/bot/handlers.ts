@@ -3,19 +3,23 @@ import type { InlineKeyboardMarkup } from '@telegraf/types/markup';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
+  executeProductPauseByToken,
   getRecentAlerts,
   initializeAlertRules,
+  PRODUCT_PAUSE_CALLBACK_PREFIX,
+  PRODUCT_PAUSE_DONE_CALLBACK_PREFIX,
   setCampaignDailyAlertTracking,
+  updateProductAlertMessageIconAfterPause,
+  updateProductPauseKeyboardAfterSuccess,
   type StoredAlert,
 } from '../alerts/index.js';
 import {
   getCampaignCloneDefaults,
   getTikTokAccountBalance,
-  getCampaignAdsStatuses,
   getTodaySpentAds,
   getTodaySpentCampaigns,
-  setCampaignAdsStatus,
-  setCampaignAdsStatusByCampaignId,
+  setCampaignStatus,
+  setCampaignStatusById,
   type TikTokSpentAd,
   type TikTokSpentCampaign,
 } from '../tiktok/api.js';
@@ -78,8 +82,8 @@ const CAMPAIGNS_LIST_CACHE_TTL_MS = 20_000;
 const COMMAND_MENU_ADMIN = [
   ...COMMAND_MENU_DEFAULT,
   { command: 'reload', description: '🔄 Reload dữ liệu đầu vào' },
-  { command: 'on', description: '✅ Bật quảng cáo theo camp' },
-  { command: 'off', description: '⏸ Tắt quảng cáo theo camp' },
+  { command: 'on', description: '✅ Bật campaign' },
+  { command: 'off', description: '⏸ Tắt campaign' },
   { command: 'xcamp', description: '🚀 Nhân bản chiến dịch' },
 ] as const;
 
@@ -108,55 +112,16 @@ const pendingCampaignListActions = new Map<string, CampaignOperationStatus>();
 const pendingSettingsByChat = new Map<number, RuntimeSettingKey>();
 const execFileAsync = promisify(execFile);
 
-const MAIN_MENU_BUTTONS = [
-  { label: '💰 Số dư', action: 'balance' },
-  { label: '📊 Camp', action: 'campaigns' },
-  { label: '🟢 Active SP', action: 'campactive' },
-  { label: '📈 Camp MKT', action: 'campmkt' },
-  { label: '📋 TKQC', action: 'tkqc' },
-  { label: '🧾 BC MKT', action: 'bc' },
-  { label: '📦 BC All', action: 'bcall' },
-  { label: '⚙️ Cài đặt', action: 'settings' },
-  { label: '🔄 Reload', action: 'reload' },
-  { label: '🚀 XCamp', action: 'xcamp' },
-] as const;
-
-type MainMenuAction = typeof MAIN_MENU_BUTTONS[number]['action'];
-
-function chunkMainMenuButtons<T>(items: T[]): T[][] {
-  const rows: T[][] = [];
-  let index = 0;
-
-  while (index < items.length) {
-    const remaining = items.length - index;
-    const rowSize =
-      remaining <= 4
-        ? remaining
-        : remaining <= 7 || remaining % 4 === 1
-          ? 3
-          : 4;
-
-    rows.push(items.slice(index, index + rowSize));
-    index += rowSize;
-  }
-
-  return rows;
-}
-
-const MAIN_MENU_ACTION_BY_LABEL = new Map<string, MainMenuAction>(
-  MAIN_MENU_BUTTONS.map(button => [button.label, button.action])
-);
-
-const MAIN_MENU_KEYBOARD = Markup.keyboard(
-  chunkMainMenuButtons(MAIN_MENU_BUTTONS.map(button => button.label))
-).resize();
-
 const SETTING_LABELS: Record<RuntimeSettingKey, string> = {
   level1_interval_minutes: 'Lịch cảnh báo cấp 1',
   level2_interval_minutes: 'Lịch cảnh báo cấp 2',
+  level3_interval_minutes: 'Lịch cảnh báo cấp 3 (tháng)',
   exchange_rate: 'Tỉ giá USD/VND',
   balance_threshold_usd: 'Ngưỡng số dư',
-  level2_cp_ads_threshold: 'Ngưỡng %CP cấp 2',
+  level2_cp_ads_threshold: 'Ngưỡng %CP cấp 2 (hôm nay)',
+  level3_cp_ads_threshold: 'Ngưỡng %CP cấp 3 (tháng)',
+  sheets_concurrency: 'Số luồng Google Sheets (/bc)',
+  tiktok_concurrency: 'Số luồng TikTok API (/bc)',
 };
 
 type CampaignAccountReportPeriod = {
@@ -177,12 +142,10 @@ type CampaignMktGroup = {
 };
 
 type DuplicatedCampaignResult = {
-  campaignId?: string;
+  campaignId: string;
   advertiserId: string;
   campaignName?: string;
   overrideWarnings?: string[];
-  status?: 'created' | 'pending';
-  taskId?: string;
 };
 
 type XcampQueueJob = {
@@ -272,6 +235,14 @@ function escapeHtml(value: unknown): string {
     .replace(/"/g, '&quot;');
 }
 
+async function answerCallbackToast(ctx: Context, message: string): Promise<void> {
+  try {
+    await ctx.answerCbQuery(message.slice(0, 200));
+  } catch (error) {
+    console.error('Không hiển thị được popup callback Telegram:', error);
+  }
+}
+
 function formatPercent(value: number): string {
   return `${value.toFixed(2)}%`;
 }
@@ -289,8 +260,9 @@ function getCampaignShortName(campaignName: string): string {
   return campaignName.trim();
 }
 
+/** Chỉ hiển thị / thao tác theo status CẤP CAMPAIGN. */
 function getCampaignVisualStatus(campaign: { status?: CampaignMessageStatus; ad_status?: CampaignVisualStatus }): CampaignVisualStatus {
-  return campaign.ad_status || campaign.status || 'deleted';
+  return campaign.status || 'deleted';
 }
 
 function getCampaignStatusIcon(campaign: { status?: CampaignMessageStatus; ad_status?: CampaignVisualStatus }): string {
@@ -365,13 +337,7 @@ function formatDuplicatedCampaignResultLine(
   const campaignName = getCampaignShortName(result.campaignName || 'Không rõ tên camp');
   const accountSuffix = accountLabel ? ` · ${escapeHtml(accountLabel)}` : '';
 
-  return `🚀 ${escapeHtml(campaignName)} - <code>${escapeHtml(result.campaignId || '')}</code>${accountSuffix}`;
-}
-
-function formatPendingDuplicatedCampaignLine(result: DuplicatedCampaignResult): string {
-  const expectedName = result.campaignName || 'không rõ';
-  const taskId = result.taskId || 'không rõ';
-  return `⏳ Task <code>${escapeHtml(taskId)}</code> · Tên dự kiến: ${escapeHtml(expectedName)}`;
+  return `🚀 ${escapeHtml(campaignName)} - <code>${escapeHtml(result.campaignId)}</code>${accountSuffix}`;
 }
 
 function getAccountTrackingLabel(
@@ -719,72 +685,19 @@ function summarizeAdStatusesForCampaign(ads: TikTokSpentAd[]): CampaignVisualSta
   return 'mixed';
 }
 
+/** Không còn enrich status từ ads — giữ status campaign từ report/API. */
 async function applyTodayAdStatusesToCampaigns(
   campaigns: TikTokSpentCampaign[],
-  options: {
+  _options: {
     advertiserIds?: string[];
     advertiserAccounts?: Array<{ advertiserId: string; advertiserName?: string; mktCode?: string }>;
   } = {}
 ): Promise<TikTokSpentCampaign[]> {
-  if (campaigns.length === 0) {
-    return campaigns;
-  }
-
-  try {
-    const campaignAdStatuses = await getCampaignAdsStatuses(campaigns);
-    const adsByCampaignKey = new Map<string, TikTokSpentAd[]>();
-
-    for (const campaignAdStatus of campaignAdStatuses) {
-      const campaignKey = `${campaignAdStatus.advertiserId}:${campaignAdStatus.campaignId}`;
-      adsByCampaignKey.set(
-        campaignKey,
-        campaignAdStatus.ads.map(ad => ({
-          advertiser_id: campaignAdStatus.advertiserId,
-          campaign_id: campaignAdStatus.campaignId,
-          ad_id: ad.adId,
-          ad_name: '',
-          campaign_name: '',
-          advertiser_name: '',
-          date: getCurrentDateKey(),
-          spend: 0,
-          impressions: 0,
-          clicks: 0,
-          conversions: 0,
-          cpc: 0,
-          cpa: 0,
-          ctr: 0,
-          metrics: {
-            spend: 0,
-            conversions: 0,
-            impressions: 0,
-            clicks: 0,
-            ctr: 0,
-            cpc: 0,
-            conversion_rate: 0,
-            cost_per_conversion: 0,
-          },
-          status: ad.status,
-          raw_status: ad.rawStatus,
-        }))
-      );
-    }
-
-    return campaigns.map(campaign => {
-      const campaignAds = adsByCampaignKey.get(`${campaign.advertiser_id}:${campaign.campaign_id}`) || [];
-      const adStatus = summarizeAdStatusesForCampaign(campaignAds);
-
-      return adStatus
-        ? {
-          ...campaign,
-          ad_status: adStatus,
-          raw_ad_status: adStatus === 'mixed' ? 'MIXED_AD_STATUS' : adStatus,
-        }
-        : campaign;
-    });
-  } catch (error) {
-    console.error('Error applying ad statuses to campaigns:', error);
-    return campaigns;
-  }
+  return campaigns.map(campaign => ({
+    ...campaign,
+    ad_status: undefined,
+    raw_ad_status: undefined,
+  }));
 }
 
 async function getCampaignsForCampaignsList(forceRefresh = false): Promise<TikTokSpentCampaign[]> {
@@ -851,12 +764,17 @@ function updateCampaignAdStatusInCampaignListState(
   status: CampaignVisualStatus,
   rawStatus: string
 ): void {
+  const campaignStatus: CampaignMessageStatus =
+    status === 'mixed' ? 'paused' : (status as CampaignMessageStatus);
+
   const updateCampaign = (campaign: TikTokSpentCampaign): TikTokSpentCampaign => (
     campaign.advertiser_id === advertiserId && campaign.campaign_id === campaignId
       ? {
         ...campaign,
-        ad_status: status,
-        raw_ad_status: rawStatus,
+        status: campaignStatus,
+        raw_status: rawStatus,
+        ad_status: undefined,
+        raw_ad_status: undefined,
       }
       : campaign
   );
@@ -880,44 +798,19 @@ function updateCampaignAdStatusInCampaignListState(
 
 async function refreshCampaignAdStatusInCampaignListState(
   advertiserId: string,
-  campaignId: string
+  campaignId: string,
+  nextStatus?: CampaignMessageStatus
 ): Promise<void> {
-  const [campaignAdStatus] = await getCampaignAdsStatuses([{
-    advertiser_id: advertiserId,
-    campaign_id: campaignId,
-  }]);
-
-  if (!campaignAdStatus) {
-    return;
-  }
-
-  const adStatus = summarizeAdStatusesForCampaign(
-    campaignAdStatus.ads.map(ad => ({
-      advertiser_id: advertiserId,
-      campaign_id: campaignId,
-      ad_id: ad.adId,
-      date: getCurrentDateKey(),
-      spend: 0,
-      impressions: 0,
-      clicks: 0,
-      conversions: 0,
-      cpc: 0,
-      cpa: 0,
-      ctr: 0,
-      status: ad.status,
-      raw_status: ad.rawStatus,
-    }))
-  );
-
-  if (!adStatus) {
+  // Chỉ cập nhật status campaign trong cache UI (không gọi ad/get).
+  if (!nextStatus) {
     return;
   }
 
   updateCampaignAdStatusInCampaignListState(
     advertiserId,
     campaignId,
-    adStatus,
-    adStatus === 'mixed' ? 'MIXED_AD_STATUS' : adStatus
+    nextStatus,
+    nextStatus
   );
 }
 
@@ -1916,74 +1809,45 @@ function buildRecentAlertsMessage(alerts: StoredAlert[]): string {
 
 async function setupCommandMenu(bot: Telegraf): Promise<void> {
   try {
-    await (bot.telegram as any).callApi('deleteMyCommands', {});
+    // Menu slash "/" kiểu bản cũ — danh sách lệnh chuẩn Telegram.
+    await bot.telegram.setMyCommands([...COMMAND_MENU_DEFAULT]);
 
     const adminChatId = process.env.ADMIN_CHAT_ID?.trim();
     if (adminChatId) {
-      await (bot.telegram as any).callApi('deleteMyCommands', {
+      await bot.telegram.setMyCommands([...COMMAND_MENU_ADMIN], {
         scope: {
           type: 'chat',
-          chat_id: adminChatId,
-        },
+          chat_id: Number(adminChatId) || adminChatId,
+        } as any,
       });
     }
 
-    console.log('Telegram command menu hidden');
+    console.log('Telegram command menu configured');
   } catch (error) {
-    console.error('Error hiding Telegram command menu:', error);
+    console.error('Error configuring Telegram command menu:', error);
   }
+}
+
+function buildStartCommandListText(isAdminUser: boolean): string {
+  const commands = isAdminUser ? COMMAND_MENU_ADMIN : COMMAND_MENU_DEFAULT;
+
+  const lines = [
+    'Xin chào! Đây là bot theo dõi chiến dịch TikTok và doanh số bán hàng.',
+    '',
+    '<b>Các lệnh đang dùng</b> (gõ / hoặc mở menu lệnh):',
+    ...commands.map(item => `/${item.command} — ${item.description}`),
+  ];
+
+  return lines.join('\n');
 }
 
 async function sendCommandMenuStartMessage(ctx: Context): Promise<void> {
-  await ctx.reply(
-    'Chọn chức năng bên dưới.',
-    MAIN_MENU_KEYBOARD
-  );
-}
-
-async function handleMainMenuButton(ctx: Context): Promise<boolean> {
-  const action = MAIN_MENU_ACTION_BY_LABEL.get(getTextMessage(ctx).trim());
-  if (!action) {
-    return false;
-  }
-
-  switch (action) {
-    case 'balance':
-      await handleBalanceRequest(ctx);
-      return true;
-    case 'campaigns':
-      await handleCampaignsRequest(ctx, []);
-      return true;
-    case 'campactive':
-      await handleActiveCampaignProductsRequest(ctx);
-      return true;
-    case 'campmkt':
-      await handleCampaignMktReportRequest(ctx, []);
-      return true;
-    case 'tkqc':
-      await handleCampaignAccountReportRequest(ctx, []);
-      return true;
-    case 'bc':
-      await sendBcMenu(ctx);
-      return true;
-    case 'bcall':
-      await sendBcAllMenu(ctx);
-      return true;
-    case 'settings':
-      await handleSettingsRequest(ctx);
-      return true;
-    case 'reload':
-      await handleReloadRequest(ctx);
-      return true;
-    case 'xcamp':
-      await ctx.reply(
-        'Nhập lệnh nhân bản theo mẫu:\n<code>/xcamp campaign_id số_lượng ngân_sách bid</code>',
-        { parse_mode: 'HTML' }
-      );
-      return true;
-  }
-
-  return false;
+  const admin = isAdmin(ctx);
+  // Gỡ bàn phím lưới cũ nếu client còn cache.
+  await ctx.reply(buildStartCommandListText(admin), {
+    parse_mode: 'HTML',
+    ...Markup.removeKeyboard(),
+  });
 }
 
 function formatSettingNumber(value: number): string {
@@ -1996,31 +1860,50 @@ async function buildSettingsMessage(): Promise<string> {
   const settings = await getRuntimeSettingsSnapshot();
 
   return [
-    '<b>Cài đặt bot</b>',
+    '<b>⚙️ CÀI ĐẶT BOT</b>',
     '',
-    `Cấp 1: mỗi <b>${formatSettingNumber(settings.level1IntervalMinutes)}</b> phút`,
-    `Cấp 2: mỗi <b>${formatSettingNumber(settings.level2IntervalMinutes)}</b> phút`,
-    `Tỉ giá: <b>${formatSettingNumber(settings.exchangeRate)}</b> VND/USD`,
-    `Số dư: cảnh báo dưới <b>$${formatSettingNumber(settings.balanceThresholdUsd)}</b>`,
-    `%CP cấp 2: trên <b>${formatSettingNumber(settings.level2CpAdsThreshold)}%</b>`,
+    '<b>📋 Cảnh báo</b>',
+    `• Cấp 1: mỗi <b>${formatSettingNumber(settings.level1IntervalMinutes)}</b> phút`,
+    `• Cấp 2 (hôm nay): mỗi <b>${formatSettingNumber(settings.level2IntervalMinutes)}</b> phút · %CP &gt; <b>${formatSettingNumber(settings.level2CpAdsThreshold)}%</b>`,
+    `• Cấp 3 (tháng): mỗi <b>${formatSettingNumber(settings.level3IntervalMinutes)}</b> phút · %CP &gt; <b>${formatSettingNumber(settings.level3CpAdsThreshold)}%</b>`,
+    `• Số dư: dưới <b>$${formatSettingNumber(settings.balanceThresholdUsd)}</b>`,
     '',
-    'Bấm mục cần sửa rồi nhập số mới.',
+    '<b>💱 Tỉ giá</b>',
+    `• USD/VND: <b>${formatSettingNumber(settings.exchangeRate)}</b>`,
+    '',
+    '<b>⚡ Hiệu năng /bc</b>',
+    `• Luồng Google Sheets: <b>${formatSettingNumber(settings.sheetsConcurrency)}</b> (1–8)`,
+    `• Luồng TikTok API: <b>${formatSettingNumber(settings.tiktokConcurrency)}</b> (1–8)`,
+    '',
+    '<i>Chọn mục bên dưới → nhập số mới.</i>',
+    '<i>Cấp 2 = %CP hôm nay · Cấp 3 = %CP từ đầu tháng đến nay (ngưỡng riêng).</i>',
   ].join('\n');
 }
 
 function buildSettingsKeyboard() {
+  // Lưới cân đối: 2 nút / hàng, nhóm theo chức năng.
   return Markup.inlineKeyboard([
     [
       Markup.button.callback('⏱ Cấp 1', 'settings:set:level1_interval_minutes'),
       Markup.button.callback('⏱ Cấp 2', 'settings:set:level2_interval_minutes'),
     ],
     [
-      Markup.button.callback('💱 Tỉ giá', 'settings:set:exchange_rate'),
+      Markup.button.callback('⏱ Cấp 3', 'settings:set:level3_interval_minutes'),
       Markup.button.callback('💰 Số dư', 'settings:set:balance_threshold_usd'),
     ],
     [
       Markup.button.callback('📈 %CP C2', 'settings:set:level2_cp_ads_threshold'),
-      Markup.button.callback('🚀 Chạy install-vps', 'settings:restart'),
+      Markup.button.callback('📉 %CP C3', 'settings:set:level3_cp_ads_threshold'),
+    ],
+    [
+      Markup.button.callback('💱 Tỉ giá', 'settings:set:exchange_rate'),
+    ],
+    [
+      Markup.button.callback('📄 Luồng Sheets', 'settings:set:sheets_concurrency'),
+      Markup.button.callback('📡 Luồng TikTok', 'settings:set:tiktok_concurrency'),
+    ],
+    [
+      Markup.button.callback('🚀 Chạy install-vps.sh', 'settings:restart'),
     ],
   ]);
 }
@@ -2040,7 +1923,11 @@ async function handleSettingsRequest(ctx: Context): Promise<void> {
 async function applyRuntimeSetting(key: RuntimeSettingKey, value: number): Promise<void> {
   await setRuntimeSettingNumber(key, value);
 
-  if (key === 'level1_interval_minutes' || key === 'level2_interval_minutes') {
+  if (
+    key === 'level1_interval_minutes' ||
+    key === 'level2_interval_minutes' ||
+    key === 'level3_interval_minutes'
+  ) {
     await restartScheduler();
   }
 
@@ -2074,15 +1961,23 @@ async function handlePendingSettingText(ctx: Context): Promise<boolean> {
 
   const value = Number(getTextMessage(ctx).replace(/,/g, '').trim());
   if (!Number.isFinite(value) || value <= 0) {
-    await ctx.reply('Giá trị không hợp lệ. Nhập một số lớn hơn 0.');
+    const hint =
+      pendingKey === 'sheets_concurrency' || pendingKey === 'tiktok_concurrency'
+        ? 'Nhập số nguyên từ 1 đến 8.'
+        : 'Nhập một số lớn hơn 0.';
+    await ctx.reply(`Giá trị không hợp lệ. ${hint}`);
     return true;
   }
 
   try {
     await applyRuntimeSetting(pendingKey, value);
     pendingSettingsByChat.delete(chatId);
+    const displayValue =
+      pendingKey === 'sheets_concurrency' || pendingKey === 'tiktok_concurrency'
+        ? String(Math.trunc(value))
+        : formatSettingNumber(value);
     await ctx.reply(
-      `✅ Đã cập nhật ${SETTING_LABELS[pendingKey]}: <b>${escapeHtml(formatSettingNumber(value))}</b>`,
+      `✅ Đã cập nhật ${SETTING_LABELS[pendingKey]}: <b>${escapeHtml(displayValue)}</b>`,
       { parse_mode: 'HTML' }
     );
     await handleSettingsRequest(ctx);
@@ -2215,7 +2110,6 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
 
   try {
     const duplicatedCampaigns: DuplicatedCampaignResult[] = [];
-    const pendingCampaigns: DuplicatedCampaignResult[] = [];
     const errors: string[] = [];
 
     for (let i = 0; i < job.quantity; i++) {
@@ -2224,29 +2118,13 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
           overrideBudget: job.budget,
           overrideBid: job.bid,
         });
-        if (!result) {
-          errors.push(`Không nhận được kết quả nhân bản (lần ${i + 1}).`);
-          continue;
-        }
-
-        if (result.status === 'pending') {
-          pendingCampaigns.push(result);
-          continue;
-        }
-
-        if (result.campaignId) {
+        if (result) {
           duplicatedCampaigns.push(result);
           try {
-            await recordCampaignClone(job.campaignId, {
-              campaignId: result.campaignId,
-              advertiserId: result.advertiserId,
-              campaignName: result.campaignName,
-            });
+            await recordCampaignClone(job.campaignId, result);
           } catch (recordError) {
             console.error('Không ghi được bộ đếm nhân bản campaign:', recordError);
           }
-        } else {
-          errors.push(`Nhân bản lần ${i + 1} thiếu campaign ID.`);
         }
       } catch (err) {
         errors.push(err instanceof Error ? err.message : String(err));
@@ -2261,25 +2139,11 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
     }
     const permissionByAdvertiserId = buildAdvertiserPermissionMap(advertiserPermissions);
 
-    const createdCount = duplicatedCampaigns.length;
-    const pendingCount = pendingCampaigns.length;
-    const errorCount = errors.length;
-    const summaryIcon = errorCount > 0 && createdCount === 0 && pendingCount === 0
-      ? '❌'
-      : pendingCount > 0 && createdCount === 0
-        ? '⏳'
-        : '✅';
-
-    let finalMsg =
-      `${summaryIcon} <b>Kết quả nhân bản:</b> tạo <b>${createdCount}</b> · đang xử lý <b>${pendingCount}</b> · lỗi <b>${errorCount}</b> / tổng <b>${job.quantity}</b>\n\n`;
-
+    let finalMsg = `✅ <b>Kết quả nhân bản (${duplicatedCampaigns.length}/${job.quantity}):</b>\n\n`;
     if (duplicatedCampaigns.length > 0) {
       finalMsg += `Các camp mới:\n${duplicatedCampaigns.map(result =>
         formatDuplicatedCampaignResultLine(result, permissionByAdvertiserId)
       ).join('\n')}\n`;
-    }
-    if (pendingCampaigns.length > 0) {
-      finalMsg += `\n⏳ <b>Đang xử lý</b> (TikTok đã nhận task, camp có thể chưa hiện ngay):\n${pendingCampaigns.map(formatPendingDuplicatedCampaignLine).join('\n')}\n`;
     }
     const overrideWarnings = duplicatedCampaigns
       .flatMap(result => result.overrideWarnings || [])
@@ -2289,7 +2153,8 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
       if (overrideWarnings.length > 1) finalMsg += ` (và ${overrideWarnings.length - 1} cảnh báo khác)`;
     }
     if (errors.length > 0) {
-      finalMsg += `\n❌ <b>Lỗi:</b>\n${errors.map(error => `• ${escapeHtml(error)}`).join('\n')}`;
+      finalMsg += `\n❌ <b>Lỗi:</b>\n${escapeHtml(errors[0])}`;
+      if (errors.length > 1) finalMsg += ` (và ${errors.length - 1} lỗi khác)`;
     }
 
     await updateXcampQueueMessage(job, finalMsg);
@@ -2856,6 +2721,74 @@ export function setupBotHandlers(bot: Telegraf) {
   bot.command('settings', (ctx) => void handleSettingsRequest(ctx));
   setupBcSalesHandlers(bot);
 
+  // Nút tắt camp theo SP dưới cảnh báo cấp 2 / cấp 3 (chấm màu + số như /campaigns).
+  bot.action(new RegExp(`^${PRODUCT_PAUSE_CALLBACK_PREFIX}:(.+)$`), async (ctx) => {
+    if (!isAdmin(ctx)) {
+      await ctx.answerCbQuery('Không có quyền thực hiện.');
+      return;
+    }
+
+    const token = ctx.match[1];
+
+    try {
+      const result = await executeProductPauseByToken(token);
+      const popupMessage = result.allPaused
+        ? result.total > 0
+          ? `✅ ${result.productLabel}: Đã tắt thành công ${result.total}/${result.total} campaign`
+          : `✅ ${result.productLabel}: Không còn campaign active`
+        : `⚠️ ${result.productLabel}: Đã tắt ${result.success}/${result.total}, còn ${result.failed} camp active. Bấm lại để thử tiếp.`;
+
+      await answerCallbackToast(ctx, popupMessage);
+
+      // Đồng bộ màu: nút 🟢N→🟡N và dòng SP "N. 🟢"→"N. 🟡" (giống /campaigns).
+      if (result.allPaused) {
+        const message = ctx.callbackQuery.message;
+        if (message && 'text' in message && typeof message.text === 'string') {
+          const currentMarkup = 'reply_markup' in message
+            ? (message as { reply_markup?: InlineKeyboardMarkup }).reply_markup
+            : undefined;
+
+          const updatedMarkup = updateProductPauseKeyboardAfterSuccess(
+            currentMarkup as Parameters<typeof updateProductPauseKeyboardAfterSuccess>[0],
+            result.token,
+            result.itemNumber
+          );
+          const updatedText = updateProductAlertMessageIconAfterPause(
+            message.text,
+            result.itemNumber
+          );
+
+          try {
+            if (updatedText !== message.text) {
+              await ctx.editMessageText(updatedText, {
+                ...(updatedMarkup ? { reply_markup: updatedMarkup as InlineKeyboardMarkup } : currentMarkup ? { reply_markup: currentMarkup } : {}),
+              });
+            } else if (updatedMarkup) {
+              await ctx.editMessageReplyMarkup(updatedMarkup as InlineKeyboardMarkup);
+            }
+          } catch (editError) {
+            console.error('Error syncing product pause colors on alert message:', editError);
+            if (updatedMarkup) {
+              try {
+                await ctx.editMessageReplyMarkup(updatedMarkup as InlineKeyboardMarkup);
+              } catch (markupError) {
+                console.error('Error updating product pause button color:', markupError);
+              }
+            }
+          }
+        }
+      }
+
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await answerCallbackToast(ctx, `❌ Không tắt được camp theo SP: ${message}`);
+    }
+  });
+
+  bot.action(new RegExp(`^${PRODUCT_PAUSE_DONE_CALLBACK_PREFIX}:(\\d+)$`), async (ctx) => {
+    await ctx.answerCbQuery(`SP #${ctx.match[1]} đã tắt (paused).`);
+  });
+
   bot.action(/^settings:set:(.+)$/, async (ctx) => {
     if (!isAdmin(ctx)) {
       await ctx.answerCbQuery('Không có quyền thực hiện.');
@@ -2876,7 +2809,14 @@ export function setupBotHandlers(bot: Telegraf) {
 
     pendingSettingsByChat.set(chatId, key);
     await ctx.answerCbQuery();
-    await ctx.reply(`Nhập giá trị mới cho ${SETTING_LABELS[key]}.`);
+    const rangeHint =
+      key === 'sheets_concurrency' || key === 'tiktok_concurrency'
+        ? '\n<i>Nhập số nguyên từ 1 đến 8.</i>\nThấp = nhẹ quota · Cao = /bc nhanh hơn.'
+        : '';
+    await ctx.reply(
+      `Nhập giá trị mới cho <b>${escapeHtml(SETTING_LABELS[key])}</b>.${rangeHint}`,
+      { parse_mode: 'HTML' }
+    );
   });
 
   bot.action(/^settings:restart$/, async (ctx) => {
@@ -3108,18 +3048,18 @@ export function setupBotHandlers(bot: Telegraf) {
 
     void (async () => {
       try {
-        const result = await setCampaignAdsStatus(advertiserId, campaignId, operationStatus);
+        const nextStatus = await setCampaignStatus(advertiserId, campaignId, operationStatus);
         updateCampaignAdStatusInCampaignListState(
           advertiserId,
           campaignId,
-          result.status || (operationStatus === 'ENABLE' ? 'active' : 'paused'),
+          nextStatus || (operationStatus === 'ENABLE' ? 'active' : 'paused'),
           operationStatus
         );
 
         try {
           await ctx.telegram.answerCbQuery(
             callbackQueryId,
-            `${accountLabel} ${actionLabel} ${result.adIds.length} QC thành công`
+            `${accountLabel} ${actionLabel} campaign thành công`
           );
         } catch (notifyError) {
           console.error('Error sending campaign status success notification:', notifyError);
@@ -3128,9 +3068,13 @@ export function setupBotHandlers(bot: Telegraf) {
         console.error('Error updating campaign status from campaigns list:', error);
 
         try {
-          await refreshCampaignAdStatusInCampaignListState(advertiserId, campaignId);
+          await refreshCampaignAdStatusInCampaignListState(
+            advertiserId,
+            campaignId,
+            operationStatus === 'ENABLE' ? 'active' : 'paused'
+          );
         } catch (refreshError) {
-          console.error('Error refreshing campaign ad status after failed action:', refreshError);
+          console.error('Error refreshing campaign status after failed action:', refreshError);
         }
 
         try {
@@ -3183,8 +3127,7 @@ export function setupBotHandlers(bot: Telegraf) {
     }
 
     try {
-      const result = await setCampaignAdsStatusByCampaignId(campaignId, operationStatus);
-      const newStatus = result.status || (operationStatus === 'ENABLE' ? 'active' : 'paused');
+      const newStatus = await setCampaignStatusById(campaignId, operationStatus);
       const groupedReplyMarkup = updateGroupedCampaignActionReplyMarkup(
         (message as { reply_markup?: InlineKeyboardMarkup }).reply_markup,
         campaignId,
@@ -3198,7 +3141,7 @@ export function setupBotHandlers(bot: Telegraf) {
           console.error('Error editing grouped campaign action keyboard:', editError);
         }
 
-        await ctx.answerCbQuery(`${actionLabel} ${result.adIds.length} QC thành công`);
+        await ctx.answerCbQuery(`${actionLabel} campaign thành công`);
         return;
       }
 
@@ -3219,7 +3162,7 @@ export function setupBotHandlers(bot: Telegraf) {
         }
       }
 
-      await ctx.answerCbQuery(`${actionLabel} ${result.adIds.length} QC thành công`);
+      await ctx.answerCbQuery(`${actionLabel} campaign thành công`);
     } catch (error) {
       console.error('Error updating campaign status from alert button:', error);
       const alertErrorMessage = formatCallbackErrorMessage(`${actionLabel} thất bại`, error);
@@ -3341,15 +3284,15 @@ export function setupBotHandlers(bot: Telegraf) {
 
     const campaignId = args[1];
     try {
-      const result = await setCampaignAdsStatusByCampaignId(campaignId, 'ENABLE');
-      await ctx.reply(`✅ Đã bật <b>${result.adIds.length}</b> quảng cáo trong camp <code>${escapeHtml(campaignId)}</code>.`, { parse_mode: 'HTML' });
+      await setCampaignStatusById(campaignId, 'ENABLE');
+      await ctx.reply(`✅ Đã bật campaign <code>${escapeHtml(campaignId)}</code>.`, { parse_mode: 'HTML' });
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
-      await ctx.reply(`❌ Không thể bật quảng cáo trong camp <code>${escapeHtml(campaignId)}</code>:\n${escapeHtml(errMsg)}`, { parse_mode: 'HTML' });
+      await ctx.reply(`❌ Không thể bật campaign <code>${escapeHtml(campaignId)}</code>:\n${escapeHtml(errMsg)}`, { parse_mode: 'HTML' });
     }
   });
 
-  // ── /off <campaign_id> — Tắt quảng cáo trong chiến dịch ──────────────────
+  // ── /off <campaign_id> — Tắt chiến dịch (cấp campaign) ──────────────────
   bot.command('off', async (ctx) => {
     if (!isAdmin(ctx)) {
       await ctx.reply('❌ Chỉ admin mới có thể thực hiện hành động này.');
@@ -3364,11 +3307,11 @@ export function setupBotHandlers(bot: Telegraf) {
 
     const campaignId = args[1];
     try {
-      const result = await setCampaignAdsStatusByCampaignId(campaignId, 'DISABLE');
-      await ctx.reply(`⏸ Đã tắt <b>${result.adIds.length}</b> quảng cáo trong camp <code>${escapeHtml(campaignId)}</code>.`, { parse_mode: 'HTML' });
+      await setCampaignStatusById(campaignId, 'DISABLE');
+      await ctx.reply(`⏸ Đã tắt campaign <code>${escapeHtml(campaignId)}</code>.`, { parse_mode: 'HTML' });
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
-      await ctx.reply(`❌ Không thể tắt quảng cáo trong camp <code>${escapeHtml(campaignId)}</code>:\n${escapeHtml(errMsg)}`, { parse_mode: 'HTML' });
+      await ctx.reply(`❌ Không thể tắt campaign <code>${escapeHtml(campaignId)}</code>:\n${escapeHtml(errMsg)}`, { parse_mode: 'HTML' });
     }
   });
 
@@ -3418,15 +3361,14 @@ export function setupBotHandlers(bot: Telegraf) {
 
   bot.on('text', (ctx) => {
     void (async () => {
-      if (await handleMainMenuButton(ctx)) {
-        return;
-      }
-
       if (await handlePendingSettingText(ctx)) {
         return;
       }
 
-      await ctx.reply('Tôi không hiểu lệnh này. Bấm /start để mở menu.', MAIN_MENU_KEYBOARD);
+      await ctx.reply(
+        'Tôi không hiểu lệnh này. Dùng /start để xem danh sách lệnh (ví dụ /balance, /campaigns, /bc).',
+        Markup.removeKeyboard()
+      );
     })();
   });
 }
