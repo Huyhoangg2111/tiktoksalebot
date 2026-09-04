@@ -77,14 +77,13 @@ async function main() {
   // Connect to database
   await connectDB();
   await initializeAlertRules();
-  
+
   // Initialize Telegram bot
   bot = new Telegraf(botToken);
-  
-  // Setup bot command handlers
-  setupBotHandlers(bot);
 
-  // Lightweight runtime diagnostics that do not expose credentials.
+  // Register health before setupBotHandlers(), because setupBotHandlers installs
+  // a catch-all bot.on('text') fallback that intentionally does not call next().
+  // If health is registered after it, /health is swallowed as an unknown command.
   bot.command('health', async (ctx) => {
     const snapshot = getSchedulerHealthSnapshot();
     const uptimeSeconds = Math.round(process.uptime());
@@ -120,6 +119,9 @@ async function main() {
     await ctx.reply(lines.join('\n'));
   });
 
+  // Setup the rest of the bot command handlers and text fallbacks.
+  setupBotHandlers(bot);
+
   // Start the scheduler before awaiting launch so periodic checks are always registered.
   startScheduler(bot);
 
@@ -132,7 +134,7 @@ async function main() {
 // Handle graceful shutdown
 async function shutdown(signal: NodeJS.Signals) {
   console.log(`Received ${signal}, shutting down gracefully...`);
-  
+
   // Force exit after 3 seconds if graceful shutdown hangs
   setTimeout(() => {
     console.error('Graceful shutdown timed out. Forcing exit...');
@@ -144,7 +146,7 @@ async function shutdown(signal: NodeJS.Signals) {
   } catch (e) {
     console.error('Error stopping bot:', e);
   }
-  
+
   if (signerRuntime) {
     try {
       await signerRuntime.close();
@@ -152,7 +154,7 @@ async function shutdown(signal: NodeJS.Signals) {
       console.error('Error closing signer:', e);
     }
   }
-  
+
   process.exit(0);
 }
 
