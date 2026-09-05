@@ -5,6 +5,7 @@ import { setupBotHandlers } from './bot/handlers.js';
 import { setupSmartPlusAppealHandlers } from './bot/smartplus-appeal-handlers.js';
 import { setupSettingsMenuHandlers } from './bot/settings-menu.js';
 import { setupRetiredAlertActions } from './bot/retired-alert-actions.js';
+import { setupMaterialHandlers } from './bot/material-handlers.js';
 import { initializeAlertRules } from './alerts/index.js';
 import { startScheduler } from './scheduler/index.js';
 import { startServer, type SignerServerRuntime } from './playwright-signer/server.js';
@@ -65,6 +66,9 @@ async function main() {
   // Retire the old alert actions before any legacy callbacks are registered.
   // This also strips their buttons from all Telegram send/edit payloads.
   setupRetiredAlertActions(bot);
+
+  // Material detail/toggle callbacks must be registered before the legacy handlers.
+  setupMaterialHandlers(bot);
 
   // Register settings before the legacy handlers, because setupBotHandlers() contains
   // the old settings implementation and a catch-all text fallback. The new settings
