@@ -57,9 +57,25 @@ function formatTimestamp(timestamp?: number): string {
 
 function formatDuration(durationMs?: number): string {
   if (durationMs === undefined) return '-';
-  if (durationMs < 1_000) return `${durationMs}ms`;
-  if (durationMs < 60_000) return `${(durationMs / 1_000).toFixed(1)}s`;
-  return `${(durationMs / 60_000).toFixed(1)}m`;
+  if (durationMs < 1_000) return `${durationMs} mili giây`;
+  if (durationMs < 60_000) return `${(durationMs / 1_000).toFixed(1)} giây`;
+  return `${(durationMs / 60_000).toFixed(1)} phút`;
+}
+
+function formatSchedulerLevel(level: string): string {
+  const match = level.match(/level\s*(\d+)/i);
+  return match?.[1] ? `Cấp ${match[1]}` : level.toUpperCase();
+}
+
+function formatSchedulerStatus(state: {
+  running: boolean;
+  consecutiveFailures: number;
+  lastSuccessAt?: number;
+}): string {
+  if (state.running) return '🟡 ĐANG CHẠY';
+  if (state.consecutiveFailures > 0) return `🔴 LỖI x${state.consecutiveFailures}`;
+  if (state.lastSuccessAt) return '🟢 ỔN ĐỊNH';
+  return '⚪ ĐANG CHỜ';
 }
 
 async function buildSettingsMessage(): Promise<string> {
@@ -82,7 +98,6 @@ async function buildSettingsMessage(): Promise<string> {
     `• Luồng TikTok API: <b>${formatSettingNumber(settings.tiktokConcurrency)}</b> (1–8)`,
     '',
     '<i>Chọn mục bên dưới → nhập số mới.</i>',
-    '<i>“Tình trạng bot” thay cho /health cũ.</i>',
   ].join('\n');
 }
 
@@ -112,7 +127,15 @@ function buildSettingsKeyboard() {
 function buildHealthKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('🔄 Làm mới', 'settings:health')],
+    [Markup.button.callback('♻️ Khởi động lại Docker bot', 'settings:docker_restart')],
     [Markup.button.callback('⬅️ Quay lại cài đặt', 'settings:menu')],
+  ]);
+}
+
+function buildDockerRestartConfirmKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('✅ Xác nhận khởi động lại', 'settings:docker_restart_confirm')],
+    [Markup.button.callback('❌ Hủy', 'settings:docker_restart_cancel')],
   ]);
 }
 
@@ -120,32 +143,28 @@ function buildHealthMessage(): string {
   const snapshot = getSchedulerHealthSnapshot();
   const uptimeSeconds = Math.round(process.uptime());
   const memoryMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
+  const uptimeHours = Math.floor(uptimeSeconds / 3600);
+  const uptimeMinutes = Math.floor((uptimeSeconds % 3600) / 60);
   const lines = [
     '<b>🩺 TÌNH TRẠNG BOT</b>',
     '',
-    `Uptime: <b>${Math.floor(uptimeSeconds / 3600)}h ${Math.floor((uptimeSeconds % 3600) / 60)}m</b>`,
-    `Memory RSS: <b>${memoryMb} MB</b>`,
-    `Scheduler generation: <b>${snapshot.generation}</b>`,
-    `Restart requested: <b>${snapshot.restartRequested ? 'YES' : 'no'}</b>`,
+    `⏱ Thời gian hoạt động: <b>${uptimeHours} giờ ${uptimeMinutes} phút</b>`,
+    `🧠 Bộ nhớ đang dùng (RSS): <b>${memoryMb} MB</b>`,
+    `🔁 Phiên lịch chạy: <b>${snapshot.generation}</b>`,
+    `♻️ Đang yêu cầu khởi động lại: <b>${snapshot.restartRequested ? 'CÓ' : 'KHÔNG'}</b>`,
   ];
 
   for (const [level, state] of Object.entries(snapshot.levels)) {
-    const status = state.running
-      ? 'RUNNING'
-      : state.consecutiveFailures > 0
-        ? `ERROR x${state.consecutiveFailures}`
-        : state.lastSuccessAt
-          ? 'OK'
-          : 'WAITING';
-
     lines.push(
       '',
-      `<b>${level.toUpperCase()}: ${status}</b>`,
-      `Interval: ${state.intervalMinutes}m · Hard timeout: ${Math.round(state.timeoutMs / 60_000)}m`,
-      `Last start: ${formatTimestamp(state.lastStartedAt)}`,
-      `Last success: ${formatTimestamp(state.lastSuccessAt)}`,
-      `Last duration: ${formatDuration(state.lastDurationMs)}`,
-      state.lastError ? `Last error: ${escapeHtml(state.lastError.slice(0, 300))}` : 'Last error: -'
+      `<b>${formatSchedulerLevel(level)}: ${formatSchedulerStatus(state)}</b>`,
+      `Chu kỳ: ${state.intervalMinutes} phút · Giới hạn thời gian: ${Math.round(state.timeoutMs / 60_000)} phút`,
+      `Lần bắt đầu gần nhất: ${formatTimestamp(state.lastStartedAt)}`,
+      `Lần thành công gần nhất: ${formatTimestamp(state.lastSuccessAt)}`,
+      `Thời gian chạy gần nhất: ${formatDuration(state.lastDurationMs)}`,
+      state.lastError
+        ? `Lỗi gần nhất: ${escapeHtml(state.lastError.slice(0, 300))}`
+        : 'Lỗi gần nhất: Không có'
     );
   }
 
@@ -171,6 +190,19 @@ async function showSettings(ctx: Context, edit = false): Promise<void> {
   }
 
   await ctx.reply(text, options);
+}
+
+async function showHealth(ctx: Context): Promise<void> {
+  try {
+    await ctx.editMessageText(buildHealthMessage(), {
+      parse_mode: 'HTML',
+      ...buildHealthKeyboard(),
+    });
+  } catch (error) {
+    if (!String(error).toLowerCase().includes('message is not modified')) {
+      throw error;
+    }
+  }
 }
 
 async function applyRuntimeSetting(key: RuntimeSettingKey, value: number): Promise<void> {
@@ -233,8 +265,7 @@ async function handlePendingSettingText(ctx: Context): Promise<boolean> {
 }
 
 export function setupSettingsMenuHandlers(bot: Telegraf): void {
-  // Register before the legacy handlers. These handlers intentionally do not call next(),
-  // so the old settings UI (including install-vps.sh) is no longer reachable.
+  // Đăng ký trước handler cũ để menu cài đặt mới xử lý toàn bộ callback liên quan.
   bot.command('settings', async ctx => {
     if (!isAdmin(ctx)) {
       await ctx.reply('❌ Chỉ admin mới có thể mở cài đặt.');
@@ -281,16 +312,7 @@ export function setupSettingsMenuHandlers(bot: Telegraf): void {
     }
 
     await ctx.answerCbQuery('Đã cập nhật tình trạng bot.');
-    try {
-      await ctx.editMessageText(buildHealthMessage(), {
-        parse_mode: 'HTML',
-        ...buildHealthKeyboard(),
-      });
-    } catch (error) {
-      if (!String(error).toLowerCase().includes('message is not modified')) {
-        throw error;
-      }
-    }
+    await showHealth(ctx);
   });
 
   bot.action(/^settings:menu$/, async ctx => {
@@ -303,15 +325,79 @@ export function setupSettingsMenuHandlers(bot: Telegraf): void {
     await showSettings(ctx, true);
   });
 
-  // Safety net for stale Telegram messages created by the old UI.
-  // The former install-vps action is deliberately intercepted and never executed.
+  bot.action(/^settings:docker_restart$/, async ctx => {
+    if (!isAdmin(ctx)) {
+      await ctx.answerCbQuery('Không có quyền thực hiện.');
+      return;
+    }
+
+    await ctx.answerCbQuery();
+    await ctx.editMessageText(
+      [
+        '<b>♻️ KHỞI ĐỘNG LẠI DOCKER BOT</b>',
+        '',
+        'Bot sẽ tự thoát tiến trình để Docker khởi động lại container <code>tiktok-sales-bot</code>.',
+        'Không tác động đến container hoặc dịch vụ khác trên VPS.',
+        '',
+        'Bạn có chắc muốn tiếp tục?',
+      ].join('\n'),
+      {
+        parse_mode: 'HTML',
+        ...buildDockerRestartConfirmKeyboard(),
+      }
+    );
+  });
+
+  bot.action(/^settings:docker_restart_cancel$/, async ctx => {
+    if (!isAdmin(ctx)) {
+      await ctx.answerCbQuery('Không có quyền thực hiện.');
+      return;
+    }
+
+    await ctx.answerCbQuery('Đã hủy khởi động lại.');
+    await showHealth(ctx);
+  });
+
+  bot.action(/^settings:docker_restart_confirm$/, async ctx => {
+    if (!isAdmin(ctx)) {
+      await ctx.answerCbQuery('Không có quyền thực hiện.');
+      return;
+    }
+
+    await ctx.answerCbQuery('Đang khởi động lại Docker bot...');
+
+    try {
+      await ctx.editMessageText(
+        [
+          '<b>♻️ ĐANG KHỞI ĐỘNG LẠI BOT</b>',
+          '',
+          'Tiến trình bot sẽ thoát sau khoảng 1 giây.',
+          'Docker sẽ tự khởi động lại container <code>tiktok-sales-bot</code>.',
+          'Sau vài giây hãy mở lại /settings để kiểm tra tình trạng.',
+        ].join('\n'),
+        { parse_mode: 'HTML' }
+      );
+    } catch (error) {
+      console.error('Cannot show Docker restart confirmation:', error);
+    }
+
+    // docker-compose.yml dùng restart: unless-stopped. Thoát tiến trình chỉ làm
+    // Docker khởi động lại container của bot, không cần mount docker.sock và
+    // không tác động đến các container khác trên VPS.
+    setTimeout(() => process.exit(1), 1_200);
+  });
+
+  // Nút cũ từ tin nhắn Telegram trước đây chỉ dùng để chạy install-vps.sh.
+  // Giữ chặn để không bao giờ thực thi lại script cũ.
   bot.action(/^settings:restart$/, async ctx => {
     if (!isAdmin(ctx)) {
       await ctx.answerCbQuery('Không có quyền thực hiện.');
       return;
     }
 
-    await ctx.answerCbQuery('Chức năng install-vps đã được loại bỏ.', { show_alert: true });
+    await ctx.answerCbQuery('Nút cũ đã ngừng hoạt động. Hãy dùng Tình trạng bot → Khởi động lại Docker bot.', {
+      show_alert: true,
+    });
     await showSettings(ctx, true);
   });
 
