@@ -3,8 +3,9 @@ import { config } from 'dotenv';
 import { connectDB } from './db/index.js';
 import { setupBotHandlers } from './bot/handlers.js';
 import { setupSmartPlusAppealHandlers } from './bot/smartplus-appeal-handlers.js';
+import { setupSettingsMenuHandlers } from './bot/settings-menu.js';
 import { initializeAlertRules } from './alerts/index.js';
-import { getSchedulerHealthSnapshot, startScheduler } from './scheduler/index.js';
+import { startScheduler } from './scheduler/index.js';
 import { startServer, type SignerServerRuntime } from './playwright-signer/server.js';
 import { configureHttpResilience } from './runtime/http-resilience.js';
 
@@ -31,28 +32,6 @@ function isEmbeddedSignerEnabled(): boolean {
     .toLowerCase();
 
   return ['true', '1', 'yes', 'on'].includes(rawValue);
-}
-
-function formatTimestamp(timestamp?: number): string {
-  if (!timestamp) return '-';
-
-  return new Intl.DateTimeFormat('vi-VN', {
-    timeZone: 'Asia/Ho_Chi_Minh',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).format(new Date(timestamp));
-}
-
-function formatDuration(durationMs?: number): string {
-  if (durationMs === undefined) return '-';
-  if (durationMs < 1_000) return `${durationMs}ms`;
-  if (durationMs < 60_000) return `${(durationMs / 1_000).toFixed(1)}s`;
-  return `${(durationMs / 60_000).toFixed(1)}m`;
 }
 
 function scheduleFatalExit(source: string, error: unknown): void {
@@ -82,45 +61,12 @@ async function main() {
   // Initialize Telegram bot
   bot = new Telegraf(botToken);
 
-  // Register health before setupBotHandlers(), because setupBotHandlers installs
-  // a catch-all bot.on('text') fallback that intentionally does not call next().
-  // If health is registered after it, /health is swallowed as an unknown command.
-  bot.command('health', async (ctx) => {
-    const snapshot = getSchedulerHealthSnapshot();
-    const uptimeSeconds = Math.round(process.uptime());
-    const memoryMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
-    const lines = [
-      'BOT HEALTH',
-      `Uptime: ${Math.floor(uptimeSeconds / 3600)}h ${Math.floor((uptimeSeconds % 3600) / 60)}m`,
-      `Memory RSS: ${memoryMb} MB`,
-      `Scheduler generation: ${snapshot.generation}`,
-      `Restart requested: ${snapshot.restartRequested ? 'YES' : 'no'}`,
-    ];
+  // Register settings before the legacy handlers, because setupBotHandlers() contains
+  // the old settings implementation and a catch-all text fallback. The new settings
+  // module owns /settings, health, and all settings callbacks.
+  setupSettingsMenuHandlers(bot);
 
-    for (const [level, state] of Object.entries(snapshot.levels)) {
-      const status = state.running
-        ? 'RUNNING'
-        : state.consecutiveFailures > 0
-          ? `ERROR x${state.consecutiveFailures}`
-          : state.lastSuccessAt
-            ? 'OK'
-            : 'WAITING';
-
-      lines.push(
-        '',
-        `${level.toUpperCase()}: ${status}`,
-        `Interval: ${state.intervalMinutes}m | Hard timeout: ${Math.round(state.timeoutMs / 60_000)}m`,
-        `Last start: ${formatTimestamp(state.lastStartedAt)}`,
-        `Last success: ${formatTimestamp(state.lastSuccessAt)}`,
-        `Last duration: ${formatDuration(state.lastDurationMs)}`,
-        state.lastError ? `Last error: ${state.lastError.slice(0, 300)}` : 'Last error: -'
-      );
-    }
-
-    await ctx.reply(lines.join('\n'));
-  });
-
-  // Appeal commands must be registered before setupBotHandlers(), because the
+  // Appeal handlers must also be registered before setupBotHandlers() because the
   // main handler installs a catch-all text fallback that does not call next().
   setupSmartPlusAppealHandlers(bot);
 
