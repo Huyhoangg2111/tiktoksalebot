@@ -1,5 +1,6 @@
 import * as googleSheets from '@googleapis/sheets';
 import type { Telegraf } from 'telegraf';
+import { getTrackedAdvertiserIdSet } from '../accounts/tracking.js';
 import { db } from '../db/index.js';
 import {
   getAlertRulesConfig,
@@ -9,6 +10,8 @@ import {
   type AlertMetric,
 } from '../google-sheets/api.js';
 import { getTodaySpentCampaigns, type TikTokSpentCampaign } from '../tiktok/api.js';
+import { saveAlertHistory } from './alert-store.js';
+import { checkAndSendLowBalanceAlert } from './balance-alert.js';
 import { buildMaterialDetailCallbackData } from './callbacks.js';
 import {
   getCampaignMaterialSnapshot,
@@ -226,7 +229,6 @@ function matchesCampaignName(nameContains: string | undefined, campaignName: str
 
 function campaignMatchesRule(campaign: TikTokSpentCampaign, rule: AlertActionRuleSheetRow): boolean {
   if (!rule.isActive || !matchesCampaignName(rule.nameContains, campaign.campaign_name)) return false;
-  if (rule.campaignStatus && campaign.status !== rule.campaignStatus) return false;
   const metric = rule.metric === 'spend' ? campaign.spend : campaign.cpa;
   return compareValues(metric, rule.metricOperator, rule.metricThreshold, rule.metricMinThreshold) &&
     compareValues(campaign.conversions, rule.conversionsOperator, rule.conversionsThreshold);
@@ -300,16 +302,22 @@ async function sendCampaignNotification(
   const condition = rule.metricOperator === 'gt' || rule.metricOperator === 'gte'
     ? 'vượt giới hạn'
     : 'đạt điều kiện';
-
-  const text = [
+  const plainLines = [
+    `Campaign ${condition}`,
+    `${campaign.campaign_name} - ${campaign.campaign_id}`,
+    `$${campaign.spend.toFixed(2)} · click ${campaign.clicks}/${campaign.ctr.toFixed(2)}% · conversion ${campaign.conversions} · CPA $${campaign.cpa.toFixed(2)}`,
+    formatRuleCondition(rule),
+    'Campaign chỉ cảnh báo, không tự tắt/bật.',
+  ];
+  const htmlLines = [
     `🔔 <b>Campaign ${escapeHtml(condition)}</b>`,
     `<b>${escapeHtml(campaign.campaign_name)}</b> - <code>${escapeHtml(campaign.campaign_id)}</code>`,
     `💵 $${campaign.spend.toFixed(2)} · 👆 ${campaign.clicks.toLocaleString()}/${campaign.ctr.toFixed(2)}% · 🎯 ${campaign.conversions.toLocaleString()} · 💰 $${campaign.cpa.toFixed(2)}`,
     `📏 ${escapeHtml(formatRuleCondition(rule))}`,
     'ℹ️ Campaign chỉ cảnh báo, không tự tắt/bật.',
-  ].join('\n');
+  ];
 
-  await bot.telegram.sendMessage(adminChatId, text, {
+  await bot.telegram.sendMessage(adminChatId, htmlLines.join('\n'), {
     parse_mode: 'HTML',
     reply_markup: {
       inline_keyboard: [[{
@@ -318,6 +326,7 @@ async function sendCampaignNotification(
       }]],
     },
   });
+  await saveAlertHistory('campaign_notify', plainLines.join('\n'), 'low');
 }
 
 async function evaluateCampaignNotifications(bot: Telegraf, campaigns: TikTokSpentCampaign[]): Promise<void> {
@@ -376,6 +385,13 @@ async function sendMaterialNotifyRules(
       const key = `material-notify:${material.advertiserId}:${material.adMaterialId}:${rule.rowNumber}:${rule.metric}:${rule.metricThreshold}:${rule.conversionsThreshold}`;
       if (!(await canNotify(key, MATERIAL_NOTIFY_COOLDOWN_MS))) continue;
 
+      const plainMessage = [
+        'Material đạt rule',
+        campaign.campaign_name,
+        `#${material.materialNumber} · ${material.tiktokItemId}`,
+        `$${material.spend.toFixed(2)} · click ${material.clicks}/${material.ctr.toFixed(2)}% · conversion ${material.conversions} · CPA $${material.cpa.toFixed(2)}`,
+        formatRuleCondition(rule),
+      ].join('\n');
       await bot.telegram.sendMessage(adminChatId, [
         '🔔 <b>Material đạt rule</b>',
         `<b>${escapeHtml(campaign.campaign_name)}</b>`,
@@ -391,6 +407,7 @@ async function sendMaterialNotifyRules(
           }]],
         },
       });
+      await saveAlertHistory('material_notify', plainMessage, 'low');
       await markNotified(key);
     }
   }
@@ -430,6 +447,11 @@ async function applyMaterialDecisions(
   if (resultLines.length === 0) return;
   const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
   if (!adminChatId) return;
+  const plainMessage = [
+    'Material Rule Auto',
+    `${campaign.campaign_name} - ${campaign.campaign_id}`,
+    ...resultLines,
+  ].join('\n');
 
   await bot.telegram.sendMessage(adminChatId, [
     '🤖 <b>Material Rule Auto</b>',
@@ -444,6 +466,7 @@ async function applyMaterialDecisions(
       }]],
     },
   });
+  await saveAlertHistory('material_auto_action', plainMessage, 'low');
 }
 
 async function evaluateMaterialRules(bot: Telegraf, campaigns: TikTokSpentCampaign[]): Promise<void> {
@@ -477,10 +500,27 @@ async function evaluateMaterialRules(bot: Telegraf, campaigns: TikTokSpentCampai
  * Level 1 architecture:
  * - campaign rules: report/notify only; no campaign status writes;
  * - ad rules: deliberately ignored;
- * - material rules: evaluate today's metrics and control ad_material_id only.
+ * - material rules: evaluate today's metrics and control ad_material_id only;
+ * - low-balance monitoring remains active.
  */
 export async function checkAndSendCampaignMaterialAlerts(bot: Telegraf): Promise<void> {
+  try {
+    await checkAndSendLowBalanceAlert(bot);
+  } catch (error) {
+    console.error('[MaterialRules] low-balance check failed:', error);
+  }
+
   const campaigns = await getTodaySpentCampaigns();
-  await evaluateCampaignNotifications(bot, campaigns);
-  await evaluateMaterialRules(bot, campaigns);
+  const trackedAdvertiserIds = await getTrackedAdvertiserIdSet(
+    campaigns.map(campaign => ({
+      advertiserId: campaign.advertiser_id,
+      advertiserName: campaign.advertiser_name,
+    }))
+  );
+  const filteredCampaigns = campaigns.filter(campaign =>
+    trackedAdvertiserIds.has(campaign.advertiser_id)
+  );
+
+  await evaluateCampaignNotifications(bot, filteredCampaigns);
+  await evaluateMaterialRules(bot, filteredCampaigns);
 }
