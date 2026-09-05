@@ -280,6 +280,35 @@ export async function connectDB() {
     ON campaign_clone_log(original_campaign_id)
   `);
 
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS smart_plus_appeal_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      advertiser_id TEXT NOT NULL,
+      smart_plus_ad_id TEXT NOT NULL,
+      campaign_id TEXT,
+      previous_appeal_status TEXT,
+      review_status TEXT,
+      secondary_status TEXT,
+      rejected_material_count INTEGER DEFAULT 0,
+      outcome TEXT NOT NULL,
+      response_code INTEGER,
+      response_message TEXT,
+      request_id TEXT,
+      is_forced BOOLEAN DEFAULT 0,
+      attempted_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_smart_plus_appeal_attempts_ad
+    ON smart_plus_appeal_attempts(advertiser_id, smart_plus_ad_id)
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_smart_plus_appeal_attempts_time
+    ON smart_plus_appeal_attempts(attempted_at)
+  `);
+
   console.log('Connected to database and initialized tables');
   return db;
 }
