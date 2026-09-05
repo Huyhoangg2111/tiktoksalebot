@@ -1,8 +1,8 @@
 import {
-  checkAndSendAlerts,
   checkAndSendLevel2Alerts,
   checkAndSendLevel3Alerts,
 } from '../alerts/index.js';
+import { checkAndSendCampaignMaterialAlerts } from '../materials/rule-engine.js';
 import {
   getRuntimeSettingsSnapshot,
   RUNTIME_SETTING_DEFAULTS,
@@ -196,8 +196,8 @@ async function runLevelJob(
 async function runScheduledCheck(): Promise<void> {
   await runLevelJob(
     'level1',
-    'Fetch TikTok Ads data and check alerts',
-    async () => checkAndSendAlerts(botInstance!)
+    'Check campaign notifications and material rules',
+    async () => checkAndSendCampaignMaterialAlerts(botInstance!)
   );
 }
 
