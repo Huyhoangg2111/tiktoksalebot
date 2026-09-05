@@ -41,6 +41,15 @@ function shortMaterialName(name: string | undefined, tiktokItemId: string): stri
   return normalized.length > 72 ? `${normalized.slice(0, 69)}...` : normalized;
 }
 
+function isMaterialDetailMessage(ctx: any): boolean {
+  const text = String(
+    ctx?.callbackQuery?.message?.text ??
+    ctx?.callbackQuery?.message?.caption ??
+    ''
+  );
+  return /chi tiết material/i.test(text);
+}
+
 function renderMaterialPage(snapshot: CampaignMaterialSnapshot, requestedPage: number) {
   const totalPages = Math.max(1, Math.ceil(snapshot.materials.length / MATERIALS_PER_PAGE));
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
@@ -49,7 +58,7 @@ function renderMaterialPage(snapshot: CampaignMaterialSnapshot, requestedPage: n
   const campaignLabel = snapshot.campaignName || snapshot.campaignId;
 
   const lines = [
-    `<b>🎬 Chi tiết material</b>`,
+    '<b>🎬 Chi tiết material</b>',
     `<b>${escapeHtml(campaignLabel)}</b>`,
     `<code>${escapeHtml(snapshot.campaignId)}</code>`,
     `📅 ${escapeHtml(snapshot.dateKey)} · Trang ${page + 1}/${totalPages}`,
@@ -61,8 +70,7 @@ function renderMaterialPage(snapshot: CampaignMaterialSnapshot, requestedPage: n
   }
 
   for (const item of items) {
-    const enabled = item.status === 'ENABLE';
-    const icon = enabled ? '🟢' : item.status === 'DISABLE' ? '🔴' : '⚪';
+    const icon = item.status === 'ENABLE' ? '🟢' : item.status === 'DISABLE' ? '🔴' : '⚪';
     lines.push(
       `${item.materialNumber}. ${icon} <b>${escapeHtml(shortMaterialName(item.name, item.tiktokItemId))}</b>`,
       `💵 ${formatUsd(item.spend)} · 👆 ${item.clicks.toLocaleString()}/${formatPercent(item.ctr)} · 🎯 ${item.conversions.toLocaleString()} · 💰 ${formatUsd(item.cpa)}`,
@@ -72,6 +80,7 @@ function renderMaterialPage(snapshot: CampaignMaterialSnapshot, requestedPage: n
 
   const inlineKeyboard: Array<Array<{ text: string; callback_data: string }>> = [];
   for (const item of items) {
+    if (item.status === 'UNKNOWN') continue;
     const nextStatus = item.status === 'ENABLE' ? 'DISABLE' : 'ENABLE';
     inlineKeyboard.push([{
       text: item.status === 'ENABLE'
@@ -113,7 +122,11 @@ function renderMaterialPage(snapshot: CampaignMaterialSnapshot, requestedPage: n
   };
 }
 
-async function editMaterialMessage(ctx: any, snapshot: CampaignMaterialSnapshot, page: number): Promise<void> {
+async function editMaterialMessage(
+  ctx: any,
+  snapshot: CampaignMaterialSnapshot,
+  page: number
+): Promise<void> {
   const rendered = renderMaterialPage(snapshot, page);
   try {
     await ctx.editMessageText(rendered.text, {
@@ -142,11 +155,15 @@ export function setupMaterialHandlers(bot: Telegraf): void {
     await ctx.answerCbQuery('Đang tải material...');
     try {
       const snapshot = await getCampaignMaterialSnapshot(data.advertiserId, data.campaignId);
-      const rendered = renderMaterialPage(snapshot, data.page);
-      await ctx.reply(rendered.text, {
-        parse_mode: 'HTML',
-        reply_markup: rendered.replyMarkup,
-      });
+      if (isMaterialDetailMessage(ctx)) {
+        await editMaterialMessage(ctx, snapshot, data.page);
+      } else {
+        const rendered = renderMaterialPage(snapshot, data.page);
+        await ctx.reply(rendered.text, {
+          parse_mode: 'HTML',
+          reply_markup: rendered.replyMarkup,
+        });
+      }
     } catch (error) {
       console.error('Material detail callback failed:', error);
       await ctx.reply(`⛔ Không tải được material: ${escapeHtml(error instanceof Error ? error.message : String(error))}`, {
