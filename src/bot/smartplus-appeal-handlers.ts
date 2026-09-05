@@ -13,6 +13,59 @@ function isAdmin(ctx: Context): boolean {
   return adminChatId ? ctx.chat?.id.toString() === adminChatId : false;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function ensureAppealParentCommandMenu(bot: Telegraf): Promise<void> {
+  const adminChatId = process.env.ADMIN_CHAT_ID?.trim();
+  if (!adminChatId) {
+    return;
+  }
+
+  const scope = {
+    type: 'chat',
+    chat_id: Number(adminChatId) || adminChatId,
+  } as any;
+
+  // setupBotHandlers() configures the existing admin menu asynchronously.
+  // Wait until that menu is visible, then append exactly one appeal parent entry.
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await sleep(500);
+
+    try {
+      const commands = await bot.telegram.getMyCommands({ scope } as any);
+      const baseMenuReady = commands.some(command => command.command === 'xcamp');
+
+      if (!baseMenuReady) {
+        continue;
+      }
+
+      if (commands.some(command => command.command === 'appeal')) {
+        return;
+      }
+
+      await bot.telegram.setMyCommands(
+        [
+          ...commands,
+          {
+            command: 'appeal',
+            description: '📨 Quét quảng cáo từ chối',
+          },
+        ],
+        { scope } as any
+      );
+
+      console.log('Smart+ appeal parent command added to admin Telegram menu');
+      return;
+    } catch (error) {
+      if (attempt === 19) {
+        console.error('Cannot add Smart+ appeal parent command to admin menu:', error);
+      }
+    }
+  }
+}
+
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -218,4 +271,6 @@ export function setupSmartPlusAppealHandlers(bot: Telegraf): void {
       void handleAppealRun(ctx, forceRescan);
     }
   );
+
+  void ensureAppealParentCommandMenu(bot);
 }
