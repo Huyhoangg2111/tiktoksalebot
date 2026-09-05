@@ -2,6 +2,7 @@ import { Telegraf } from 'telegraf';
 import { config } from 'dotenv';
 import { connectDB } from './db/index.js';
 import { setupBotHandlers } from './bot/handlers.js';
+import { setupSmartPlusAppealHandlers } from './bot/smartplus-appeal-handlers.js';
 import { initializeAlertRules } from './alerts/index.js';
 import { getSchedulerHealthSnapshot, startScheduler } from './scheduler/index.js';
 import { startServer, type SignerServerRuntime } from './playwright-signer/server.js';
@@ -118,6 +119,10 @@ async function main() {
 
     await ctx.reply(lines.join('\n'));
   });
+
+  // Appeal commands must be registered before setupBotHandlers(), because the
+  // main handler installs a catch-all text fallback that does not call next().
+  setupSmartPlusAppealHandlers(bot);
 
   // Setup the rest of the bot command handlers and text fallbacks.
   setupBotHandlers(bot);
