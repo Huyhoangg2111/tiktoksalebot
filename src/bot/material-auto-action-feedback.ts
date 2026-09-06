@@ -49,6 +49,26 @@ function extractCampaignId(campaignLine: string): string | undefined {
   return campaignLine.match(/<code>(\d{10,})<\/code>/)?.[1];
 }
 
+function getCampaignDisplayName(campaignName: string): string {
+  const parts = String(campaignName || '')
+    .split(' - ')
+    .map(part => part.trim())
+    .filter(Boolean);
+
+  if (parts.length >= 2) {
+    return `${parts[0]} - ${parts[1]}`;
+  }
+
+  return String(campaignName || '').trim();
+}
+
+function normalizeCampaignLine(campaignLine: string): string {
+  const match = campaignLine.match(/^<b>(.*?)<\/b>\s*-\s*<code>(\d{10,})<\/code>\s*$/);
+  if (!match) return campaignLine;
+
+  return `<b>${getCampaignDisplayName(match[1])}</b> - <code>${match[2]}</code>`;
+}
+
 function formatCampaignReportLine(campaign: TikTokSpentCampaign): string {
   return `💸 $${campaign.spend.toFixed(2)} · ` +
     `👆 ${campaign.clicks.toLocaleString()}/${campaign.ctr.toFixed(2)}% · ` +
@@ -119,7 +139,7 @@ function parseAutoActionPayload(payload: unknown): ParsedAutoAction | undefined 
   });
 
   return {
-    campaignLine,
+    campaignLine: normalizeCampaignLine(campaignLine),
     campaignId: extractCampaignId(campaignLine),
     pauseSuccess,
     activeSuccess,
@@ -220,6 +240,7 @@ function buildBufferedResponse(payload: Record<string, unknown>): Record<string,
  *
  * Batching chỉ tác động presentation Telegram của payload `Material Rule Auto`:
  * - không đổi rule, mapping hay TikTok write API;
+ * - tên campaign giữ format gọn cũ: `<sản phẩm> - <market>` + campaign_id;
  * - mỗi campaign hiển thị thêm report tổng hôm nay: spend / click+CTR / conversion / CPA;
  * - mỗi campaign vẫn giữ nút chi tiết riêng, hiển thị thành `🔎 1`, `🔎 2`, ...;
  * - chờ tối đa 25 giây và flush sau 10 giây không có result mới để gom nhiều camp;
