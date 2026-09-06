@@ -7,6 +7,7 @@ import { setupSettingsMenuHandlers } from './bot/settings-menu.js';
 import { setupRetiredAlertActions } from './bot/retired-alert-actions.js';
 import { setupMaterialHandlers } from './bot/material-handlers.js';
 import { setupAppealMenuCleanup } from './bot/appeal-menu-cleanup.js';
+import { setupCampaignNameIdLinkExperiment } from './bot/campaign-name-id-link.js';
 import { initializeAlertRules } from './alerts/index.js';
 import { startScheduler } from './scheduler/index.js';
 import { startServer, type SignerServerRuntime } from './playwright-signer/server.js';
@@ -67,6 +68,10 @@ async function main() {
   // Retire the old alert actions before any legacy callbacks are registered.
   // This also strips their buttons from all Telegram send/edit payloads.
   setupRetiredAlertActions(bot);
+
+  // Thử nghiệm: ẩn campaign_id khỏi text và gắn ID trực tiếp vào tên campaign.
+  // Có fallback về payload cũ nếu Bot API từ chối tg://copy text entity.
+  setupCampaignNameIdLinkExperiment(bot);
 
   // Material detail/toggle callbacks must be registered before the legacy handlers.
   setupMaterialHandlers(bot);
