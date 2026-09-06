@@ -24,8 +24,46 @@ function chunkArray<T>(items: T[], size: number): T[][] {
   return chunks;
 }
 
+/**
+ * Telegram yêu cầu text UTF-8 hợp lệ. Dữ liệu tên creative từ TikTok đôi khi có
+ * surrogate lỗi; ngoài ra slice() theo UTF-16 có thể cắt đôi emoji và tạo chuỗi lỗi.
+ */
+function sanitizeTelegramText(value: unknown): string {
+  const input = String(value ?? '');
+  let output = '';
+
+  for (let index = 0; index < input.length; index += 1) {
+    const code = input.charCodeAt(index);
+
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = input.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        output += input[index] + input[index + 1];
+        index += 1;
+      } else {
+        output += '�';
+      }
+      continue;
+    }
+
+    if (code >= 0xdc00 && code <= 0xdfff) {
+      output += '�';
+      continue;
+    }
+
+    // Bỏ control characters không cần thiết; giữ tab/newline cho nội dung Telegram.
+    if (code < 0x20 && code !== 0x09 && code !== 0x0a) {
+      continue;
+    }
+
+    output += input[index];
+  }
+
+  return output;
+}
+
 function escapeHtml(value: unknown): string {
-  return String(value ?? '')
+  return sanitizeTelegramText(value)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -47,9 +85,12 @@ function formatPercent(value: number): string {
 }
 
 function shortMaterialName(name: string | undefined, tiktokItemId: string): string {
-  const normalized = String(name || '').replace(/\s+/g, ' ').trim();
-  if (!normalized) return `Video ${tiktokItemId}`;
-  return normalized.length > 72 ? `${normalized.slice(0, 69)}...` : normalized;
+  const normalized = sanitizeTelegramText(name).replace(/\s+/g, ' ').trim();
+  if (!normalized) return `Video ${sanitizeTelegramText(tiktokItemId)}`;
+
+  // Array.from() cắt theo Unicode code point, không cắt đôi surrogate pair/emoji.
+  const codePoints = Array.from(normalized);
+  return codePoints.length > 72 ? `${codePoints.slice(0, 69).join('')}...` : normalized;
 }
 
 function getMaterialStatusIcon(status: string): string {
@@ -144,7 +185,7 @@ function renderMaterialPage(
   }
 
   return {
-    text: lines.join('\n'),
+    text: sanitizeTelegramText(lines.join('\n')),
     replyMarkup: { inline_keyboard: inlineKeyboard },
   };
 }
