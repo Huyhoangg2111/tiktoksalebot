@@ -11,7 +11,18 @@ import {
   type CampaignMaterialSnapshot,
 } from '../materials/service.js';
 
-const MATERIALS_PER_PAGE = 7;
+// Giữ bố cục điều khiển đồng bộ với màn campaign hiện có:
+// 15 item/trang, 5 nút trạng thái mỗi hàng và phân trang ⏪ x/y ⏩.
+const MATERIALS_PER_PAGE = 15;
+const MATERIAL_STATUS_BUTTONS_PER_ROW = 5;
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
 
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
@@ -39,6 +50,12 @@ function shortMaterialName(name: string | undefined, tiktokItemId: string): stri
   const normalized = String(name || '').replace(/\s+/g, ' ').trim();
   if (!normalized) return `Video ${tiktokItemId}`;
   return normalized.length > 72 ? `${normalized.slice(0, 69)}...` : normalized;
+}
+
+function getMaterialStatusIcon(status: string): string {
+  if (status === 'ENABLE') return '🟢';
+  if (status === 'DISABLE') return '🟡';
+  return '⚪';
 }
 
 function isMaterialDetailMessage(ctx: any): boolean {
@@ -70,51 +87,53 @@ function renderMaterialPage(snapshot: CampaignMaterialSnapshot, requestedPage: n
   }
 
   for (const item of items) {
-    const icon = item.status === 'ENABLE' ? '🟢' : item.status === 'DISABLE' ? '🔴' : '⚪';
     lines.push(
-      `${item.materialNumber}. ${icon} <b>${escapeHtml(shortMaterialName(item.name, item.tiktokItemId))}</b>`,
+      `${item.materialNumber}. ${getMaterialStatusIcon(item.status)} <b>${escapeHtml(shortMaterialName(item.name, item.tiktokItemId))}</b>`,
       `💵 ${formatUsd(item.spend)} · 👆 ${item.clicks.toLocaleString()}/${formatPercent(item.ctr)} · 🎯 ${item.conversions.toLocaleString()} · 💰 ${formatUsd(item.cpa)}`,
       `<code>${escapeHtml(item.tiktokItemId)}</code>`
     );
   }
 
-  const inlineKeyboard: Array<Array<{ text: string; callback_data: string }>> = [];
-  for (const item of items) {
-    if (item.status === 'UNKNOWN') continue;
-    const nextStatus = item.status === 'ENABLE' ? 'DISABLE' : 'ENABLE';
-    inlineKeyboard.push([{
-      text: item.status === 'ENABLE'
-        ? `⏸ ${item.materialNumber} Tắt`
-        : `▶️ ${item.materialNumber} Bật`,
-      callback_data: buildMaterialToggleCallbackData({
-        advertiserId: item.advertiserId,
-        smartPlusAdId: item.smartPlusAdId,
-        adMaterialId: item.adMaterialId,
-        campaignId: item.campaignId,
-        operationStatus: nextStatus,
-        page,
-      }),
-    }]);
-  }
+  const actionButtons = items
+    .filter(item => item.status !== 'UNKNOWN')
+    .map(item => {
+      const nextStatus = item.status === 'ENABLE' ? 'DISABLE' : 'ENABLE';
+      return {
+        text: `${getMaterialStatusIcon(item.status)} ${item.materialNumber}`,
+        callback_data: buildMaterialToggleCallbackData({
+          advertiserId: item.advertiserId,
+          smartPlusAdId: item.smartPlusAdId,
+          adMaterialId: item.adMaterialId,
+          campaignId: item.campaignId,
+          operationStatus: nextStatus,
+          page,
+        }),
+      };
+    });
 
-  const navigation: Array<{ text: string; callback_data: string }> = [];
-  if (page > 0) {
-    navigation.push({
-      text: '◀️',
-      callback_data: buildMaterialDetailCallbackData(snapshot.advertiserId, snapshot.campaignId, page - 1),
-    });
+  const inlineKeyboard: Array<Array<{ text: string; callback_data: string }>> = [
+    ...chunkArray(actionButtons, MATERIAL_STATUS_BUTTONS_PER_ROW),
+  ];
+
+  if (totalPages > 1) {
+    const previousPage = Math.max(0, page - 1);
+    const nextPage = Math.min(totalPages - 1, page + 1);
+    inlineKeyboard.push([
+      {
+        text: '⏪',
+        callback_data: buildMaterialDetailCallbackData(snapshot.advertiserId, snapshot.campaignId, previousPage),
+      },
+      {
+        // Nút giữa vừa hiển thị số trang, vừa có thể bấm để tải lại dữ liệu trang hiện tại.
+        text: `${page + 1}/${totalPages}`,
+        callback_data: buildMaterialDetailCallbackData(snapshot.advertiserId, snapshot.campaignId, page),
+      },
+      {
+        text: '⏩',
+        callback_data: buildMaterialDetailCallbackData(snapshot.advertiserId, snapshot.campaignId, nextPage),
+      },
+    ]);
   }
-  navigation.push({
-    text: '🔄 Làm mới',
-    callback_data: buildMaterialDetailCallbackData(snapshot.advertiserId, snapshot.campaignId, page),
-  });
-  if (page + 1 < totalPages) {
-    navigation.push({
-      text: '▶️',
-      callback_data: buildMaterialDetailCallbackData(snapshot.advertiserId, snapshot.campaignId, page + 1),
-    });
-  }
-  inlineKeyboard.push(navigation);
 
   return {
     text: lines.join('\n'),
