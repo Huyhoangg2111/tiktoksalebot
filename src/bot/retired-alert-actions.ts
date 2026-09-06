@@ -10,6 +10,17 @@ function isRetiredCallbackData(value: unknown): boolean {
   return RETIRED_CALLBACK_PREFIXES.some(prefix => callbackData.startsWith(prefix));
 }
 
+function normalizeButton(button: Record<string, unknown>): Record<string, unknown> {
+  if (button?.text === '🔎 Xem chi tiết material') {
+    return {
+      ...button,
+      text: '🔎 Chi tiết camp',
+    };
+  }
+
+  return button;
+}
+
 function sanitizeReplyMarkup(replyMarkup: unknown): unknown {
   if (!replyMarkup || typeof replyMarkup !== 'object') {
     return replyMarkup;
@@ -26,7 +37,9 @@ function sanitizeReplyMarkup(replyMarkup: unknown): unknown {
 
   const inlineKeyboard = markup.inline_keyboard
     .map(row => Array.isArray(row)
-      ? row.filter(button => !isRetiredCallbackData(button?.callback_data))
+      ? row
+          .filter(button => !isRetiredCallbackData(button?.callback_data))
+          .map(normalizeButton)
       : [])
     .filter(row => row.length > 0);
 
@@ -71,7 +84,8 @@ async function answerRetiredAction(ctx: Context, label: string): Promise<void> {
  * - 🚀 X / duplicate_camp: nhân bản campaign từ alert.
  * - 🔕 Bỏ TD / cad: bỏ theo dõi campaign trong ngày.
  *
- * Nút mới bị lọc khỏi mọi send/edit Telegram. Callback từ tin nhắn cũ cũng bị
+ * Đồng thời chuẩn hoá nhãn nút chi tiết campaign về "🔎 Chi tiết camp".
+ * Nút retired bị lọc khỏi mọi send/edit Telegram. Callback từ tin nhắn cũ cũng bị
  * chặn trước legacy handlers, nên hai chức năng không còn có thể thực thi.
  */
 export function setupRetiredAlertActions(bot: Telegraf): void {
