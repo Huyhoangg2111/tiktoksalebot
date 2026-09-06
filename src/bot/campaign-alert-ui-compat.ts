@@ -146,11 +146,12 @@ function buildBufferedResponse(payload: Record<string, unknown>): Record<string,
 
 /**
  * Presentation compatibility cho campaign Level 1:
- * - các camp cùng loại cảnh báo (`đạt điều kiện` hoặc `vượt giới hạn`) trong cùng lượt
- *   được gom thành một message;
- * - bỏ dòng mô tả rule thứ hai để thông báo gọn hơn;
+ * - campaign chỉ thông báo khi `đạt điều kiện`;
+ * - `vượt giới hạn` không gửi alert campaign vì phần này đã được material ruler tự động xử lý
+ *   và có thông báo Pause/Active riêng;
+ * - các camp đạt điều kiện trong cùng lượt được gom thành một message;
  * - giữ tên camp + campaign_id + dòng metrics và callback `Chi tiết camp`;
- * - không thay đổi rule, cooldown, dữ liệu hay material write API.
+ * - không thay đổi quyết định material rule hay TikTok write API.
  */
 export function setupCampaignAlertUiCompatibility(bot: Telegraf): void {
   const telegram = bot.telegram as any;
@@ -196,6 +197,12 @@ export function setupCampaignAlertUiCompatibility(bot: Telegraf): void {
       return originalCallApi(method, payload, ...rest);
     }
 
+    // Level 1 không còn gửi cảnh báo campaign vượt giới hạn.
+    // Material ruler chịu trách nhiệm auto Pause/Active và gửi feedback riêng.
+    if (parsed.condition === 'vượt giới hạn') {
+      return buildBufferedResponse(source);
+    }
+
     const batchKey = getBatchKey(source, parsed.condition);
     const now = Date.now();
     const existing = pendingByKey.get(batchKey);
@@ -205,7 +212,7 @@ export function setupCampaignAlertUiCompatibility(bot: Telegraf): void {
       payload: source,
     };
 
-    // Một camp có thể đồng thời match nhiều rule cùng loại. Chỉ hiển thị camp đó một lần.
+    // Một camp có thể đồng thời match nhiều rule đạt điều kiện. Chỉ hiển thị camp đó một lần.
     batch.items.set(parsed.campaignId, parsed);
     if (batch.timer) clearTimeout(batch.timer);
 
