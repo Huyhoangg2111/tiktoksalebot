@@ -1,20 +1,33 @@
 import type { Telegraf } from 'telegraf';
 
+const BATCH_IDLE_MS = 1_500;
+const BATCH_MAX_WAIT_MS = 5_000;
+const MAX_CAMPAIGNS_IN_MESSAGE = 20;
+const DETAIL_BUTTONS_PER_ROW = 5;
+
+type CampaignCondition = 'đạt điều kiện' | 'vượt giới hạn';
+
+interface ParsedCampaignAlert {
+  condition: CampaignCondition;
+  campaignName: string;
+  campaignId: string;
+  metricsLine: string;
+  detailButton?: Record<string, unknown>;
+}
+
+interface PendingCampaignBatch {
+  firstAt: number;
+  items: Map<string, ParsedCampaignAlert>;
+  payload: Record<string, unknown>;
+  timer?: NodeJS.Timeout;
+}
+
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
-}
-
-function decodeHtmlEntities(value: string): string {
-  return value
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/&amp;/gi, '&');
 }
 
 function getCampaignDisplayName(campaignName: string): string {
@@ -30,79 +43,177 @@ function getCampaignDisplayName(campaignName: string): string {
   return String(campaignName || '').trim();
 }
 
-function formatLegacyCondition(condition: string, rawRule: string): string {
-  const conditionIcon = condition === 'vượt giới hạn' ? '📈' : '✅';
-  // ruleLine đã nằm trong HTML payload nên các toán tử có thể đang là &gt;/&lt;.
-  // Decode trước rồi escape đúng một lần để Telegram render >, <, >=, <= thay vì hiện literal entity.
-  const decodedRule = decodeHtmlEntities(rawRule);
-  const parts = decodedRule.split('·').map(part => part.trim()).filter(Boolean);
-  const metricPart = parts[0] || decodedRule;
-  const conversionPart = (parts[1] || '').replace(/^Conversion\s*/i, '').trim();
-
-  return `${conditionIcon} <b>${escapeHtml(condition)}</b>: 💰 <b>${escapeHtml(metricPart)}</b>` +
-    (conversionPart ? ` · 🎯 <b>${escapeHtml(conversionPart)}</b>` : '');
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
 }
 
-/**
- * Chỉ khôi phục presentation của thông báo campaign Level 1 mới về bố cục cũ.
- * Không thay đổi rule, cooldown, dữ liệu, callback hay material write API.
- *
- * Output kiểu cũ:
- *   🔔 Ads đạt điều kiện (1 camp)
- *   ✅ đạt điều kiện: 💰 CPA < 0.7 · 🎯 >= 5
- *
- *   1. Tên ngắn - campaign_id
- *   metrics
- */
-function rewriteCampaignAlertText(text: string): string {
-  const lines = text.split('\n');
-  if (lines.length < 4) return text;
+function findMaterialDetailButton(replyMarkup: unknown): Record<string, unknown> | undefined {
+  if (!replyMarkup || typeof replyMarkup !== 'object') return undefined;
+  const keyboard = (replyMarkup as { inline_keyboard?: Array<Array<Record<string, unknown>>> }).inline_keyboard;
+  if (!Array.isArray(keyboard)) return undefined;
 
-  const headingMatch = lines[0]?.match(/^🔔\s*<b>Campaign\s+(đạt điều kiện|vượt giới hạn)<\/b>\s*$/i);
-  if (!headingMatch) return text;
-
-  const campaignMatch = lines[1]?.match(/^<b>(.*?)<\/b>\s*-\s*<code>(\d{10,})<\/code>\s*$/);
-  if (!campaignMatch) return text;
-
-  const metricsLine = lines[2] || '';
-  const ruleLine = String(lines[3] || '').replace(/^📏\s*/, '').trim();
-  if (!ruleLine) return text;
-
-  const condition = headingMatch[1].toLowerCase();
-  const campaignName = getCampaignDisplayName(campaignMatch[1]);
-  const campaignId = campaignMatch[2];
-  const titleLine = `🔔 Ads ${condition} (1 camp)`;
-
-  return [
-    `<b>${escapeHtml(titleLine)}</b>`,
-    formatLegacyCondition(condition, ruleLine),
-    '',
-    `<b>1. ${escapeHtml(campaignName)}</b> - <code>${escapeHtml(campaignId)}</code>`,
-    metricsLine,
-  ].join('\n');
+  return keyboard
+    .flat()
+    .find(button => String(button?.callback_data || '').startsWith('md:'));
 }
 
-function rewriteTelegramPayload(payload: unknown): unknown {
-  if (!payload || typeof payload !== 'object') return payload;
-
+function parseCampaignAlertPayload(payload: unknown): ParsedCampaignAlert | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
   const source = payload as Record<string, unknown>;
   if (String(source.parse_mode || '').toUpperCase() !== 'HTML' || typeof source.text !== 'string') {
-    return payload;
+    return undefined;
   }
 
-  const rewrittenText = rewriteCampaignAlertText(source.text);
-  if (rewrittenText === source.text) return payload;
+  const lines = source.text.split('\n');
+  if (lines.length < 3) return undefined;
+
+  const headingMatch = lines[0]?.match(/^🔔\s*<b>Campaign\s+(đạt điều kiện|vượt giới hạn)<\/b>\s*$/i);
+  if (!headingMatch) return undefined;
+
+  const campaignMatch = lines[1]?.match(/^<b>(.*?)<\/b>\s*-\s*<code>(\d{10,})<\/code>\s*$/);
+  if (!campaignMatch) return undefined;
+
+  const condition = headingMatch[1].toLowerCase() as CampaignCondition;
+  const campaignName = getCampaignDisplayName(campaignMatch[1]);
+  const campaignId = campaignMatch[2];
+  const metricsLine = lines[2] || '';
 
   return {
-    ...source,
-    text: rewrittenText,
+    condition,
+    campaignName,
+    campaignId,
+    metricsLine,
+    detailButton: findMaterialDetailButton(source.reply_markup),
   };
 }
 
+function buildGroupedCampaignMessage(items: ParsedCampaignAlert[]) {
+  const visibleItems = items.slice(0, MAX_CAMPAIGNS_IN_MESSAGE);
+  const condition = visibleItems[0]?.condition || 'đạt điều kiện';
+  const lines: string[] = [
+    `<b>🔔 Ads ${escapeHtml(condition)} (${items.length} camp)</b>`,
+  ];
+  const buttons: Record<string, unknown>[] = [];
+
+  visibleItems.forEach((item, index) => {
+    lines.push(
+      '',
+      `<b>${index + 1}. ${escapeHtml(item.campaignName)}</b> - <code>${escapeHtml(item.campaignId)}</code>`,
+      item.metricsLine
+    );
+
+    if (item.detailButton) {
+      buttons.push({
+        ...item.detailButton,
+        text: items.length === 1 ? '🔎 Chi tiết camp' : `🔎 ${index + 1}`,
+      });
+    }
+  });
+
+  const hiddenCampaigns = items.length - visibleItems.length;
+  if (hiddenCampaigns > 0) {
+    lines.push('', `… +${hiddenCampaigns} camp khác trong cùng cảnh báo`);
+  }
+
+  return {
+    text: lines.join('\n'),
+    replyMarkup: buttons.length > 0
+      ? { inline_keyboard: chunkArray(buttons, DETAIL_BUTTONS_PER_ROW) }
+      : undefined,
+  };
+}
+
+function getBatchKey(payload: Record<string, unknown>, condition: CampaignCondition): string {
+  return `${String(payload.chat_id ?? 'default')}:${condition}`;
+}
+
+function buildBufferedResponse(payload: Record<string, unknown>): Record<string, unknown> {
+  const numericChatId = Number(payload.chat_id);
+  return {
+    message_id: -1,
+    date: Math.floor(Date.now() / 1000),
+    chat: {
+      id: Number.isFinite(numericChatId) ? numericChatId : 0,
+      type: 'private',
+    },
+    text: typeof payload.text === 'string' ? payload.text : '',
+  };
+}
+
+/**
+ * Presentation compatibility cho campaign Level 1:
+ * - các camp cùng loại cảnh báo (`đạt điều kiện` hoặc `vượt giới hạn`) trong cùng lượt
+ *   được gom thành một message;
+ * - bỏ dòng mô tả rule thứ hai để thông báo gọn hơn;
+ * - giữ tên camp + campaign_id + dòng metrics và callback `Chi tiết camp`;
+ * - không thay đổi rule, cooldown, dữ liệu hay material write API.
+ */
 export function setupCampaignAlertUiCompatibility(bot: Telegraf): void {
   const telegram = bot.telegram as any;
   const originalCallApi = telegram.callApi.bind(telegram);
+  const pendingByKey = new Map<string, PendingCampaignBatch>();
 
-  telegram.callApi = (method: unknown, payload: unknown, ...rest: unknown[]) =>
-    originalCallApi(method, rewriteTelegramPayload(payload), ...rest);
+  const flushBatch = async (batchKey: string): Promise<void> => {
+    const batch = pendingByKey.get(batchKey);
+    if (!batch) return;
+    pendingByKey.delete(batchKey);
+    if (batch.timer) clearTimeout(batch.timer);
+
+    const items = [...batch.items.values()];
+    if (items.length === 0) return;
+
+    const grouped = buildGroupedCampaignMessage(items);
+    const nextPayload: Record<string, unknown> = {
+      ...batch.payload,
+      text: grouped.text,
+    };
+
+    if (grouped.replyMarkup) {
+      nextPayload.reply_markup = grouped.replyMarkup;
+    } else {
+      delete nextPayload.reply_markup;
+    }
+
+    try {
+      await originalCallApi('sendMessage', nextPayload);
+    } catch (error) {
+      console.error('[CampaignAlertUiCompatibility] grouped campaign notification failed:', error);
+    }
+  };
+
+  telegram.callApi = async (method: unknown, payload: unknown, ...rest: unknown[]) => {
+    if (String(method) !== 'sendMessage' || !payload || typeof payload !== 'object') {
+      return originalCallApi(method, payload, ...rest);
+    }
+
+    const source = payload as Record<string, unknown>;
+    const parsed = parseCampaignAlertPayload(source);
+    if (!parsed) {
+      return originalCallApi(method, payload, ...rest);
+    }
+
+    const batchKey = getBatchKey(source, parsed.condition);
+    const now = Date.now();
+    const existing = pendingByKey.get(batchKey);
+    const batch: PendingCampaignBatch = existing || {
+      firstAt: now,
+      items: new Map<string, ParsedCampaignAlert>(),
+      payload: source,
+    };
+
+    // Một camp có thể đồng thời match nhiều rule cùng loại. Chỉ hiển thị camp đó một lần.
+    batch.items.set(parsed.campaignId, parsed);
+    if (batch.timer) clearTimeout(batch.timer);
+
+    const maxRemaining = Math.max(0, BATCH_MAX_WAIT_MS - (now - batch.firstAt));
+    const waitMs = Math.min(BATCH_IDLE_MS, maxRemaining);
+    batch.timer = setTimeout(() => void flushBatch(batchKey), waitMs);
+    pendingByKey.set(batchKey, batch);
+
+    return buildBufferedResponse(source);
+  };
 }
