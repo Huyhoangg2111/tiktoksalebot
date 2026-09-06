@@ -4,6 +4,7 @@ import { getTikTokConfig, getTikTokWriteAccessToken } from '../tiktok/config.js'
 const TIKTOK_API_BASE = 'https://business-api.tiktok.com/open_api/v1.3';
 const SMART_PLUS_PAGE_SIZE = 100;
 const SMART_PLUS_CACHE_TTL_MS = 30_000;
+const MATERIAL_STATUS_VERIFY_DELAYS_MS = [2_000, 3_000, 5_000] as const;
 
 export type MaterialOperationStatus = 'ENABLE' | 'DISABLE';
 
@@ -62,6 +63,10 @@ function assertTikTokSuccess(payload: any, context: string): void {
 function toNumber(value: unknown): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 export function getVietnamDateKey(date = new Date()): string {
@@ -207,7 +212,7 @@ async function fetchMaterialReportForAd(
     Number(response.data?.code || 0) !== 0 &&
     /qps|over_qps/i.test(getApiErrorMessage(response.data))
   ) {
-    await new Promise(resolve => setTimeout(resolve, 1_500));
+    await sleep(1_500);
     response = await request();
   }
 
@@ -344,10 +349,27 @@ export async function setMaterialOperationStatusBatch(
   assertTikTokSuccess(response.data, `Material ${operationStatus} Smart+ ad=${smartPlusAdId}`);
   smartPlusAdsCache.delete(advertiserId);
 
-  const refreshed = await getSmartPlusAdById(advertiserId, smartPlusAdId);
   const statusById = new Map<string, string>();
-  for (const creative of refreshed?.creative_list || []) {
-    statusById.set(String(creative?.ad_material_id || ''), getCreativeStatus(creative));
+  for (const delayMs of MATERIAL_STATUS_VERIFY_DELAYS_MS) {
+    await sleep(delayMs);
+
+    try {
+      const refreshed = await getSmartPlusAdById(advertiserId, smartPlusAdId);
+      statusById.clear();
+      for (const creative of refreshed?.creative_list || []) {
+        statusById.set(String(creative?.ad_material_id || ''), getCreativeStatus(creative));
+      }
+    } catch (error) {
+      console.warn(
+        `[MaterialStatusVerify] read failed advertiser=${advertiserId} ad=${smartPlusAdId} delay=${delayMs}ms:`,
+        error
+      );
+      continue;
+    }
+
+    if (uniqueIds.every(id => statusById.get(id) === operationStatus)) {
+      break;
+    }
   }
 
   const verified = uniqueIds.filter(id => statusById.get(id) === operationStatus);
