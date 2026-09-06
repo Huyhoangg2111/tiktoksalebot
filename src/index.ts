@@ -7,7 +7,6 @@ import { setupSettingsMenuHandlers } from './bot/settings-menu.js';
 import { setupRetiredAlertActions } from './bot/retired-alert-actions.js';
 import { setupMaterialHandlers } from './bot/material-handlers.js';
 import { setupAppealMenuCleanup } from './bot/appeal-menu-cleanup.js';
-import { setupCampaignNameIdLinkExperiment } from './bot/campaign-name-id-link.js';
 import { setupCampaignAlertUiCompatibility } from './bot/campaign-alert-ui-compat.js';
 import { setupMaterialAutoActionFeedback } from './bot/material-auto-action-feedback.js';
 import { initializeAlertRules } from './alerts/index.js';
@@ -71,12 +70,7 @@ async function main() {
   // This also strips their buttons from all Telegram send/edit payloads.
   setupRetiredAlertActions(bot);
 
-  // Thử nghiệm: ẩn campaign_id khỏi text và gắn ID trực tiếp vào tên campaign.
-  // Có fallback về payload cũ nếu Bot API từ chối tg://copy text entity.
-  setupCampaignNameIdLinkExperiment(bot);
-
-  // Khôi phục bố cục thông báo campaign Level 1 về presentation cũ.
-  // Đặt sau ID-link setup để payload sau khi rewrite vẫn được xử lý ẩn campaign ID.
+  // Khôi phục bố cục campaign Level 1 về format cũ.
   setupCampaignAlertUiCompatibility(bot);
 
   // Khôi phục feedback `Pause/Active thành công` cho các thao tác material do ruler tự động chạy.
