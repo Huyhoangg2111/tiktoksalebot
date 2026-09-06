@@ -330,7 +330,12 @@ async function sendCampaignNotification(
 }
 
 async function evaluateCampaignNotifications(bot: Telegraf, campaigns: TikTokSpentCampaign[]): Promise<void> {
-  const rules = (await getAlertRulesConfig()).filter(rule => rule.entity === 'campaign' && rule.isActive);
+  const rules = (await getAlertRulesConfig()).filter(rule =>
+    rule.entity === 'campaign' &&
+    rule.isActive &&
+    rule.action === 'notify' &&
+    (rule.metricOperator === 'lt' || rule.metricOperator === 'lte')
+  );
 
   for (const campaign of campaigns) {
     for (const rule of rules) {
@@ -498,7 +503,7 @@ async function evaluateMaterialRules(bot: Telegraf, campaigns: TikTokSpentCampai
 
 /**
  * Level 1 architecture:
- * - campaign rules: report/notify only; no campaign status writes;
+ * - campaign rules: qualified notify only; no campaign status writes;
  * - ad rules: deliberately ignored;
  * - material rules: evaluate today's metrics and control ad_material_id only;
  * - low-balance monitoring remains active.
