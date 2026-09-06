@@ -1,4 +1,5 @@
 import type { Telegraf } from 'telegraf';
+import { getTodaySpentCampaigns, type TikTokSpentCampaign } from '../tiktok/api.js';
 
 const BATCH_IDLE_MS = 10_000;
 const BATCH_MAX_WAIT_MS = 25_000;
@@ -8,6 +9,7 @@ const DETAIL_BUTTONS_PER_ROW = 5;
 
 interface ParsedAutoAction {
   campaignLine: string;
+  campaignId?: string;
   pauseSuccess: number;
   activeSuccess: number;
   unverified: number;
@@ -41,6 +43,45 @@ function findMaterialDetailButton(replyMarkup: unknown): Record<string, unknown>
   return keyboard
     .flat()
     .find(button => String(button?.callback_data || '').startsWith('md:'));
+}
+
+function extractCampaignId(campaignLine: string): string | undefined {
+  return campaignLine.match(/<code>(\d{10,})<\/code>/)?.[1];
+}
+
+function formatCampaignReportLine(campaign: TikTokSpentCampaign): string {
+  return `💸 $${campaign.spend.toFixed(2)} · ` +
+    `👆 ${campaign.clicks.toLocaleString()}/${campaign.ctr.toFixed(2)}% · ` +
+    `🎯 ${campaign.conversions.toLocaleString()} · ` +
+    `💰 $${campaign.cpa.toFixed(2)}`;
+}
+
+async function getCampaignReportLineMap(items: ParsedAutoAction[]): Promise<Map<string, string>> {
+  const targetCampaignIds = new Set(
+    items
+      .map(item => item.campaignId)
+      .filter((campaignId): campaignId is string => Boolean(campaignId))
+  );
+
+  if (targetCampaignIds.size === 0) {
+    return new Map();
+  }
+
+  try {
+    const campaigns = await getTodaySpentCampaigns();
+    const reportLines = new Map<string, string>();
+
+    for (const campaign of campaigns) {
+      if (!targetCampaignIds.has(campaign.campaign_id)) continue;
+      reportLines.set(campaign.campaign_id, formatCampaignReportLine(campaign));
+    }
+
+    return reportLines;
+  } catch (error) {
+    // Feedback kết quả action phải vẫn được gửi dù report refresh tạm lỗi.
+    console.warn('[MaterialAutoActionFeedback] campaign summary refresh failed:', error);
+    return new Map();
+  }
 }
 
 function parseAutoActionPayload(payload: unknown): ParsedAutoAction | undefined {
@@ -79,6 +120,7 @@ function parseAutoActionPayload(payload: unknown): ParsedAutoAction | undefined 
 
   return {
     campaignLine,
+    campaignId: extractCampaignId(campaignLine),
     pauseSuccess,
     activeSuccess,
     unverified,
@@ -87,7 +129,7 @@ function parseAutoActionPayload(payload: unknown): ParsedAutoAction | undefined 
   };
 }
 
-function buildGroupedMessage(items: ParsedAutoAction[]) {
+function buildGroupedMessage(items: ParsedAutoAction[], campaignReportLines: Map<string, string>) {
   const pauseSuccess = items.reduce((sum, item) => sum + item.pauseSuccess, 0);
   const activeSuccess = items.reduce((sum, item) => sum + item.activeSuccess, 0);
   const unverified = items.reduce((sum, item) => sum + item.unverified, 0);
@@ -119,6 +161,14 @@ function buildGroupedMessage(items: ParsedAutoAction[]) {
 
   visibleItems.forEach((item, index) => {
     detailLines.push('', `<b>${index + 1}.</b> ${item.campaignLine}`);
+
+    const campaignReportLine = item.campaignId
+      ? campaignReportLines.get(item.campaignId)
+      : undefined;
+    if (campaignReportLine) {
+      detailLines.push(campaignReportLine);
+    }
+
     const visibleDetails = item.details.slice(0, MAX_DETAILS_PER_CAMPAIGN);
     detailLines.push(...visibleDetails);
     const hiddenDetails = item.details.length - visibleDetails.length;
@@ -170,6 +220,7 @@ function buildBufferedResponse(payload: Record<string, unknown>): Record<string,
  *
  * Batching chỉ tác động presentation Telegram của payload `Material Rule Auto`:
  * - không đổi rule, mapping hay TikTok write API;
+ * - mỗi campaign hiển thị thêm report tổng hôm nay: spend / click+CTR / conversion / CPA;
  * - mỗi campaign vẫn giữ nút chi tiết riêng, hiển thị thành `🔎 1`, `🔎 2`, ...;
  * - chờ tối đa 25 giây và flush sau 10 giây không có result mới để gom nhiều camp;
  * - giới hạn phần chi tiết để tránh vượt Telegram message limit.
@@ -186,7 +237,8 @@ export function setupMaterialAutoActionFeedback(bot: Telegraf): void {
     if (batch.timer) clearTimeout(batch.timer);
     if (batch.items.length === 0) return;
 
-    const grouped = buildGroupedMessage(batch.items);
+    const campaignReportLines = await getCampaignReportLineMap(batch.items);
+    const grouped = buildGroupedMessage(batch.items, campaignReportLines);
     const firstItemPayload = (batch as PendingBatch & { payload?: Record<string, unknown> }).payload;
     if (!firstItemPayload) return;
 
