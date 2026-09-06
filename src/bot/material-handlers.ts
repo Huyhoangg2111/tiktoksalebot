@@ -67,7 +67,11 @@ function isMaterialDetailMessage(ctx: any): boolean {
   return /chi tiết material/i.test(text);
 }
 
-function renderMaterialPage(snapshot: CampaignMaterialSnapshot, requestedPage: number) {
+function renderMaterialPage(
+  snapshot: CampaignMaterialSnapshot,
+  requestedPage: number,
+  actionNotice?: string
+) {
   const totalPages = Math.max(1, Math.ceil(snapshot.materials.length / MATERIALS_PER_PAGE));
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
   const start = page * MATERIALS_PER_PAGE;
@@ -92,6 +96,10 @@ function renderMaterialPage(snapshot: CampaignMaterialSnapshot, requestedPage: n
       `💵 ${formatUsd(item.spend)} · 👆 ${item.clicks.toLocaleString()}/${formatPercent(item.ctr)} · 🎯 ${item.conversions.toLocaleString()} · 💰 ${formatUsd(item.cpa)}`,
       `<code>${escapeHtml(item.tiktokItemId)}</code>`
     );
+  }
+
+  if (actionNotice) {
+    lines.push('', escapeHtml(actionNotice));
   }
 
   const actionButtons = items
@@ -144,9 +152,10 @@ function renderMaterialPage(snapshot: CampaignMaterialSnapshot, requestedPage: n
 async function editMaterialMessage(
   ctx: any,
   snapshot: CampaignMaterialSnapshot,
-  page: number
+  page: number,
+  actionNotice?: string
 ): Promise<void> {
-  const rendered = renderMaterialPage(snapshot, page);
+  const rendered = renderMaterialPage(snapshot, page, actionNotice);
   try {
     await ctx.editMessageText(rendered.text, {
       parse_mode: 'HTML',
@@ -203,6 +212,7 @@ export function setupMaterialHandlers(bot: Telegraf): void {
       return;
     }
 
+    const actionLabel = data.operationStatus === 'ENABLE' ? 'Active' : 'Pause';
     await ctx.answerCbQuery(data.operationStatus === 'ENABLE' ? 'Đang bật material...' : 'Đang tắt material...');
 
     try {
@@ -213,12 +223,24 @@ export function setupMaterialHandlers(bot: Telegraf): void {
         data.operationStatus
       );
 
+      const snapshot = await getCampaignMaterialSnapshot(data.advertiserId, data.campaignId);
+
       if (result.failed.length > 0) {
-        await ctx.reply('⚠️ TikTok đã nhận yêu cầu nhưng trạng thái xác minh chưa đúng. Bot không tự giả định thành công.');
+        await editMaterialMessage(
+          ctx,
+          snapshot,
+          data.page,
+          `⚠️ ${actionLabel} chưa xác minh thành công`
+        );
+        return;
       }
 
-      const snapshot = await getCampaignMaterialSnapshot(data.advertiserId, data.campaignId);
-      await editMaterialMessage(ctx, snapshot, data.page);
+      await editMaterialMessage(
+        ctx,
+        snapshot,
+        data.page,
+        `✅ ${actionLabel} thành công`
+      );
     } catch (error) {
       console.error('Material toggle callback failed:', error);
       await ctx.reply(`⛔ Không thể cập nhật material: ${escapeHtml(error instanceof Error ? error.message : String(error))}`, {
