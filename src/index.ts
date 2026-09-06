@@ -6,6 +6,7 @@ import { setupSmartPlusAppealHandlers } from './bot/smartplus-appeal-handlers.js
 import { setupSettingsMenuHandlers } from './bot/settings-menu.js';
 import { setupRetiredAlertActions } from './bot/retired-alert-actions.js';
 import { setupMaterialHandlers } from './bot/material-handlers.js';
+import { setupAppealMenuCleanup } from './bot/appeal-menu-cleanup.js';
 import { initializeAlertRules } from './alerts/index.js';
 import { startScheduler } from './scheduler/index.js';
 import { startServer, type SignerServerRuntime } from './playwright-signer/server.js';
@@ -74,6 +75,10 @@ async function main() {
   // the old settings implementation and a catch-all text fallback. The new settings
   // module owns /settings, health, and all settings callbacks.
   setupSettingsMenuHandlers(bot);
+
+  // Xóa menu appeal cha ngay khi chọn chức năng, rồi mới chuyển callback cho
+  // Smart+ appeal handlers xử lý. Tránh để lại message hướng dẫn thừa trong chat.
+  setupAppealMenuCleanup(bot);
 
   // Appeal handlers must also be registered before setupBotHandlers() because the
   // main handler installs a catch-all text fallback that does not call next().

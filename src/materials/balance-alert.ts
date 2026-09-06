@@ -16,13 +16,25 @@ function escapeHtml(value: unknown): string {
     .replace(/"/g, '&quot;');
 }
 
+/** Giữ cách tính severity của cảnh báo số dư bản Level 1 cũ. */
 function severityForBalance(balance: number, threshold: number): StoredAlertSeverity {
-  if (threshold <= 0) return 'low';
-  const ratio = balance / threshold;
-  if (ratio <= 0.1) return 'critical';
-  if (ratio <= 0.35) return 'high';
-  if (ratio <= 0.7) return 'medium';
+  if (threshold === 0) {
+    return balance === 0 ? 'low' : 'critical';
+  }
+
+  const ratio = Math.abs(balance - threshold) / Math.abs(threshold);
+  if (ratio >= 0.5) return 'critical';
+  if (ratio >= 0.25) return 'high';
+  if (ratio >= 0.1) return 'medium';
   return 'low';
+}
+
+function formatUsd(amount: number, currency = 'USD'): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency,
+    minimumFractionDigits: 2,
+  }).format(amount);
 }
 
 async function ensureStateTable(): Promise<void> {
@@ -91,26 +103,18 @@ export async function checkAndSendLowBalanceAlert(bot: Telegraf): Promise<void> 
   const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
   if (!adminChatId) return;
 
-  const plainLines = [
-    `⚠️ Số dư tài khoản thấp (${lowBalances.length})`,
-    `Ngưỡng: $${threshold.toFixed(2)}`,
-    '',
-    ...lowBalances.map((account, index) =>
-      `${index + 1}. ${getAccountLabel(account)} · ${account.advertiser_id} · $${Number(account.balance || 0).toFixed(2)}`
-    ),
-  ];
-  const htmlLines = [
-    `<b>⚠️ Số dư tài khoản thấp (${lowBalances.length})</b>`,
-    `Ngưỡng: <b>$${threshold.toFixed(2)}</b>`,
-    '',
-    ...lowBalances.map((account, index) =>
-      `${index + 1}. ${escapeHtml(getAccountLabel(account))} · <code>${escapeHtml(account.advertiser_id)}</code> · <b>$${Number(account.balance || 0).toFixed(2)}</b>`
-    ),
-  ];
+  // Format bản cũ: không hiện count/ngưỡng, mỗi tài khoản một dòng "- tên: $số dư".
+  const message = lowBalances
+    .map(account =>
+      `- ${getAccountLabel(account)}: ${formatUsd(Number(account.balance || 0), account.currency)}`
+    )
+    .join('\n');
+
   const lowest = Math.min(...lowBalances.map(account => Number(account.balance || 0)));
   const severity = severityForBalance(lowest, threshold);
+  const telegramText = `🔔 <b>Balance</b> - ${severity.toUpperCase()}\n${escapeHtml(message)}`;
 
-  await bot.telegram.sendMessage(adminChatId, htmlLines.join('\n'), { parse_mode: 'HTML' });
-  await saveAlertHistory('balance_low', plainLines.join('\n'), severity);
+  await bot.telegram.sendMessage(adminChatId, telegramText, { parse_mode: 'HTML' });
+  await saveAlertHistory('balance_low', message, severity);
   await markSent();
 }
