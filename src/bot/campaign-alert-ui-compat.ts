@@ -8,6 +8,15 @@ function escapeHtml(value: unknown): string {
     .replace(/"/g, '&quot;');
 }
 
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&amp;/gi, '&');
+}
+
 function getCampaignDisplayName(campaignName: string): string {
   const parts = String(campaignName || '')
     .split(' - ')
@@ -23,8 +32,11 @@ function getCampaignDisplayName(campaignName: string): string {
 
 function formatLegacyCondition(condition: string, rawRule: string): string {
   const conditionIcon = condition === 'vượt giới hạn' ? '📈' : '✅';
-  const parts = rawRule.split('·').map(part => part.trim()).filter(Boolean);
-  const metricPart = parts[0] || rawRule;
+  // ruleLine đã nằm trong HTML payload nên các toán tử có thể đang là &gt;/&lt;.
+  // Decode trước rồi escape đúng một lần để Telegram render >, <, >=, <= thay vì hiện literal entity.
+  const decodedRule = decodeHtmlEntities(rawRule);
+  const parts = decodedRule.split('·').map(part => part.trim()).filter(Boolean);
+  const metricPart = parts[0] || decodedRule;
   const conversionPart = (parts[1] || '').replace(/^Conversion\s*/i, '').trim();
 
   return `${conditionIcon} <b>${escapeHtml(condition)}</b>: 💰 <b>${escapeHtml(metricPart)}</b>` +
@@ -35,18 +47,11 @@ function formatLegacyCondition(condition: string, rawRule: string): string {
  * Chỉ khôi phục presentation của thông báo campaign Level 1 mới về bố cục cũ.
  * Không thay đổi rule, cooldown, dữ liệu, callback hay material write API.
  *
- * Input mới:
- *   🔔 Campaign đạt điều kiện
- *   Tên đầy đủ - ID
- *   metrics
- *   📏 rule
- *   ℹ️ Campaign chỉ cảnh báo...
- *
  * Output kiểu cũ:
  *   🔔 Ads đạt điều kiện (1 camp)
- *   ✅ đạt điều kiện: ...
+ *   ✅ đạt điều kiện: 💰 CPA < 0.7 · 🎯 >= 5
  *
- *   1. Tên ngắn - ID
+ *   1. Tên ngắn - campaign_id
  *   metrics
  */
 function rewriteCampaignAlertText(text: string): string {
