@@ -9,6 +9,7 @@ import { setupMaterialHandlers } from './bot/material-handlers.js';
 import { setupAppealMenuCleanup } from './bot/appeal-menu-cleanup.js';
 import { setupCampaignNameIdLinkExperiment } from './bot/campaign-name-id-link.js';
 import { setupCampaignAlertUiCompatibility } from './bot/campaign-alert-ui-compat.js';
+import { setupMaterialAutoActionFeedback } from './bot/material-auto-action-feedback.js';
 import { initializeAlertRules } from './alerts/index.js';
 import { startScheduler } from './scheduler/index.js';
 import { startServer, type SignerServerRuntime } from './playwright-signer/server.js';
@@ -77,6 +78,10 @@ async function main() {
   // Khôi phục bố cục thông báo campaign Level 1 về presentation cũ.
   // Đặt sau ID-link setup để payload sau khi rewrite vẫn được xử lý ẩn campaign ID.
   setupCampaignAlertUiCompatibility(bot);
+
+  // Khôi phục feedback `Pause/Active thành công` cho các thao tác material do ruler tự động chạy.
+  // Chỉ rewrite presentation Telegram, không thay đổi quyết định rule hay TikTok write API.
+  setupMaterialAutoActionFeedback(bot);
 
   // Material detail/toggle callbacks must be registered before the legacy handlers.
   setupMaterialHandlers(bot);
