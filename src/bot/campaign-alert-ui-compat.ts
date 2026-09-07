@@ -1,4 +1,6 @@
 import type { Telegraf } from 'telegraf';
+import { getAdvertiserTrackingStates } from '../accounts/tracking.js';
+import { getCampaignCloneCountMap } from '../campaigns/clone-tracking.js';
 import { parseMaterialDetailCallbackData } from '../materials/callbacks.js';
 
 const BATCH_IDLE_MS = 1_500;
@@ -43,6 +45,17 @@ function getCampaignDisplayName(campaignName: string): string {
   }
 
   return String(campaignName || '').trim();
+}
+
+function getAccountLabel(advertiserName: string | undefined, advertiserId: string | undefined): string {
+  const accountName = String(advertiserName || '').trim();
+  const aaNumberMatch = accountName.match(/\bAA\s*(\d+)\b/i);
+
+  if (aaNumberMatch?.[1]) {
+    return aaNumberMatch[1].padStart(2, '0');
+  }
+
+  return accountName || String(advertiserId || '').trim();
 }
 
 function chunkArray<T>(items: T[], size: number): T[][] {
@@ -97,22 +110,41 @@ function parseCampaignAlertPayload(payload: unknown): ParsedCampaignAlert | unde
   };
 }
 
-function buildGroupedCampaignMessage(items: ParsedCampaignAlert[]) {
+async function buildGroupedCampaignMessage(items: ParsedCampaignAlert[]) {
   const visibleItems = items.slice(0, MAX_CAMPAIGNS_IN_MESSAGE);
-  const condition = visibleItems[0]?.condition || 'đạt điều kiện';
-  const lines: string[] = [
-    `<b>🔔 Ads ${escapeHtml(condition)} (${items.length} camp)</b>`,
-  ];
   const buttons: Record<string, unknown>[] = [];
 
+  const advertiserIds = [...new Set(
+    visibleItems
+      .map(item => item.advertiserId)
+      .filter((id): id is string => Boolean(id))
+  )];
+
+  const [trackingStates, cloneCountByCampaignId] = await Promise.all([
+    getAdvertiserTrackingStates(advertiserIds.map(advertiserId => ({ advertiserId }))),
+    getCampaignCloneCountMap(visibleItems.map(item => item.campaignId)),
+  ]);
+
+  const accountNameById = new Map(
+    trackingStates.map(state => [state.advertiserId, state.advertiserName])
+  );
+
+  const lines: string[] = [
+    `<b>✅ ADS Đạt Điều Kiện (${items.length} camp)</b>`,
+  ];
+
   visibleItems.forEach((item, index) => {
-    const accountSuffix = item.advertiserId
-      ? ` · TK <code>${escapeHtml(item.advertiserId)}</code>`
-      : '';
+    const accountLabel = getAccountLabel(
+      item.advertiserId ? accountNameById.get(item.advertiserId) : undefined,
+      item.advertiserId
+    );
+    const accountSuffix = accountLabel ? ` · ${escapeHtml(accountLabel)}` : '';
+    const cloneCount = cloneCountByCampaignId.get(item.campaignId) || 0;
+    const metricsLine = item.metricsLine.replace(/^💵\s*/, '💸 ');
 
     lines.push(
-      `<b>${index + 1}. ${escapeHtml(item.campaignName)}</b> - <code>${escapeHtml(item.campaignId)}</code>${accountSuffix}`,
-      item.metricsLine
+      `<b>${index + 1}. ${escapeHtml(item.campaignName)}</b> - <code>${escapeHtml(item.campaignId)}</code>${accountSuffix} · 🚀 x${cloneCount}`,
+      metricsLine
     );
 
     if (item.detailButton) {
@@ -159,7 +191,7 @@ function buildBufferedResponse(payload: Record<string, unknown>): Record<string,
  * - `vượt giới hạn` không gửi alert campaign vì phần này đã được material ruler tự động xử lý
  *   và có thông báo Pause/Active riêng;
  * - các camp đạt điều kiện trong cùng lượt được gom thành một message;
- * - hiển thị campaign_id + advertiser_id để biết chính xác camp thuộc tài khoản nào;
+ * - khôi phục format cũ: account số ngắn kiểu `32` và clone count `🚀 xN`;
  * - giữ dòng metrics và callback `Chi tiết camp`;
  * - không thay đổi quyết định material rule hay TikTok write API.
  */
@@ -177,19 +209,19 @@ export function setupCampaignAlertUiCompatibility(bot: Telegraf): void {
     const items = [...batch.items.values()];
     if (items.length === 0) return;
 
-    const grouped = buildGroupedCampaignMessage(items);
-    const nextPayload: Record<string, unknown> = {
-      ...batch.payload,
-      text: grouped.text,
-    };
-
-    if (grouped.replyMarkup) {
-      nextPayload.reply_markup = grouped.replyMarkup;
-    } else {
-      delete nextPayload.reply_markup;
-    }
-
     try {
+      const grouped = await buildGroupedCampaignMessage(items);
+      const nextPayload: Record<string, unknown> = {
+        ...batch.payload,
+        text: grouped.text,
+      };
+
+      if (grouped.replyMarkup) {
+        nextPayload.reply_markup = grouped.replyMarkup;
+      } else {
+        delete nextPayload.reply_markup;
+      }
+
       await originalCallApi('sendMessage', nextPayload);
     } catch (error) {
       console.error('[CampaignAlertUiCompatibility] grouped campaign notification failed:', error);
