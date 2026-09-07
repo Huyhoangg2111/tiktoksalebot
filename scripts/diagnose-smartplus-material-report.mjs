@@ -40,6 +40,33 @@ async function getJson(url, accessToken, params) {
   return response.data;
 }
 
+async function listSmartPlusAdsForCampaign(advertiserId, campaignId, accessToken) {
+  const matched = [];
+  for (let page = 1; page <= 20; page += 1) {
+    const payload = await getJson(`${BASE}/smart_plus/ad/get/`, accessToken, {
+      advertiser_id: advertiserId,
+      page,
+      page_size: PAGE_SIZE,
+    });
+    const list = Array.isArray(payload?.data?.list) ? payload.data.list : [];
+    matched.push(...list.filter(item => String(item?.campaign_id || '') === campaignId));
+    if (list.length < PAGE_SIZE) break;
+  }
+  return matched;
+}
+
+async function getSmartPlusAdDetail(advertiserId, smartPlusAdId, accessToken) {
+  const payload = await getJson(`${BASE}/smart_plus/ad/get/`, accessToken, {
+    advertiser_id: advertiserId,
+    smart_plus_ad_ids: JSON.stringify([smartPlusAdId]),
+    page: 1,
+    page_size: PAGE_SIZE,
+  });
+  return (payload?.data?.list || []).find(
+    item => String(item?.smart_plus_ad_id || '') === smartPlusAdId
+  );
+}
+
 function parseRows(payload) {
   return (payload?.data?.list || []).map(row => {
     const d = row?.dimensions || {};
@@ -70,14 +97,14 @@ function printRows(title, rows, creatives) {
     const ref = byTikTokItem.get(row.main_material_id)
       || byAdMaterial.get(row.main_material_id)
       || byCreative.get(row.main_material_id);
-    let id_kind = '';
-    if (byTikTokItem.has(row.main_material_id)) id_kind = 'tiktok_item_id';
-    else if (byAdMaterial.has(row.main_material_id)) id_kind = 'ad_material_id';
-    else if (byCreative.has(row.main_material_id)) id_kind = 'smart_plus_creative_id';
+    let idKind = '';
+    if (byTikTokItem.has(row.main_material_id)) idKind = 'tiktok_item_id';
+    else if (byAdMaterial.has(row.main_material_id)) idKind = 'ad_material_id';
+    else if (byCreative.has(row.main_material_id)) idKind = 'smart_plus_creative_id';
 
     return {
       main_material_id: row.main_material_id,
-      id_kind,
+      id_kind: idKind,
       material_index: ref?.index || '',
       spend: row.spend,
       clicks: row.clicks,
@@ -120,41 +147,16 @@ async function fetchReport(endpoint, accessToken, commonParams, includeRealtime 
   }
 }
 
-async function main() {
-  const campaignId = String(process.argv[2] || '').trim();
-  const smartPlusAdId = String(process.argv[3] || '').trim();
-  const dateKey = String(process.argv[4] || todayVietnam()).trim();
+async function diagnoseSmartPlusAd(advertiserId, campaignId, ad, dateKey, accessToken) {
+  const smartPlusAdId = String(ad?.smart_plus_ad_id || '');
+  if (!smartPlusAdId) return;
 
-  if (!campaignId || !smartPlusAdId) {
-    console.error('Cách dùng: node scripts/diagnose-smartplus-material-report.mjs <campaign_id> <smart_plus_ad_id> [YYYY-MM-DD]');
-    process.exit(2);
+  let detailedAd = ad;
+  if (!Array.isArray(detailedAd?.creative_list) || detailedAd.creative_list.length === 0) {
+    detailedAd = await getSmartPlusAdDetail(advertiserId, smartPlusAdId, accessToken) || ad;
   }
 
-  // Script chạy độc lập với tiến trình bot nên phải mở SQLite trước khi gọi
-  // các helper production có dùng runtime settings/cache.
-  await connectDB();
-
-  // Tự tìm advertiser_id từ dữ liệu campaign hiện có để không phải in/tra token hay cấu hình nhạy cảm.
-  const campaigns = await getTodaySpentCampaigns();
-  const campaign = campaigns.find(item => String(item.campaign_id) === campaignId);
-  if (!campaign) throw new Error(`Không tìm thấy campaign ${campaignId} trong report hôm nay.`);
-  const advertiserId = String(campaign.advertiser_id || '').trim();
-  if (!advertiserId) throw new Error(`Campaign ${campaignId} không có advertiser_id.`);
-
-  const accessToken = await getTikTokReadAccessToken();
-  const adPayload = await getJson(`${BASE}/smart_plus/ad/get/`, accessToken, {
-    advertiser_id: advertiserId,
-    smart_plus_ad_ids: JSON.stringify([smartPlusAdId]),
-    page: 1,
-    page_size: PAGE_SIZE,
-  });
-  const ad = (adPayload?.data?.list || []).find(item => String(item?.smart_plus_ad_id || '') === smartPlusAdId);
-  if (!ad) throw new Error(`Không tìm thấy Smart+ Ad ${smartPlusAdId} trong advertiser ${advertiserId}`);
-  if (String(ad?.campaign_id || '') !== campaignId) {
-    throw new Error(`Smart+ Ad ${smartPlusAdId} thuộc campaign ${String(ad?.campaign_id || '')}, không phải ${campaignId}.`);
-  }
-
-  const creatives = (ad?.creative_list || []).map((creative, idx) => ({
+  const creatives = (detailedAd?.creative_list || []).map((creative, idx) => ({
     index: idx + 1,
     ad_material_id: String(creative?.ad_material_id || ''),
     smart_plus_creative_id: String(creative?.smart_plus_creative_id || ''),
@@ -170,7 +172,7 @@ async function main() {
     ),
   }));
 
-  console.log('READ-ONLY diagnostic. Không có POST.');
+  console.log('\nREAD-ONLY diagnostic. Không có POST.');
   console.log(`Advertiser: ${advertiserId}`);
   console.log(`Campaign: ${campaignId}`);
   console.log(`Smart+ Ad: ${smartPlusAdId}`);
@@ -195,33 +197,71 @@ async function main() {
     common,
     true
   );
-  printRows('A. BREAKDOWN - TODAY', parseRows(breakdown), creatives);
+  printRows('A. BREAKDOWN - DATE', parseRows(breakdown), creatives);
   console.log(`request_id: ${String(breakdown?.request_id || '')}`);
 
-  const overview = await fetchReport(
-    '/smart_plus/material_report/overview/',
-    accessToken,
-    { ...common, query_lifetime: false },
-    true
-  );
-  printRows('B. OVERVIEW - TODAY', parseRows(overview), creatives);
-  console.log(`request_id: ${String(overview?.request_id || '')}`);
+  try {
+    const overview = await fetchReport(
+      '/smart_plus/material_report/overview/',
+      accessToken,
+      { ...common, query_lifetime: false },
+      true
+    );
+    printRows('B. OVERVIEW - DATE', parseRows(overview), creatives);
+    console.log(`request_id: ${String(overview?.request_id || '')}`);
+  } catch (error) {
+    console.warn(`[diagnostic] overview/date unavailable: ${error.message}`);
+  }
 
-  const lifetime = await fetchReport(
-    '/smart_plus/material_report/overview/',
-    accessToken,
-    {
-      advertiser_id: advertiserId,
-      dimensions: JSON.stringify(['main_material_id']),
-      filtering,
-      query_lifetime: true,
-      page: 1,
-      page_size: PAGE_SIZE,
-    },
-    true
-  );
-  printRows('C. OVERVIEW - LIFETIME', parseRows(lifetime), creatives);
-  console.log(`request_id: ${String(lifetime?.request_id || '')}`);
+  try {
+    const lifetime = await fetchReport(
+      '/smart_plus/material_report/overview/',
+      accessToken,
+      {
+        advertiser_id: advertiserId,
+        dimensions: JSON.stringify(['main_material_id']),
+        filtering,
+        query_lifetime: true,
+        page: 1,
+        page_size: PAGE_SIZE,
+      },
+      true
+    );
+    printRows('C. OVERVIEW - LIFETIME', parseRows(lifetime), creatives);
+    console.log(`request_id: ${String(lifetime?.request_id || '')}`);
+  } catch (error) {
+    console.warn(`[diagnostic] overview/lifetime unavailable: ${error.message}`);
+  }
+}
+
+async function main() {
+  const campaignId = String(process.argv[2] || '').trim();
+  const dateKey = String(process.argv[3] || todayVietnam()).trim();
+
+  if (!campaignId) {
+    console.error('Cách dùng: node scripts/diagnose-smartplus-material-report.mjs <campaign_id> [YYYY-MM-DD]');
+    process.exit(2);
+  }
+
+  await connectDB();
+
+  const campaigns = await getTodaySpentCampaigns(dateKey, dateKey);
+  const campaign = campaigns.find(item => String(item.campaign_id) === campaignId);
+  if (!campaign) throw new Error(`Không tìm thấy campaign ${campaignId} trong report ngày ${dateKey}.`);
+
+  const advertiserId = String(campaign.advertiser_id || '').trim();
+  if (!advertiserId) throw new Error(`Campaign ${campaignId} không có advertiser_id.`);
+
+  const accessToken = await getTikTokReadAccessToken();
+  const matchedAds = await listSmartPlusAdsForCampaign(advertiserId, campaignId, accessToken);
+  if (matchedAds.length === 0) {
+    throw new Error(`Không tìm thấy Smart+ Ad nào thuộc campaign ${campaignId} trong advertiser ${advertiserId}.`);
+  }
+
+  console.log(`Tìm thấy ${matchedAds.length} Smart+ Ad thuộc campaign ${campaignId}.`);
+  for (const ad of matchedAds) {
+    await diagnoseSmartPlusAd(advertiserId, campaignId, ad, dateKey, accessToken);
+  }
 
   console.log('\n✅ Xong. READ-ONLY, không có POST và không in token.');
 }
