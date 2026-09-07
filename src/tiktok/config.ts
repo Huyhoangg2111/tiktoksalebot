@@ -3,6 +3,7 @@ import {
   getBusinessCenterId,
   getTikTokTokenConfig,
   type AdvertiserPermission,
+  type TikTokTokenConfig,
 } from '../google-sheets/api.js';
 
 // Configuration for TikTok API
@@ -25,6 +26,9 @@ const PLACEHOLDER_VALUES = new Set([
   'your_business_center_id_here',
 ]);
 
+const TIKTOK_TOKEN_CACHE_TTL_MS = 60_000;
+let cachedTikTokTokenConfig: { value: TikTokTokenConfig; expiresAt: number } | undefined;
+
 function isPlaceholder(value: string): boolean {
   return PLACEHOLDER_VALUES.has(value) || value.startsWith('your_') || value.endsWith('_here');
 }
@@ -39,8 +43,30 @@ function getRequiredEnv(name: string): string {
   return value;
 }
 
+async function getCachedTikTokTokenConfig(): Promise<TikTokTokenConfig> {
+  const now = Date.now();
+  if (cachedTikTokTokenConfig && cachedTikTokTokenConfig.expiresAt > now) {
+    return cachedTikTokTokenConfig.value;
+  }
+
+  try {
+    const value = await getTikTokTokenConfig();
+    cachedTikTokTokenConfig = {
+      value,
+      expiresAt: now + TIKTOK_TOKEN_CACHE_TTL_MS,
+    };
+    return value;
+  } catch (error) {
+    if (cachedTikTokTokenConfig) {
+      console.warn('[TikTokConfig] Token sheet read failed; using last-known-good token config:', error);
+      return cachedTikTokTokenConfig.value;
+    }
+    throw error;
+  }
+}
+
 async function getReadAccessToken(): Promise<string> {
-  const tokenConfig = await getTikTokTokenConfig();
+  const tokenConfig = await getCachedTikTokTokenConfig();
   const readToken = tokenConfig.readAccessToken?.trim();
 
   if (readToken && !isPlaceholder(readToken)) {
@@ -51,7 +77,7 @@ async function getReadAccessToken(): Promise<string> {
 }
 
 async function getWriteAccessToken(): Promise<string> {
-  const tokenConfig = await getTikTokTokenConfig();
+  const tokenConfig = await getCachedTikTokTokenConfig();
   const writeToken = tokenConfig.writeAccessToken?.trim();
 
   if (writeToken && !isPlaceholder(writeToken)) {
@@ -136,6 +162,14 @@ export async function getTikTokConfig(): Promise<TikTokConfig> {
     advertiserIds,
     businessCenterId: businessCenterId && !isPlaceholder(businessCenterId) ? businessCenterId : undefined,
   };
+}
+
+/**
+ * Read-token-only accessor for high-frequency TikTok API paths.
+ * It deliberately avoids loading advertiser Permissions on every request.
+ */
+export async function getTikTokReadAccessToken(): Promise<string> {
+  return getReadAccessToken();
 }
 
 /**
