@@ -1,6 +1,8 @@
 import type { Telegraf } from 'telegraf';
 import { getCampaignCloneCountMap } from '../campaigns/clone-tracking.js';
+import { db } from '../db/index.js';
 import { parseMaterialDetailCallbackData } from '../materials/callbacks.js';
+import { getSmartPlusAdsForAdvertiser, getVietnamDateKey } from '../materials/service.js';
 import { getTodaySpentCampaigns, type TikTokSpentCampaign } from '../tiktok/api.js';
 
 const BATCH_IDLE_MS = 10_000;
@@ -8,6 +10,11 @@ const BATCH_MAX_WAIT_MS = 25_000;
 const MAX_CAMPAIGNS_IN_MESSAGE = 10;
 const MAX_DETAILS_PER_CAMPAIGN = 4;
 const DETAIL_BUTTONS_PER_ROW = 5;
+const CAMPAIGN_MATERIAL_DISPLAY_CACHE_TTL_MS = 10_000;
+
+type CampaignMaterialDisplayStatus = 'active' | 'paused' | 'mixed';
+type CampaignDisplayStatus = CampaignMaterialDisplayStatus | 'deleted';
+type MaterialOperationStatus = 'ENABLE' | 'DISABLE';
 
 interface ParsedAutoAction {
   campaignLine: string;
@@ -32,8 +39,38 @@ interface CampaignDisplayData {
   advertiserName?: string;
 }
 
+interface SpentCampaignStatusRow {
+  advertiser_id: string;
+  campaign_id: string;
+  status?: string | null;
+}
+
+interface LocalMaterialOperationRow {
+  advertiser_id: string;
+  smart_plus_ad_id: string;
+  ad_material_id: string;
+  operation_status: string;
+  confirmed_at_ms?: number | null;
+}
+
+interface CampaignMaterialDisplaySnapshot {
+  byCampaignId: Map<string, CampaignMaterialDisplayStatus>;
+  campaignRows: SpentCampaignStatusRow[];
+}
+
+let campaignMaterialDisplayCache:
+  | {
+    expiresAt: number;
+    snapshot: CampaignMaterialDisplaySnapshot;
+  }
+  | undefined;
+
 function isMaterialAutoActionText(text: string): boolean {
   return /^🤖\s*<b>Material Rule Auto<\/b>/i.test(text.trim());
+}
+
+function isTodayCampaignListText(text: string): boolean {
+  return /Chiến dịch có chi tiêu hôm nay/i.test(text) && /Trạng thái QC:/i.test(text);
 }
 
 function chunkArray<T>(items: T[], size: number): T[][] {
@@ -94,6 +131,200 @@ function formatCampaignReportLine(campaign: TikTokSpentCampaign): string {
     `👆 ${campaign.clicks.toLocaleString()}/${campaign.ctr.toFixed(2)}% · ` +
     `🎯 ${campaign.conversions.toLocaleString()} · ` +
     `💰 $${campaign.cpa.toFixed(2)}`;
+}
+
+function normalizeMaterialOperationStatus(value: unknown): MaterialOperationStatus | 'UNKNOWN' {
+  const normalized = String(value ?? '').trim().toUpperCase();
+  if (normalized === 'ENABLE' || normalized === 'DISABLE') return normalized;
+  return 'UNKNOWN';
+}
+
+function getCreativeMaterialStatus(creative: any): MaterialOperationStatus | 'UNKNOWN' {
+  const candidates = [
+    creative?.material_operation_status,
+    creative?.operation_status,
+    creative?.status,
+    creative?.material_status,
+    creative?.creative_status,
+    creative?.creative_info?.material_operation_status,
+    creative?.creative_info?.operation_status,
+    creative?.creative_info?.status,
+  ];
+
+  for (const candidate of candidates) {
+    const status = normalizeMaterialOperationStatus(candidate);
+    if (status !== 'UNKNOWN') return status;
+  }
+
+  return 'UNKNOWN';
+}
+
+function normalizeStoredCampaignStatus(value: unknown): CampaignDisplayStatus {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (normalized.includes('delete') || normalized.includes('remove')) return 'deleted';
+  if (
+    normalized.includes('pause') ||
+    normalized.includes('disable') ||
+    normalized.includes('suspend') ||
+    normalized.includes('offline')
+  ) {
+    return 'paused';
+  }
+  return 'active';
+}
+
+function materialStateKey(advertiserId: string, smartPlusAdId: string, adMaterialId: string): string {
+  return `${advertiserId}:${smartPlusAdId}:${adMaterialId}`;
+}
+
+async function getCampaignMaterialDisplaySnapshot(forceRefresh = false): Promise<CampaignMaterialDisplaySnapshot> {
+  const now = Date.now();
+  if (!forceRefresh && campaignMaterialDisplayCache?.expiresAt && campaignMaterialDisplayCache.expiresAt > now) {
+    return campaignMaterialDisplayCache.snapshot;
+  }
+
+  const dateKey = getVietnamDateKey();
+  const campaignRows = await db.all<SpentCampaignStatusRow>(
+    `SELECT advertiser_id, campaign_id, status
+     FROM spent_campaign_cache
+     WHERE date_key = ?`,
+    [dateKey]
+  );
+  const campaignIds = new Set(campaignRows.map(row => String(row.campaign_id || '')).filter(Boolean));
+  const advertiserIds = [...new Set(campaignRows.map(row => String(row.advertiser_id || '')).filter(Boolean))];
+
+  let localRows: LocalMaterialOperationRow[] = [];
+  try {
+    localRows = await db.all<LocalMaterialOperationRow>(
+      `SELECT advertiser_id, smart_plus_ad_id, ad_material_id, operation_status, confirmed_at_ms
+       FROM material_operation_state`
+    );
+  } catch {
+    // Bảng này được tạo lazy ở material service; chưa có bảng nghĩa là chưa từng có write material.
+  }
+
+  const localStateByKey = new Map(
+    localRows.map(row => [
+      materialStateKey(row.advertiser_id, row.smart_plus_ad_id, row.ad_material_id),
+      row,
+    ])
+  );
+  const operationStatusesByCampaignId = new Map<string, Set<MaterialOperationStatus>>();
+
+  await Promise.all(advertiserIds.map(async advertiserId => {
+    try {
+      const ads = await getSmartPlusAdsForAdvertiser(advertiserId);
+
+      for (const ad of ads) {
+        const campaignId = String(ad?.campaign_id || '').trim();
+        if (!campaignId || !campaignIds.has(campaignId)) continue;
+
+        const smartPlusAdId = String(ad?.smart_plus_ad_id || '').trim();
+        const creatives = Array.isArray(ad?.creative_list) ? ad.creative_list : [];
+        if (!smartPlusAdId || creatives.length === 0) continue;
+
+        const statuses = operationStatusesByCampaignId.get(campaignId) || new Set<MaterialOperationStatus>();
+
+        for (const creative of creatives) {
+          const adMaterialId = String(creative?.ad_material_id || '').trim();
+          if (!adMaterialId) continue;
+
+          const apiStatus = getCreativeMaterialStatus(creative);
+          const localState = localStateByKey.get(materialStateKey(advertiserId, smartPlusAdId, adMaterialId));
+          const localStatus = normalizeMaterialOperationStatus(localState?.operation_status);
+          const effectiveStatus = localState && !localState.confirmed_at_ms && localStatus !== 'UNKNOWN'
+            ? localStatus
+            : apiStatus !== 'UNKNOWN'
+              ? apiStatus
+              : localStatus;
+
+          if (effectiveStatus === 'ENABLE' || effectiveStatus === 'DISABLE') {
+            statuses.add(effectiveStatus);
+          }
+        }
+
+        if (statuses.size > 0) {
+          operationStatusesByCampaignId.set(campaignId, statuses);
+        }
+      }
+    } catch (error) {
+      console.warn(`[CampaignMaterialStatus] advertiser=${advertiserId} status refresh failed:`, error);
+    }
+  }));
+
+  const byCampaignId = new Map<string, CampaignMaterialDisplayStatus>();
+  for (const [campaignId, statuses] of operationStatusesByCampaignId.entries()) {
+    if (statuses.size > 1) {
+      byCampaignId.set(campaignId, 'mixed');
+    } else if (statuses.has('DISABLE')) {
+      byCampaignId.set(campaignId, 'paused');
+    } else if (statuses.has('ENABLE')) {
+      byCampaignId.set(campaignId, 'active');
+    }
+  }
+
+  const snapshot = { byCampaignId, campaignRows };
+  campaignMaterialDisplayCache = {
+    expiresAt: Date.now() + CAMPAIGN_MATERIAL_DISPLAY_CACHE_TTL_MS,
+    snapshot,
+  };
+  return snapshot;
+}
+
+function getCampaignStatusIcon(status: CampaignDisplayStatus): string {
+  if (status === 'active') return '🟢';
+  if (status === 'paused') return '🟡';
+  if (status === 'mixed') return '🟠';
+  return '⚪';
+}
+
+async function rewriteTodayCampaignListText(text: string): Promise<string> {
+  const snapshot = await getCampaignMaterialDisplaySnapshot();
+  const fallbackStatusByCampaignId = new Map(
+    snapshot.campaignRows.map(row => [row.campaign_id, normalizeStoredCampaignStatus(row.status)])
+  );
+
+  let rewritten = text.replace(
+    /(^|\n)(\d+\.\s+)(🟢|🟡|🟠|⚪)(\s+[^\n]*?<code>(\d{10,})<\/code>[^\n]*)/g,
+    (full, lineStart: string, itemPrefix: string, _oldIcon: string, lineRest: string, campaignId: string) => {
+      const fallbackStatus = fallbackStatusByCampaignId.get(campaignId) || 'active';
+      const status = fallbackStatus === 'deleted'
+        ? 'deleted'
+        : snapshot.byCampaignId.get(campaignId) || fallbackStatus;
+      return `${lineStart}${itemPrefix}${getCampaignStatusIcon(status)}${lineRest}`;
+    }
+  );
+
+  const declaredTotalMatch = rewritten.match(/([\d,.]+)\s+chiến dịch\s+-/i);
+  const declaredTotal = Number(String(declaredTotalMatch?.[1] || '').replace(/[,.]/g, ''));
+  const counts: Record<CampaignDisplayStatus, number> = {
+    active: 0,
+    paused: 0,
+    mixed: 0,
+    deleted: 0,
+  };
+
+  for (const row of snapshot.campaignRows) {
+    const fallbackStatus = normalizeStoredCampaignStatus(row.status);
+    const status = fallbackStatus === 'deleted'
+      ? 'deleted'
+      : snapshot.byCampaignId.get(row.campaign_id) || fallbackStatus;
+    counts[status] += 1;
+  }
+
+  // /campaigns có thể bổ sung campaign active chưa spend, các campaign này không nằm trong spent_campaign_cache.
+  // Phần thiếu so với tổng hiển thị vì vậy được tính là active thay vì làm sai tổng số campaign.
+  const counted = counts.active + counts.paused + counts.mixed + counts.deleted;
+  if (Number.isFinite(declaredTotal) && declaredTotal > counted) {
+    counts.active += declaredTotal - counted;
+  }
+
+  rewritten = rewritten.replace(
+    /Trạng thái QC:[^\n]*/i,
+    `Trạng thái QC: 🟢 Active ${counts.active} · 🟡 Pause ${counts.paused} · 🟠 Mix ${counts.mixed} · ⚪ Deleted ${counts.deleted}`
+  );
+
+  return rewritten;
 }
 
 async function getCampaignDisplayDataMap(items: ParsedAutoAction[]): Promise<Map<string, CampaignDisplayData>> {
@@ -283,6 +514,8 @@ function buildBufferedResponse(payload: Record<string, unknown>): Record<string,
 /**
  * Gom các kết quả Pause/Active tự động của material trong cùng một đợt chạy ruler
  * thành một thông báo Telegram duy nhất thay vì mỗi campaign gửi một message.
+ * Đồng thời sửa presentation của /campaigns hôm nay để màu trạng thái được suy ra từ
+ * material thật: tất cả ENABLE = xanh, tất cả DISABLE = vàng, trộn = cam.
  *
  * Batching chỉ tác động presentation Telegram của payload `Material Rule Auto`:
  * - không đổi rule, mapping hay TikTok write API;
@@ -328,15 +561,39 @@ export function setupMaterialAutoActionFeedback(bot: Telegraf): void {
   };
 
   telegram.callApi = async (method: unknown, payload: unknown, ...rest: unknown[]) => {
-    if (String(method) !== 'sendMessage' || !payload || typeof payload !== 'object') {
+    if (!payload || typeof payload !== 'object') {
       return originalCallApi(method, payload, ...rest);
     }
 
-    const source = payload as Record<string, unknown>;
+    const methodName = String(method);
+    let source = payload as Record<string, unknown>;
+
+    if (
+      (methodName === 'sendMessage' || methodName === 'editMessageText') &&
+      typeof source.text === 'string' &&
+      isTodayCampaignListText(source.text)
+    ) {
+      try {
+        source = {
+          ...source,
+          text: await rewriteTodayCampaignListText(source.text),
+        };
+      } catch (error) {
+        console.warn('[CampaignMaterialStatus] failed to rewrite /campaigns colors:', error);
+      }
+    }
+
+    if (methodName !== 'sendMessage') {
+      return originalCallApi(method, source, ...rest);
+    }
+
     const parsed = parseAutoActionPayload(source);
     if (!parsed) {
-      return originalCallApi(method, payload, ...rest);
+      return originalCallApi(method, source, ...rest);
     }
+
+    // Một write material vừa xảy ra: bỏ cache màu để lần xem /campaigns kế tiếp phản ánh ngay state mới.
+    campaignMaterialDisplayCache = undefined;
 
     const batchKey = getBatchKey(source);
     const now = Date.now();
