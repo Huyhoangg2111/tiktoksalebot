@@ -1,4 +1,6 @@
 import type { Telegraf } from 'telegraf';
+import { getCampaignCloneCountMap } from '../campaigns/clone-tracking.js';
+import { parseMaterialDetailCallbackData } from '../materials/callbacks.js';
 import { getTodaySpentCampaigns, type TikTokSpentCampaign } from '../tiktok/api.js';
 
 const BATCH_IDLE_MS = 10_000;
@@ -10,6 +12,7 @@ const DETAIL_BUTTONS_PER_ROW = 5;
 interface ParsedAutoAction {
   campaignLine: string;
   campaignId?: string;
+  advertiserId?: string;
   pauseSuccess: number;
   activeSuccess: number;
   unverified: number;
@@ -21,6 +24,12 @@ interface PendingBatch {
   firstAt: number;
   items: ParsedAutoAction[];
   timer?: NodeJS.Timeout;
+}
+
+interface CampaignDisplayData {
+  reportLine: string;
+  advertiserId: string;
+  advertiserName?: string;
 }
 
 function isMaterialAutoActionText(text: string): boolean {
@@ -69,6 +78,17 @@ function normalizeCampaignLine(campaignLine: string): string {
   return `<b>${getCampaignDisplayName(match[1])}</b> - <code>${match[2]}</code>`;
 }
 
+function getAccountLabel(advertiserName: string | undefined, advertiserId: string | undefined): string {
+  const accountName = String(advertiserName || '').trim();
+  const aaNumberMatch = accountName.match(/\bAA\s*(\d+)\b/i);
+
+  if (aaNumberMatch?.[1]) {
+    return aaNumberMatch[1].padStart(2, '0');
+  }
+
+  return accountName || String(advertiserId || '').trim();
+}
+
 function formatCampaignReportLine(campaign: TikTokSpentCampaign): string {
   return `💸 $${campaign.spend.toFixed(2)} · ` +
     `👆 ${campaign.clicks.toLocaleString()}/${campaign.ctr.toFixed(2)}% · ` +
@@ -76,7 +96,7 @@ function formatCampaignReportLine(campaign: TikTokSpentCampaign): string {
     `💰 $${campaign.cpa.toFixed(2)}`;
 }
 
-async function getCampaignReportLineMap(items: ParsedAutoAction[]): Promise<Map<string, string>> {
+async function getCampaignDisplayDataMap(items: ParsedAutoAction[]): Promise<Map<string, CampaignDisplayData>> {
   const targetCampaignIds = new Set(
     items
       .map(item => item.campaignId)
@@ -89,14 +109,18 @@ async function getCampaignReportLineMap(items: ParsedAutoAction[]): Promise<Map<
 
   try {
     const campaigns = await getTodaySpentCampaigns();
-    const reportLines = new Map<string, string>();
+    const displayData = new Map<string, CampaignDisplayData>();
 
     for (const campaign of campaigns) {
       if (!targetCampaignIds.has(campaign.campaign_id)) continue;
-      reportLines.set(campaign.campaign_id, formatCampaignReportLine(campaign));
+      displayData.set(campaign.campaign_id, {
+        reportLine: formatCampaignReportLine(campaign),
+        advertiserId: campaign.advertiser_id,
+        advertiserName: campaign.advertiser_name,
+      });
     }
 
-    return reportLines;
+    return displayData;
   } catch (error) {
     // Feedback kết quả action phải vẫn được gửi dù report refresh tạm lỗi.
     console.warn('[MaterialAutoActionFeedback] campaign summary refresh failed:', error);
@@ -118,6 +142,9 @@ function parseAutoActionPayload(payload: unknown): ParsedAutoAction | undefined 
 
   const campaignLine = lines[1] || '';
   const resultLines = lines.slice(2).filter(Boolean);
+  const detailButton = findMaterialDetailButton(source.reply_markup);
+  const detailCallback = String(detailButton?.callback_data || '');
+  const detailRef = detailCallback ? parseMaterialDetailCallbackData(detailCallback) : undefined;
   let pauseSuccess = 0;
   let activeSuccess = 0;
   let unverified = 0;
@@ -141,15 +168,19 @@ function parseAutoActionPayload(payload: unknown): ParsedAutoAction | undefined 
   return {
     campaignLine: normalizeCampaignLine(campaignLine),
     campaignId: extractCampaignId(campaignLine),
+    advertiserId: detailRef?.advertiserId,
     pauseSuccess,
     activeSuccess,
     unverified,
     details,
-    detailButton: findMaterialDetailButton(source.reply_markup),
+    detailButton,
   };
 }
 
-function buildGroupedMessage(items: ParsedAutoAction[], campaignReportLines: Map<string, string>) {
+async function buildGroupedMessage(
+  items: ParsedAutoAction[],
+  campaignDisplayData: Map<string, CampaignDisplayData>
+) {
   const pauseSuccess = items.reduce((sum, item) => sum + item.pauseSuccess, 0);
   const activeSuccess = items.reduce((sum, item) => sum + item.activeSuccess, 0);
   const unverified = items.reduce((sum, item) => sum + item.unverified, 0);
@@ -176,17 +207,32 @@ function buildGroupedMessage(items: ParsedAutoAction[], campaignReportLines: Map
   }
 
   const visibleItems = items.slice(0, MAX_CAMPAIGNS_IN_MESSAGE);
+  const cloneCountByCampaignId = await getCampaignCloneCountMap(
+    visibleItems
+      .map(item => item.campaignId)
+      .filter((campaignId): campaignId is string => Boolean(campaignId))
+  );
   const detailLines: string[] = [];
   const buttons: Record<string, unknown>[] = [];
 
   visibleItems.forEach((item, index) => {
-    detailLines.push('', `<b>${index + 1}.</b> ${item.campaignLine}`);
-
-    const campaignReportLine = item.campaignId
-      ? campaignReportLines.get(item.campaignId)
+    const displayData = item.campaignId
+      ? campaignDisplayData.get(item.campaignId)
       : undefined;
-    if (campaignReportLine) {
-      detailLines.push(campaignReportLine);
+    const advertiserId = item.advertiserId || displayData?.advertiserId;
+    const accountLabel = getAccountLabel(displayData?.advertiserName, advertiserId);
+    const accountSuffix = accountLabel ? ` · ${accountLabel}` : '';
+    const cloneCount = item.campaignId
+      ? cloneCountByCampaignId.get(item.campaignId) || 0
+      : 0;
+
+    detailLines.push(
+      '',
+      `<b>${index + 1}.</b> ${item.campaignLine}${accountSuffix} · 🚀 x${cloneCount}`
+    );
+
+    if (displayData?.reportLine) {
+      detailLines.push(displayData.reportLine);
     }
 
     const visibleDetails = item.details.slice(0, MAX_DETAILS_PER_CAMPAIGN);
@@ -241,6 +287,7 @@ function buildBufferedResponse(payload: Record<string, unknown>): Record<string,
  * Batching chỉ tác động presentation Telegram của payload `Material Rule Auto`:
  * - không đổi rule, mapping hay TikTok write API;
  * - tên campaign giữ format gọn cũ: `<sản phẩm> - <market>` + campaign_id;
+ * - mỗi campaign hiển thị account số ngắn kiểu `32` + clone count `🚀 xN` giống alert ADS đạt điều kiện;
  * - mỗi campaign hiển thị thêm report tổng hôm nay: spend / click+CTR / conversion / CPA;
  * - mỗi campaign vẫn giữ nút chi tiết riêng, hiển thị thành `🔎 1`, `🔎 2`, ...;
  * - chờ tối đa 25 giây và flush sau 10 giây không có result mới để gom nhiều camp;
@@ -258,8 +305,8 @@ export function setupMaterialAutoActionFeedback(bot: Telegraf): void {
     if (batch.timer) clearTimeout(batch.timer);
     if (batch.items.length === 0) return;
 
-    const campaignReportLines = await getCampaignReportLineMap(batch.items);
-    const grouped = buildGroupedMessage(batch.items, campaignReportLines);
+    const campaignDisplayData = await getCampaignDisplayDataMap(batch.items);
+    const grouped = await buildGroupedMessage(batch.items, campaignDisplayData);
     const firstItemPayload = (batch as PendingBatch & { payload?: Record<string, unknown> }).payload;
     if (!firstItemPayload) return;
 
