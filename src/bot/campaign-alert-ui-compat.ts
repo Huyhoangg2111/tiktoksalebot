@@ -1,4 +1,5 @@
 import type { Telegraf } from 'telegraf';
+import { parseMaterialDetailCallbackData } from '../materials/callbacks.js';
 
 const BATCH_IDLE_MS = 1_500;
 const BATCH_MAX_WAIT_MS = 5_000;
@@ -11,6 +12,7 @@ interface ParsedCampaignAlert {
   condition: CampaignCondition;
   campaignName: string;
   campaignId: string;
+  advertiserId?: string;
   metricsLine: string;
   detailButton?: Record<string, unknown>;
 }
@@ -81,13 +83,17 @@ function parseCampaignAlertPayload(payload: unknown): ParsedCampaignAlert | unde
   const campaignName = getCampaignDisplayName(campaignMatch[1]);
   const campaignId = campaignMatch[2];
   const metricsLine = lines[2] || '';
+  const detailButton = findMaterialDetailButton(source.reply_markup);
+  const detailCallback = String(detailButton?.callback_data || '');
+  const detailRef = detailCallback ? parseMaterialDetailCallbackData(detailCallback) : undefined;
 
   return {
     condition,
     campaignName,
     campaignId,
+    advertiserId: detailRef?.advertiserId,
     metricsLine,
-    detailButton: findMaterialDetailButton(source.reply_markup),
+    detailButton,
   };
 }
 
@@ -100,9 +106,12 @@ function buildGroupedCampaignMessage(items: ParsedCampaignAlert[]) {
   const buttons: Record<string, unknown>[] = [];
 
   visibleItems.forEach((item, index) => {
+    const accountSuffix = item.advertiserId
+      ? ` · TK <code>${escapeHtml(item.advertiserId)}</code>`
+      : '';
+
     lines.push(
-      '',
-      `<b>${index + 1}. ${escapeHtml(item.campaignName)}</b> - <code>${escapeHtml(item.campaignId)}</code>`,
+      `<b>${index + 1}. ${escapeHtml(item.campaignName)}</b> - <code>${escapeHtml(item.campaignId)}</code>${accountSuffix}`,
       item.metricsLine
     );
 
@@ -116,7 +125,7 @@ function buildGroupedCampaignMessage(items: ParsedCampaignAlert[]) {
 
   const hiddenCampaigns = items.length - visibleItems.length;
   if (hiddenCampaigns > 0) {
-    lines.push('', `… +${hiddenCampaigns} camp khác trong cùng cảnh báo`);
+    lines.push(`… +${hiddenCampaigns} camp khác trong cùng cảnh báo`);
   }
 
   return {
@@ -150,7 +159,8 @@ function buildBufferedResponse(payload: Record<string, unknown>): Record<string,
  * - `vượt giới hạn` không gửi alert campaign vì phần này đã được material ruler tự động xử lý
  *   và có thông báo Pause/Active riêng;
  * - các camp đạt điều kiện trong cùng lượt được gom thành một message;
- * - giữ tên camp + campaign_id + dòng metrics và callback `Chi tiết camp`;
+ * - hiển thị campaign_id + advertiser_id để biết chính xác camp thuộc tài khoản nào;
+ * - giữ dòng metrics và callback `Chi tiết camp`;
  * - không thay đổi quyết định material rule hay TikTok write API.
  */
 export function setupCampaignAlertUiCompatibility(bot: Telegraf): void {
