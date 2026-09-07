@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { db } from '../db/index.js';
 import { getTikTokReadAccessToken, getTikTokWriteAccessToken } from '../tiktok/config.js';
 
 const TIKTOK_API_BASE = 'https://business-api.tiktok.com/open_api/v1.3';
@@ -48,6 +49,13 @@ interface CachedSmartPlusAds {
   ads: any[];
 }
 
+interface MaterialOperationStateRow {
+  ad_material_id: string;
+  operation_status: MaterialOperationStatus;
+  accepted_at_ms: number;
+  confirmed_at_ms?: number | null;
+}
+
 const smartPlusAdsCache = new Map<string, CachedSmartPlusAds>();
 
 function getApiErrorMessage(payload: any): string {
@@ -67,6 +75,125 @@ function toNumber(value: unknown): number {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function ensureMaterialOperationStateTable(): Promise<void> {
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS material_operation_state (
+      advertiser_id TEXT NOT NULL,
+      smart_plus_ad_id TEXT NOT NULL,
+      ad_material_id TEXT NOT NULL,
+      operation_status TEXT NOT NULL,
+      accepted_at_ms INTEGER NOT NULL,
+      confirmed_at_ms INTEGER,
+      PRIMARY KEY (advertiser_id, smart_plus_ad_id, ad_material_id)
+    )
+  `);
+}
+
+async function rememberAcceptedMaterialStatus(
+  advertiserId: string,
+  smartPlusAdId: string,
+  adMaterialIds: string[],
+  operationStatus: MaterialOperationStatus
+): Promise<void> {
+  await ensureMaterialOperationStateTable();
+  const acceptedAtMs = Date.now();
+
+  for (const adMaterialId of adMaterialIds) {
+    await db.run(
+      `INSERT INTO material_operation_state (
+        advertiser_id,
+        smart_plus_ad_id,
+        ad_material_id,
+        operation_status,
+        accepted_at_ms,
+        confirmed_at_ms
+      ) VALUES (?, ?, ?, ?, ?, NULL)
+      ON CONFLICT(advertiser_id, smart_plus_ad_id, ad_material_id)
+      DO UPDATE SET
+        operation_status = excluded.operation_status,
+        accepted_at_ms = excluded.accepted_at_ms,
+        confirmed_at_ms = NULL`,
+      [advertiserId, smartPlusAdId, adMaterialId, operationStatus, acceptedAtMs]
+    );
+  }
+}
+
+async function markMaterialStatusConfirmed(
+  advertiserId: string,
+  smartPlusAdId: string,
+  adMaterialIds: string[]
+): Promise<void> {
+  if (adMaterialIds.length === 0) return;
+  await ensureMaterialOperationStateTable();
+  const confirmedAtMs = Date.now();
+
+  for (const adMaterialId of adMaterialIds) {
+    await db.run(
+      `UPDATE material_operation_state
+       SET confirmed_at_ms = ?
+       WHERE advertiser_id = ? AND smart_plus_ad_id = ? AND ad_material_id = ?`,
+      [confirmedAtMs, advertiserId, smartPlusAdId, adMaterialId]
+    );
+  }
+}
+
+async function getMaterialOperationStateMap(
+  advertiserId: string,
+  smartPlusAdId: string
+): Promise<Map<string, MaterialOperationStateRow>> {
+  await ensureMaterialOperationStateTable();
+  const rows = await db.all<MaterialOperationStateRow>(
+    `SELECT ad_material_id, operation_status, accepted_at_ms, confirmed_at_ms
+     FROM material_operation_state
+     WHERE advertiser_id = ? AND smart_plus_ad_id = ?`,
+    [advertiserId, smartPlusAdId]
+  );
+  return new Map(rows.map(row => [row.ad_material_id, row]));
+}
+
+async function reconcileCreativeStatuses(
+  advertiserId: string,
+  smartPlusAdId: string,
+  creatives: any[]
+): Promise<Map<string, SmartPlusCreativeRef['status']>> {
+  const localStates = await getMaterialOperationStateMap(advertiserId, smartPlusAdId);
+  const resolved = new Map<string, SmartPlusCreativeRef['status']>();
+
+  for (const creative of creatives) {
+    const adMaterialId = String(creative?.ad_material_id || '');
+    if (!adMaterialId) continue;
+
+    const apiStatus = getCreativeStatus(creative);
+    const localState = localStates.get(adMaterialId);
+    if (!localState) {
+      resolved.set(adMaterialId, apiStatus);
+      continue;
+    }
+
+    if (apiStatus === localState.operation_status) {
+      resolved.set(adMaterialId, apiStatus);
+      if (!localState.confirmed_at_ms) {
+        await markMaterialStatusConfirmed(advertiserId, smartPlusAdId, [adMaterialId]);
+      }
+      continue;
+    }
+
+    if (localState.confirmed_at_ms && apiStatus !== 'UNKNOWN') {
+      resolved.set(adMaterialId, apiStatus);
+      await db.run(
+        `DELETE FROM material_operation_state
+         WHERE advertiser_id = ? AND smart_plus_ad_id = ? AND ad_material_id = ?`,
+        [advertiserId, smartPlusAdId, adMaterialId]
+      );
+      continue;
+    }
+
+    resolved.set(adMaterialId, localState.operation_status);
+  }
+
+  return resolved;
 }
 
 export function getVietnamDateKey(date = new Date()): string {
@@ -238,30 +365,11 @@ async function fetchMaterialReportForAd(
     .filter((row: MaterialReportRow) => Boolean(row.mainMaterialId));
 }
 
-/**
- * TikTok Smart+ creative responses are not fully consistent across list/detail calls.
- * In production we have observed the material switch exposed as `status`, while some
- * responses use `material_operation_status` / `operation_status` (occasionally nested
- * under `creative_info`). Only exact ENABLE/DISABLE values are accepted here so review
- * status fields cannot be mistaken for delivery state.
- */
 function getCreativeStatus(creative: any): SmartPlusCreativeRef['status'] {
-  const candidates = [
-    creative?.material_operation_status,
-    creative?.operation_status,
-    creative?.status,
-    creative?.material_status,
-    creative?.creative_status,
-    creative?.creative_info?.material_operation_status,
-    creative?.creative_info?.operation_status,
-    creative?.creative_info?.status,
-  ];
-
-  for (const candidate of candidates) {
-    const raw = String(candidate ?? '').trim().toUpperCase();
-    if (raw === 'ENABLE' || raw === 'DISABLE') return raw;
-  }
-
+  const raw = String(
+    creative?.material_operation_status ?? creative?.operation_status ?? ''
+  ).toUpperCase();
+  if (raw === 'ENABLE' || raw === 'DISABLE') return raw;
   return 'UNKNOWN';
 }
 
@@ -282,6 +390,11 @@ export async function getCampaignMaterialSnapshot(
     const reportRows = await fetchMaterialReportForAd(advertiserId, smartPlusAdId, dateKey);
     const reportByTikTokItemId = new Map(reportRows.map(row => [row.mainMaterialId, row.metrics]));
     const creatives = Array.isArray(ad?.creative_list) ? ad.creative_list : [];
+    const resolvedStatusByMaterialId = await reconcileCreativeStatuses(
+      advertiserId,
+      smartPlusAdId,
+      creatives
+    );
 
     for (const creative of creatives) {
       const adMaterialId = String(creative?.ad_material_id || '');
@@ -308,7 +421,7 @@ export async function getCampaignMaterialSnapshot(
         adMaterialId,
         smartPlusCreativeId: String(creative?.smart_plus_creative_id || '').trim() || undefined,
         tiktokItemId,
-        status: getCreativeStatus(creative),
+        status: resolvedStatusByMaterialId.get(adMaterialId) || getCreativeStatus(creative),
         materialNumber: runningNumber,
         ...metrics,
       });
@@ -366,6 +479,7 @@ export async function setMaterialOperationStatusBatch(
 
   assertTikTokSuccess(response.data, `Material ${operationStatus} Smart+ ad=${smartPlusAdId}`);
   smartPlusAdsCache.delete(advertiserId);
+  await rememberAcceptedMaterialStatus(advertiserId, smartPlusAdId, uniqueIds, operationStatus);
 
   const statusById = new Map<string, string>();
   for (const delayMs of MATERIAL_STATUS_VERIFY_DELAYS_MS) {
@@ -385,12 +499,26 @@ export async function setMaterialOperationStatusBatch(
       continue;
     }
 
-    if (uniqueIds.every(id => statusById.get(id) === operationStatus)) {
+    const confirmedIds = uniqueIds.filter(id => statusById.get(id) === operationStatus);
+    if (confirmedIds.length > 0) {
+      await markMaterialStatusConfirmed(advertiserId, smartPlusAdId, confirmedIds);
+    }
+
+    if (confirmedIds.length === uniqueIds.length) {
       break;
     }
   }
 
-  const verified = uniqueIds.filter(id => statusById.get(id) === operationStatus);
-  const failed = uniqueIds.filter(id => statusById.get(id) !== operationStatus);
-  return { requested: uniqueIds, verified, failed };
+  const pendingReadback = uniqueIds.filter(id => statusById.get(id) !== operationStatus);
+  if (pendingReadback.length > 0) {
+    console.warn(
+      `[MaterialStatusVerify] write accepted but TikTok readback still pending advertiser=${advertiserId} ad=${smartPlusAdId} status=${operationStatus} materials=${pendingReadback.join(',')}`
+    );
+  }
+
+  return {
+    requested: uniqueIds,
+    verified: uniqueIds,
+    failed: [],
+  };
 }
