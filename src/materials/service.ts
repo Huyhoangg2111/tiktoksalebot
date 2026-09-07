@@ -238,11 +238,30 @@ async function fetchMaterialReportForAd(
     .filter((row: MaterialReportRow) => Boolean(row.mainMaterialId));
 }
 
+/**
+ * TikTok Smart+ creative responses are not fully consistent across list/detail calls.
+ * In production we have observed the material switch exposed as `status`, while some
+ * responses use `material_operation_status` / `operation_status` (occasionally nested
+ * under `creative_info`). Only exact ENABLE/DISABLE values are accepted here so review
+ * status fields cannot be mistaken for delivery state.
+ */
 function getCreativeStatus(creative: any): SmartPlusCreativeRef['status'] {
-  const raw = String(
-    creative?.material_operation_status ?? creative?.operation_status ?? ''
-  ).toUpperCase();
-  if (raw === 'ENABLE' || raw === 'DISABLE') return raw;
+  const candidates = [
+    creative?.material_operation_status,
+    creative?.operation_status,
+    creative?.status,
+    creative?.material_status,
+    creative?.creative_status,
+    creative?.creative_info?.material_operation_status,
+    creative?.creative_info?.operation_status,
+    creative?.creative_info?.status,
+  ];
+
+  for (const candidate of candidates) {
+    const raw = String(candidate ?? '').trim().toUpperCase();
+    if (raw === 'ENABLE' || raw === 'DISABLE') return raw;
+  }
+
   return 'UNKNOWN';
 }
 
