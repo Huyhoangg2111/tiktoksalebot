@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { getTikTokConfig, getTikTokWriteAccessToken } from '../tiktok/config.js';
+import { getTikTokReadAccessToken, getTikTokWriteAccessToken } from '../tiktok/config.js';
 
 const TIKTOK_API_BASE = 'https://business-api.tiktok.com/open_api/v1.3';
 const SMART_PLUS_PAGE_SIZE = 100;
@@ -84,8 +84,7 @@ export function getVietnamDateKey(date = new Date()): string {
 }
 
 async function getReadToken(): Promise<string> {
-  const config = await getTikTokConfig();
-  return config.accessToken;
+  return getTikTokReadAccessToken();
 }
 
 async function getSmartPlusAdsPage(advertiserId: string, page: number): Promise<any[]> {

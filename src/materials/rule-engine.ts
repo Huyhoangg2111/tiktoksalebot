@@ -3,9 +3,7 @@ import type { Telegraf } from 'telegraf';
 import { getTrackedAdvertiserIdSet } from '../accounts/tracking.js';
 import { db } from '../db/index.js';
 import {
-  getAlertRulesConfig,
   type AlertAction,
-  type AlertActionRuleSheetRow,
   type AlertComparisonOperator,
   type AlertMetric,
 } from '../google-sheets/api.js';
@@ -37,6 +35,12 @@ interface MaterialRule {
   note?: string;
 }
 
+interface Level1RuleSnapshot {
+  campaignRules: MaterialRule[];
+  materialRules: MaterialRule[];
+  loadedAtMs: number;
+}
+
 interface RuleConditionShape {
   metric: AlertMetric;
   metricOperator: AlertComparisonOperator;
@@ -45,6 +49,8 @@ interface RuleConditionShape {
   conversionsOperator: AlertComparisonOperator;
   conversionsThreshold: number;
 }
+
+let lastKnownGoodRuleSnapshot: Level1RuleSnapshot | undefined;
 
 function getConfigSheetId(): string {
   return process.env.CONFIG_GOOGLE_SHEET_ID || process.env.GOOGLE_SHEET_ID || DEFAULT_CONFIG_SHEET_ID;
@@ -135,7 +141,7 @@ function parseThreshold(
   return { threshold: parseNumber(value) };
 }
 
-function parseMaterialSide(
+function parseRuleSide(
   row: any[],
   rowNumber: number,
   offset: number,
@@ -166,35 +172,67 @@ function parseMaterialSide(
   };
 }
 
-async function getMaterialRules(): Promise<MaterialRule[]> {
-  const response = await createSheetsClient().spreadsheets.values.get({
-    spreadsheetId: getConfigSheetId(),
-    range: 'Alerts!A:O',
-  });
-  const rows = response.data.values || [];
-  const rules: MaterialRule[] = [];
+function normalizeLevel1Entity(value: unknown): 'campaign' | 'material' | undefined {
+  const normalized = normalizeText(value).replace(/[\s-]+/g, '_');
+  if (['campaign', 'campaigns'].includes(normalized)) return 'campaign';
+  if (['material', 'materials', 'creative', 'creatives', 'video', 'videos', 'tu_lieu', 'tulieu'].includes(normalized)) {
+    return 'material';
+  }
+  return undefined;
+}
+
+function parseLevel1RuleRows(rows: any[][]): Level1RuleSnapshot {
+  const campaignRules: MaterialRule[] = [];
+  const materialRules: MaterialRule[] = [];
 
   rows.slice(1).forEach((row, index) => {
-    const entity = normalizeText(row[0]).replace(/[\s-]+/g, '_');
-    if (!['material', 'materials', 'creative', 'creatives', 'video', 'videos', 'tu_lieu', 'tulieu'].includes(entity)) {
-      return;
-    }
+    const entity = normalizeLevel1Entity(row[0]);
+    if (!entity) return;
 
     const rowNumber = index + 2;
-    const enabled = parseEnabled(row[13] ?? row[8]);
-    if (!enabled) return;
-    const note = String(row[14] || row[9] || '').trim() || undefined;
+    const leftActionIndex = normalizeAction(row[7]) ? 7 : 8;
+    const dualAction = Boolean(normalizeOperator(row[8]) && normalizeAction(row[12]));
+    const enabledFallbackIndex = leftActionIndex === 7 ? 8 : 9;
+    const enabledValue = String(row[13] ?? '').trim() !== '' ? row[13] : row[enabledFallbackIndex];
+    if (!parseEnabled(enabledValue)) return;
 
-    const left = parseMaterialSide(row, rowNumber, 3, 7, note);
-    if (left) rules.push(left);
+    const noteValue = String(row[14] ?? '').trim() !== '' ? row[14] : row[leftActionIndex === 7 ? 9 : 10];
+    const note = String(noteValue || '').trim() || undefined;
+    const target = entity === 'campaign' ? campaignRules : materialRules;
 
-    if (normalizeOperator(row[8]) && normalizeAction(row[12])) {
-      const right = parseMaterialSide(row, rowNumber, 8, 12, note);
-      if (right) rules.push(right);
+    const left = parseRuleSide(row, rowNumber, 3, leftActionIndex, note);
+    if (left) target.push(left);
+
+    if (dualAction) {
+      const right = parseRuleSide(row, rowNumber, 8, 12, note);
+      if (right) target.push(right);
     }
   });
 
-  return rules;
+  return {
+    campaignRules,
+    materialRules,
+    loadedAtMs: Date.now(),
+  };
+}
+
+async function getLevel1RuleSnapshot(): Promise<Level1RuleSnapshot> {
+  try {
+    const response = await createSheetsClient().spreadsheets.values.get({
+      spreadsheetId: getConfigSheetId(),
+      range: 'Alerts!A:O',
+    });
+    const snapshot = parseLevel1RuleRows(response.data.values || []);
+    lastKnownGoodRuleSnapshot = snapshot;
+    return snapshot;
+  } catch (error) {
+    if (lastKnownGoodRuleSnapshot) {
+      const ageSeconds = Math.max(0, Math.round((Date.now() - lastKnownGoodRuleSnapshot.loadedAtMs) / 1000));
+      console.warn(`[Level1Rules] Alerts read failed; using last-known-good snapshot (${ageSeconds}s old):`, error);
+      return lastKnownGoodRuleSnapshot;
+    }
+    throw error;
+  }
 }
 
 function compareValues(
@@ -227,8 +265,8 @@ function matchesCampaignName(nameContains: string | undefined, campaignName: str
   return key === rule || key.includes(rule) || full.includes(rule);
 }
 
-function campaignMatchesRule(campaign: TikTokSpentCampaign, rule: AlertActionRuleSheetRow): boolean {
-  if (!rule.isActive || !matchesCampaignName(rule.nameContains, campaign.campaign_name)) return false;
+function campaignMatchesRule(campaign: TikTokSpentCampaign, rule: MaterialRule): boolean {
+  if (!matchesCampaignName(rule.nameContains, campaign.campaign_name)) return false;
   const metric = rule.metric === 'spend' ? campaign.spend : campaign.cpa;
   return compareValues(metric, rule.metricOperator, rule.metricThreshold, rule.metricMinThreshold) &&
     compareValues(campaign.conversions, rule.conversionsOperator, rule.conversionsThreshold);
@@ -288,14 +326,14 @@ async function markNotified(subjectKey: string): Promise<void> {
   );
 }
 
-function campaignSubjectKey(campaign: TikTokSpentCampaign, rule: AlertActionRuleSheetRow): string {
+function campaignSubjectKey(campaign: TikTokSpentCampaign, rule: MaterialRule): string {
   return `campaign:${campaign.advertiser_id}:${campaign.campaign_id}:${rule.metric}:${rule.metricOperator}:${rule.metricThreshold}:${rule.conversionsOperator}:${rule.conversionsThreshold}:${rule.action}`;
 }
 
 async function sendCampaignNotification(
   bot: Telegraf,
   campaign: TikTokSpentCampaign,
-  rule: AlertActionRuleSheetRow
+  rule: MaterialRule
 ): Promise<void> {
   const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
   if (!adminChatId) return;
@@ -329,10 +367,12 @@ async function sendCampaignNotification(
   await saveAlertHistory('campaign_notify', plainLines.join('\n'), 'low');
 }
 
-async function evaluateCampaignNotifications(bot: Telegraf, campaigns: TikTokSpentCampaign[]): Promise<void> {
-  const rules = (await getAlertRulesConfig()).filter(rule =>
-    rule.entity === 'campaign' &&
-    rule.isActive &&
+async function evaluateCampaignNotifications(
+  bot: Telegraf,
+  campaigns: TikTokSpentCampaign[],
+  sourceRules: MaterialRule[]
+): Promise<void> {
+  const rules = sourceRules.filter(rule =>
     rule.action === 'notify' &&
     (rule.metricOperator === 'lt' || rule.metricOperator === 'lte')
   );
@@ -474,8 +514,11 @@ async function applyMaterialDecisions(
   await saveAlertHistory('material_auto_action', plainMessage, 'low');
 }
 
-async function evaluateMaterialRules(bot: Telegraf, campaigns: TikTokSpentCampaign[]): Promise<void> {
-  const rules = await getMaterialRules();
+async function evaluateMaterialRules(
+  bot: Telegraf,
+  campaigns: TikTokSpentCampaign[],
+  rules: MaterialRule[]
+): Promise<void> {
   if (rules.length === 0) return;
 
   for (const campaign of campaigns) {
@@ -503,6 +546,8 @@ async function evaluateMaterialRules(bot: Telegraf, campaigns: TikTokSpentCampai
 
 /**
  * Level 1 architecture:
+ * - Alerts sheet is loaded exactly once per Level 1 pass and shared by campaign/material rules;
+ * - if that read fails, the last-known-good in-memory snapshot is used;
  * - campaign rules: qualified notify only; no campaign status writes;
  * - ad rules: deliberately ignored;
  * - material rules: evaluate today's metrics and control ad_material_id only;
@@ -515,6 +560,7 @@ export async function checkAndSendCampaignMaterialAlerts(bot: Telegraf): Promise
     console.error('[MaterialRules] low-balance check failed:', error);
   }
 
+  const ruleSnapshot = await getLevel1RuleSnapshot();
   const campaigns = await getTodaySpentCampaigns();
   const trackedAdvertiserIds = await getTrackedAdvertiserIdSet(
     campaigns.map(campaign => ({
@@ -526,6 +572,6 @@ export async function checkAndSendCampaignMaterialAlerts(bot: Telegraf): Promise
     trackedAdvertiserIds.has(campaign.advertiser_id)
   );
 
-  await evaluateCampaignNotifications(bot, filteredCampaigns);
-  await evaluateMaterialRules(bot, filteredCampaigns);
+  await evaluateCampaignNotifications(bot, filteredCampaigns, ruleSnapshot.campaignRules);
+  await evaluateMaterialRules(bot, filteredCampaigns, ruleSnapshot.materialRules);
 }
