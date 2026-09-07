@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { getTikTokReadAccessToken } from '../dist/tiktok/config.js';
+import { getTodaySpentCampaigns } from '../dist/tiktok/api.js';
 
 const BASE = 'https://business-api.tiktok.com/open_api/v1.3';
 const PAGE_SIZE = 100;
@@ -119,17 +120,23 @@ async function fetchReport(endpoint, accessToken, commonParams, includeRealtime 
 }
 
 async function main() {
-  const advertiserId = String(process.argv[2] || '').trim();
+  const campaignId = String(process.argv[2] || '').trim();
   const smartPlusAdId = String(process.argv[3] || '').trim();
   const dateKey = String(process.argv[4] || todayVietnam()).trim();
 
-  if (!advertiserId || !smartPlusAdId) {
-    console.error('Cách dùng: node scripts/diagnose-smartplus-material-report.mjs <advertiser_id> <smart_plus_ad_id> [YYYY-MM-DD]');
+  if (!campaignId || !smartPlusAdId) {
+    console.error('Cách dùng: node scripts/diagnose-smartplus-material-report.mjs <campaign_id> <smart_plus_ad_id> [YYYY-MM-DD]');
     process.exit(2);
   }
 
-  const accessToken = await getTikTokReadAccessToken();
+  // Tự tìm advertiser_id từ dữ liệu campaign hiện có để không phải in/tra token hay cấu hình nhạy cảm.
+  const campaigns = await getTodaySpentCampaigns();
+  const campaign = campaigns.find(item => String(item.campaign_id) === campaignId);
+  if (!campaign) throw new Error(`Không tìm thấy campaign ${campaignId} trong report hôm nay.`);
+  const advertiserId = String(campaign.advertiser_id || '').trim();
+  if (!advertiserId) throw new Error(`Campaign ${campaignId} không có advertiser_id.`);
 
+  const accessToken = await getTikTokReadAccessToken();
   const adPayload = await getJson(`${BASE}/smart_plus/ad/get/`, accessToken, {
     advertiser_id: advertiserId,
     smart_plus_ad_ids: JSON.stringify([smartPlusAdId]),
@@ -137,7 +144,10 @@ async function main() {
     page_size: PAGE_SIZE,
   });
   const ad = (adPayload?.data?.list || []).find(item => String(item?.smart_plus_ad_id || '') === smartPlusAdId);
-  if (!ad) throw new Error(`Không tìm thấy Smart+ Ad ${smartPlusAdId}`);
+  if (!ad) throw new Error(`Không tìm thấy Smart+ Ad ${smartPlusAdId} trong advertiser ${advertiserId}`);
+  if (String(ad?.campaign_id || '') !== campaignId) {
+    throw new Error(`Smart+ Ad ${smartPlusAdId} thuộc campaign ${String(ad?.campaign_id || '')}, không phải ${campaignId}.`);
+  }
 
   const creatives = (ad?.creative_list || []).map((creative, idx) => ({
     index: idx + 1,
@@ -157,7 +167,7 @@ async function main() {
 
   console.log('READ-ONLY diagnostic. Không có POST.');
   console.log(`Advertiser: ${advertiserId}`);
-  console.log(`Campaign: ${String(ad?.campaign_id || '')}`);
+  console.log(`Campaign: ${campaignId}`);
   console.log(`Smart+ Ad: ${smartPlusAdId}`);
   console.log(`Date: ${dateKey}`);
   console.log(`Creative count: ${creatives.length}`);
