@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { connectDB } from '../dist/db/index.js';
 import { getTikTokReadAccessToken } from '../dist/tiktok/config.js';
 import { getTodaySpentCampaigns } from '../dist/tiktok/api.js';
 
@@ -128,6 +129,10 @@ async function main() {
     console.error('Cách dùng: node scripts/diagnose-smartplus-material-report.mjs <campaign_id> <smart_plus_ad_id> [YYYY-MM-DD]');
     process.exit(2);
   }
+
+  // Script chạy độc lập với tiến trình bot nên phải mở SQLite trước khi gọi
+  // các helper production có dùng runtime settings/cache.
+  await connectDB();
 
   // Tự tìm advertiser_id từ dữ liệu campaign hiện có để không phải in/tra token hay cấu hình nhạy cảm.
   const campaigns = await getTodaySpentCampaigns();
