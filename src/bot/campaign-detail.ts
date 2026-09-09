@@ -28,6 +28,52 @@ function isValidDateKey(value: string): boolean {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
+interface CampaignDetailPeriod {
+  startDate: string;
+  endDate: string;
+}
+
+function buildDateKey(year: string, month: string, day: string): string | undefined {
+  const dateKey = `${year.padStart(4, '0')}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+  return isValidDateKey(dateKey) ? dateKey : undefined;
+}
+
+function parseCampaignDetailPeriod(value: string | undefined, today: string): CampaignDetailPeriod | undefined {
+  if (!value) {
+    return { startDate: today, endDate: today };
+  }
+
+  const currentYear = today.slice(0, 4);
+  const currentMonth = today.slice(5, 7);
+  const input = value.trim();
+
+  const dayRange = input.match(/^(\d{1,2})-(\d{1,2})$/);
+  if (dayRange) {
+    const startDate = buildDateKey(currentYear, currentMonth, dayRange[1]);
+    const endDate = buildDateKey(currentYear, currentMonth, dayRange[2]);
+    if (!startDate || !endDate) return undefined;
+    return startDate <= endDate
+      ? { startDate, endDate }
+      : { startDate: endDate, endDate: startDate };
+  }
+
+  const dayMonthRange = input.match(/^(\d{1,2})\/(\d{1,2})-(\d{1,2})\/(\d{1,2})$/);
+  if (dayMonthRange) {
+    const startDate = buildDateKey(currentYear, dayMonthRange[2], dayMonthRange[1]);
+    const endDate = buildDateKey(currentYear, dayMonthRange[4], dayMonthRange[3]);
+    if (!startDate || !endDate) return undefined;
+    return startDate <= endDate
+      ? { startDate, endDate }
+      : { startDate: endDate, endDate: startDate };
+  }
+
+  if (isValidDateKey(input)) {
+    return { startDate: input, endDate: input };
+  }
+
+  return undefined;
+}
+
 function getCommandArgs(ctx: Context): string[] {
   const message = ctx.message;
   const text = message && 'text' in message ? String(message.text || '') : '';
@@ -54,24 +100,29 @@ async function handleCampaignDetail(ctx: Context): Promise<void> {
       '<b>Chi tiết một chiến dịch</b>',
       '',
       'Cú pháp:',
-      '<code>/campid CAMPAIGN_ID</code>',
-      '<code>/campid CAMPAIGN_ID YYYY-MM-DD</code>',
-      '<code>/campid CAMPAIGN_ID YYYY-MM-DD YYYY-MM-DD</code>',
+      '<code>/campid CAMPAIGN_ID</code> — hôm nay',
+      '<code>/campid CAMPAIGN_ID 01-06</code> — ngày 1 đến 6 tháng này',
+      '<code>/campid CAMPAIGN_ID 10/05-30/07</code> — 10/05 đến 30/07 năm nay',
     ].join('\n'), { parse_mode: 'HTML' });
     return;
   }
 
   const today = getVietnamDateKey();
-  const startDate = args[1] || today;
-  const endDate = args[2] || startDate;
+  const period = args.length <= 2
+    ? parseCampaignDetailPeriod(args[1], today)
+    : undefined;
 
-  if (!isValidDateKey(startDate) || !isValidDateKey(endDate)) {
-    await ctx.reply('Ngày không hợp lệ. Hãy dùng định dạng YYYY-MM-DD.');
+  if (!period) {
+    await ctx.reply([
+      'Khoảng ngày không hợp lệ.',
+      'Dùng <code>01-06</code> cho ngày trong tháng này,',
+      'hoặc <code>10/05-30/07</code> cho ngày/tháng trong năm nay.',
+    ].join('\n'), { parse_mode: 'HTML' });
     return;
   }
 
-  const normalizedStart = startDate <= endDate ? startDate : endDate;
-  const normalizedEnd = startDate <= endDate ? endDate : startDate;
+  const normalizedStart = period.startDate;
+  const normalizedEnd = period.endDate;
   const waitMessage = await ctx.reply(`Đang lấy chi tiết campaign ${campaignId}...`);
 
   try {
