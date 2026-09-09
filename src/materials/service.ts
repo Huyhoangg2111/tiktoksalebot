@@ -24,10 +24,16 @@ async function withMaterialWriteSlot<T>(task: () => Promise<T>): Promise<T> {
   const concurrency = getMaterialWriteConcurrency();
 
   if (activeMaterialWrites >= concurrency) {
-    await new Promise<void>(resolve => materialWriteWaiters.push(resolve));
+    await new Promise<void>(resolve => {
+      materialWriteWaiters.push(() => {
+        activeMaterialWrites += 1;
+        resolve();
+      });
+    });
+  } else {
+    activeMaterialWrites += 1;
   }
 
-  activeMaterialWrites += 1;
   try {
     return await task();
   } finally {
