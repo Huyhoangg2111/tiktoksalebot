@@ -8,6 +8,7 @@ import {
   type AlertMetric,
 } from '../google-sheets/api.js';
 import { getTodaySpentCampaigns, type TikTokSpentCampaign } from '../tiktok/api.js';
+import { getRuntimeSettingNumber, RUNTIME_SETTING_DEFAULTS } from '../settings/runtime.js';
 import { saveAlertHistory } from './alert-store.js';
 import { checkAndSendLowBalanceAlert } from './balance-alert.js';
 import { buildMaterialDetailCallbackData } from './callbacks.js';
@@ -514,6 +515,23 @@ async function applyMaterialDecisions(
   await saveAlertHistory('material_auto_action', plainMessage, 'low');
 }
 
+async function forEachWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  task: (item: T) => Promise<void>
+): Promise<void> {
+  let nextIndex = 0;
+  const workerCount = Math.min(items.length, Math.max(1, Math.trunc(concurrency)));
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      await task(items[index]);
+    }
+  }));
+}
+
 async function evaluateMaterialRules(
   bot: Telegraf,
   campaigns: TikTokSpentCampaign[],
@@ -521,9 +539,17 @@ async function evaluateMaterialRules(
 ): Promise<void> {
   if (rules.length === 0) return;
 
-  for (const campaign of campaigns) {
+  const configuredConcurrency = await getRuntimeSettingNumber(
+    'tiktok_concurrency',
+    RUNTIME_SETTING_DEFAULTS.tiktokConcurrency
+  );
+  // Material reports are request-heavy; cap Level 1 workers to avoid TikTok QPS errors.
+  const concurrency = Math.min(6, Math.max(1, Math.trunc(configuredConcurrency)));
+  const startedAt = Date.now();
+
+  await forEachWithConcurrency(campaigns, concurrency, async campaign => {
     const campaignRules = rules.filter(rule => matchesCampaignName(rule.nameContains, campaign.campaign_name));
-    if (campaignRules.length === 0) continue;
+    if (campaignRules.length === 0) return;
 
     try {
       const snapshot = await getCampaignMaterialSnapshot(
@@ -531,7 +557,7 @@ async function evaluateMaterialRules(
         campaign.campaign_id,
         campaign.campaign_name
       );
-      if (snapshot.materials.length === 0) continue;
+      if (snapshot.materials.length === 0) return;
 
       await sendMaterialNotifyRules(bot, campaign, snapshot.materials, campaignRules);
       const decisions = snapshot.materials
@@ -541,7 +567,11 @@ async function evaluateMaterialRules(
     } catch (error) {
       console.error(`[MaterialRules] campaign=${campaign.campaign_id} failed:`, error);
     }
-  }
+  });
+
+  console.log(
+    `[MaterialRules] scanned ${campaigns.length} campaigns with concurrency=${concurrency} in ${Date.now() - startedAt}ms`
+  );
 }
 
 /**
