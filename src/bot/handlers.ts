@@ -55,6 +55,7 @@ const COMMAND_MENU_DEFAULT = [
   { command: 'start', description: '🚀 Mở hướng dẫn nhanh' },
   { command: 'balance', description: '💰 Kiểm tra số dư TKQC' },
   { command: 'campaigns', description: '📊 Chiến dịch có chi tiêu hôm nay' },
+  { command: 'campid', description: '🔎 Chi tiết một chiến dịch' },
   { command: 'campactive', description: '🟢 Campaign active theo sản phẩm' },
   { command: 'campmkt', description: '📈 Chiến dịch theo MKT và thời gian' },
   { command: 'tkqc', description: '📋 Chiến dịch theo TKQC' },
