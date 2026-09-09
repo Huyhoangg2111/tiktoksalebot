@@ -466,6 +466,49 @@ export interface MaterialBatchUpdateResult {
   failed: string[];
 }
 
+async function verifyMaterialOperationStatusInBackground(
+  advertiserId: string,
+  smartPlusAdId: string,
+  adMaterialIds: string[],
+  operationStatus: MaterialOperationStatus
+): Promise<void> {
+  const statusById = new Map<string, string>();
+
+  for (const delayMs of MATERIAL_STATUS_VERIFY_DELAYS_MS) {
+    await sleep(delayMs);
+
+    try {
+      const refreshed = await getSmartPlusAdById(advertiserId, smartPlusAdId);
+      statusById.clear();
+      for (const creative of refreshed?.creative_list || []) {
+        statusById.set(String(creative?.ad_material_id || ''), getCreativeStatus(creative));
+      }
+    } catch (error) {
+      console.warn(
+        `[MaterialStatusVerify] read failed advertiser=${advertiserId} ad=${smartPlusAdId} delay=${delayMs}ms:`,
+        error
+      );
+      continue;
+    }
+
+    const confirmedIds = adMaterialIds.filter(id => statusById.get(id) === operationStatus);
+    if (confirmedIds.length > 0) {
+      await markMaterialStatusConfirmed(advertiserId, smartPlusAdId, confirmedIds);
+    }
+
+    if (confirmedIds.length === adMaterialIds.length) {
+      return;
+    }
+  }
+
+  const pendingReadback = adMaterialIds.filter(id => statusById.get(id) !== operationStatus);
+  if (pendingReadback.length > 0) {
+    console.warn(
+      `[MaterialStatusVerify] write accepted but TikTok readback still pending advertiser=${advertiserId} ad=${smartPlusAdId} status=${operationStatus} materials=${pendingReadback.join(',')}`
+    );
+  }
+}
+
 export async function setMaterialOperationStatusBatch(
   advertiserId: string,
   smartPlusAdId: string,
@@ -499,40 +542,19 @@ export async function setMaterialOperationStatusBatch(
   smartPlusAdsCache.delete(advertiserId);
   await rememberAcceptedMaterialStatus(advertiserId, smartPlusAdId, uniqueIds, operationStatus);
 
-  const statusById = new Map<string, string>();
-  for (const delayMs of MATERIAL_STATUS_VERIFY_DELAYS_MS) {
-    await sleep(delayMs);
-
-    try {
-      const refreshed = await getSmartPlusAdById(advertiserId, smartPlusAdId);
-      statusById.clear();
-      for (const creative of refreshed?.creative_list || []) {
-        statusById.set(String(creative?.ad_material_id || ''), getCreativeStatus(creative));
-      }
-    } catch (error) {
-      console.warn(
-        `[MaterialStatusVerify] read failed advertiser=${advertiserId} ad=${smartPlusAdId} delay=${delayMs}ms:`,
-        error
-      );
-      continue;
-    }
-
-    const confirmedIds = uniqueIds.filter(id => statusById.get(id) === operationStatus);
-    if (confirmedIds.length > 0) {
-      await markMaterialStatusConfirmed(advertiserId, smartPlusAdId, confirmedIds);
-    }
-
-    if (confirmedIds.length === uniqueIds.length) {
-      break;
-    }
-  }
-
-  const pendingReadback = uniqueIds.filter(id => statusById.get(id) !== operationStatus);
-  if (pendingReadback.length > 0) {
+  // TikTok accepted the write. Verify readback without blocking the whole Level 1 scan;
+  // pending local state remains authoritative until TikTok reflects the new status.
+  void verifyMaterialOperationStatusInBackground(
+    advertiserId,
+    smartPlusAdId,
+    uniqueIds,
+    operationStatus
+  ).catch(error => {
     console.warn(
-      `[MaterialStatusVerify] write accepted but TikTok readback still pending advertiser=${advertiserId} ad=${smartPlusAdId} status=${operationStatus} materials=${pendingReadback.join(',')}`
+      `[MaterialStatusVerify] background verification failed advertiser=${advertiserId} ad=${smartPlusAdId}:`,
+      error
     );
-  }
+  });
 
   return {
     requested: uniqueIds,
