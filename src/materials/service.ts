@@ -6,6 +6,35 @@ const TIKTOK_API_BASE = 'https://business-api.tiktok.com/open_api/v1.3';
 const SMART_PLUS_PAGE_SIZE = 100;
 const SMART_PLUS_CACHE_TTL_MS = 30_000;
 const MATERIAL_STATUS_VERIFY_DELAYS_MS = [2_000, 3_000, 5_000] as const;
+const DEFAULT_MATERIAL_WRITE_CONCURRENCY = 2;
+const MAX_MATERIAL_WRITE_CONCURRENCY = 6;
+
+let activeMaterialWrites = 0;
+const materialWriteWaiters: Array<() => void> = [];
+
+function getMaterialWriteConcurrency(): number {
+  const configured = Number(process.env.MATERIAL_WRITE_CONCURRENCY);
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return DEFAULT_MATERIAL_WRITE_CONCURRENCY;
+  }
+  return Math.min(MAX_MATERIAL_WRITE_CONCURRENCY, Math.max(1, Math.trunc(configured)));
+}
+
+async function withMaterialWriteSlot<T>(task: () => Promise<T>): Promise<T> {
+  const concurrency = getMaterialWriteConcurrency();
+
+  if (activeMaterialWrites >= concurrency) {
+    await new Promise<void>(resolve => materialWriteWaiters.push(resolve));
+  }
+
+  activeMaterialWrites += 1;
+  try {
+    return await task();
+  } finally {
+    activeMaterialWrites -= 1;
+    materialWriteWaiters.shift()?.();
+  }
+}
 
 export type MaterialOperationStatus = 'ENABLE' | 'DISABLE';
 
@@ -518,7 +547,7 @@ export async function setMaterialOperationStatusBatch(
   }
 
   const writeToken = await getTikTokWriteAccessToken();
-  const response = await axios.post(
+  const response = await withMaterialWriteSlot(() => axios.post(
     `${TIKTOK_API_BASE}/smart_plus/ad/material_status/update/`,
     {
       advertiser_id: advertiserId,
@@ -533,7 +562,7 @@ export async function setMaterialOperationStatusBatch(
       },
       timeout: 30_000,
     }
-  );
+  ));
 
   assertTikTokSuccess(response.data, `Material ${operationStatus} Smart+ ad=${smartPlusAdId}`);
   smartPlusAdsCache.delete(advertiserId);
