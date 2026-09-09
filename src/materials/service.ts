@@ -299,21 +299,18 @@ async function getCampaignSmartPlusAds(
 ): Promise<any[]> {
   const ads = await getSmartPlusAdsForAdvertiser(advertiserId);
   const matched = ads.filter(ad => String(ad?.campaign_id || '') === campaignId);
-  const detailed: any[] = [];
+  const ready = matched.filter(ad => Array.isArray(ad?.creative_list) && ad.creative_list.length > 0);
+  const missingDetailIds = matched
+    .filter(ad => !Array.isArray(ad?.creative_list) || ad.creative_list.length === 0)
+    .map(ad => String(ad?.smart_plus_ad_id || '').trim())
+    .filter(Boolean);
 
-  for (const ad of matched) {
-    if (Array.isArray(ad?.creative_list) && ad.creative_list.length > 0) {
-      detailed.push(ad);
-      continue;
-    }
-
-    const smartPlusAdId = String(ad?.smart_plus_ad_id || '');
-    if (!smartPlusAdId) continue;
-    const detail = await getSmartPlusAdById(advertiserId, smartPlusAdId);
-    if (detail) detailed.push(detail);
+  if (missingDetailIds.length === 0) {
+    return ready;
   }
 
-  return detailed;
+  const details = await getSmartPlusAdsByIds(advertiserId, missingDetailIds);
+  return [...ready, ...details];
 }
 
 interface MaterialReportRow {
