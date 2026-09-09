@@ -2,7 +2,7 @@ import type { Telegraf } from 'telegraf';
 import { getCampaignCloneCountMap } from '../campaigns/clone-tracking.js';
 import { db } from '../db/index.js';
 import { parseMaterialDetailCallbackData } from '../materials/callbacks.js';
-import { getSmartPlusAdsForAdvertiser, getVietnamDateKey } from '../materials/service.js';
+import { getSmartPlusAdsByIds, getSmartPlusAdsForAdvertiser, getVietnamDateKey } from '../materials/service.js';
 import { getTodaySpentCampaigns, type TikTokSpentCampaign } from '../tiktok/api.js';
 
 const BATCH_IDLE_MS = 10_000;
@@ -214,9 +214,23 @@ async function getCampaignMaterialDisplaySnapshot(forceRefresh = false): Promise
   await Promise.all(advertiserIds.map(async advertiserId => {
     try {
       const ads = await getSmartPlusAdsForAdvertiser(advertiserId);
+      const missingDetailIds = ads
+        .filter(ad => {
+          const campaignId = String(ad?.campaign_id || '').trim();
+          const creatives = Array.isArray(ad?.creative_list) ? ad.creative_list : [];
+          return campaignIds.has(campaignId) && creatives.length === 0;
+        })
+        .map(ad => String(ad?.smart_plus_ad_id || '').trim())
+        .filter(Boolean);
+      const detailedAds = await getSmartPlusAdsByIds(advertiserId, missingDetailIds);
+      const detailBySmartPlusAdId = new Map(
+        detailedAds.map(ad => [String(ad?.smart_plus_ad_id || '').trim(), ad])
+      );
 
-      for (const ad of ads) {
-        const campaignId = String(ad?.campaign_id || '').trim();
+      for (const listedAd of ads) {
+        const listedSmartPlusAdId = String(listedAd?.smart_plus_ad_id || '').trim();
+        const ad = detailBySmartPlusAdId.get(listedSmartPlusAdId) || listedAd;
+        const campaignId = String(ad?.campaign_id || listedAd?.campaign_id || '').trim();
         if (!campaignId || !campaignIds.has(campaignId)) continue;
 
         const smartPlusAdId = String(ad?.smart_plus_ad_id || '').trim();
