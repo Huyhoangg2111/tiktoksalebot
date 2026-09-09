@@ -253,24 +253,42 @@ export async function getSmartPlusAdsForAdvertiser(
   return ads;
 }
 
+export async function getSmartPlusAdsByIds(
+  advertiserId: string,
+  smartPlusAdIds: string[]
+): Promise<any[]> {
+  const uniqueIds = [...new Set(smartPlusAdIds.map(id => String(id || '').trim()).filter(Boolean))];
+  if (uniqueIds.length === 0) return [];
+
+  const accessToken = await getReadToken();
+  const results: any[] = [];
+
+  for (let offset = 0; offset < uniqueIds.length; offset += SMART_PLUS_PAGE_SIZE) {
+    const batchIds = uniqueIds.slice(offset, offset + SMART_PLUS_PAGE_SIZE);
+    const response = await axios.get(`${TIKTOK_API_BASE}/smart_plus/ad/get/`, {
+      params: {
+        advertiser_id: advertiserId,
+        smart_plus_ad_ids: JSON.stringify(batchIds),
+        page: 1,
+        page_size: SMART_PLUS_PAGE_SIZE,
+      },
+      headers: { 'Access-Token': accessToken },
+      timeout: 30_000,
+    });
+
+    assertTikTokSuccess(response.data, `Smart+ ad detail batch advertiser=${advertiserId}`);
+    results.push(...(Array.isArray(response.data?.data?.list) ? response.data.data.list : []));
+  }
+
+  return results;
+}
+
 async function getSmartPlusAdById(
   advertiserId: string,
   smartPlusAdId: string
 ): Promise<any | undefined> {
-  const accessToken = await getReadToken();
-  const response = await axios.get(`${TIKTOK_API_BASE}/smart_plus/ad/get/`, {
-    params: {
-      advertiser_id: advertiserId,
-      smart_plus_ad_ids: JSON.stringify([smartPlusAdId]),
-      page: 1,
-      page_size: SMART_PLUS_PAGE_SIZE,
-    },
-    headers: { 'Access-Token': accessToken },
-    timeout: 30_000,
-  });
-
-  assertTikTokSuccess(response.data, `Smart+ ad get ${smartPlusAdId}`);
-  return (response.data?.data?.list || []).find(
+  const details = await getSmartPlusAdsByIds(advertiserId, [smartPlusAdId]);
+  return details.find(
     (item: any) => String(item?.smart_plus_ad_id || '') === smartPlusAdId
   );
 }
