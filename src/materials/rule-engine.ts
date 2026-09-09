@@ -466,31 +466,45 @@ async function applyMaterialDecisions(
 ): Promise<void> {
   const groups = new Map<string, MaterialDecision[]>();
   for (const decision of decisions) {
+    // TikTok accepts one smart_plus_ad_id + one operation_status + a list of material IDs.
     const key = `${decision.material.smartPlusAdId}:${decision.operationStatus}`;
     const current = groups.get(key) || [];
     current.push(decision);
     groups.set(key, current);
   }
 
-  const resultLines: string[] = [];
-  for (const group of groups.values()) {
-    const first = group[0];
-    const result = await setMaterialOperationStatusBatch(
-      first.material.advertiserId,
-      first.material.smartPlusAdId,
-      group.map(item => item.material.adMaterialId),
-      first.operationStatus
-    );
+  const groupResults = await Promise.all(
+    [...groups.values()].map(async group => {
+      const first = group[0];
 
-    for (const decision of group) {
-      const verified = result.verified.includes(decision.material.adMaterialId);
-      resultLines.push(
-        `${verified ? '✅' : '⚠️'} #${decision.material.materialNumber} ${decision.operationStatus === 'DISABLE' ? 'TẮT' : 'BẬT'} · $${decision.material.spend.toFixed(2)} · 🎯 ${decision.material.conversions} · CPA $${decision.material.cpa.toFixed(2)}`
-      );
-    }
-  }
+      try {
+        const result = await setMaterialOperationStatusBatch(
+          first.material.advertiserId,
+          first.material.smartPlusAdId,
+          group.map(item => item.material.adMaterialId),
+          first.operationStatus
+        );
 
+        return group.map(decision => {
+          const accepted = result.verified.includes(decision.material.adMaterialId);
+          return `${accepted ? '✅' : '⚠️'} #${decision.material.materialNumber} ${decision.operationStatus === 'DISABLE' ? 'TẮT' : 'BẬT'} · $${decision.material.spend.toFixed(2)} · 🎯 ${decision.material.conversions} · CPA $${decision.material.cpa.toFixed(2)}`;
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(
+          `[MaterialRules] write failed campaign=${campaign.campaign_id} ad=${first.material.smartPlusAdId} status=${first.operationStatus}:`,
+          error
+        );
+        return group.map(decision =>
+          `⚠️ #${decision.material.materialNumber} ${decision.operationStatus === 'DISABLE' ? 'TẮT' : 'BẬT'} thất bại · ${message}`
+        );
+      }
+    })
+  );
+
+  const resultLines = groupResults.flat();
   if (resultLines.length === 0) return;
+
   const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
   if (!adminChatId) return;
   const plainMessage = [
