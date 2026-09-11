@@ -16,9 +16,10 @@ export const RUNTIME_SETTING_DEFAULTS = {
   /** Concurrent TikTok advertiser report workers for /bc. */
   tiktokConcurrency: 5,
   materialRulerRunTime: '00:05',
+  materialRulerPeriod: 'today',
 } as const;
 
-export type RuntimeTextSettingKey = 'material_ruler_run_time';
+export type RuntimeTextSettingKey = 'material_ruler_run_time' | 'material_ruler_period';
 
 export type RuntimeSettingKey =
   | 'level1_interval_minutes'
@@ -129,6 +130,9 @@ export async function setRuntimeSettingText(
   if (key === 'material_ruler_run_time' && !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(normalized)) {
     throw new Error('Giờ chạy phải theo định dạng HH:mm, ví dụ 00:05 hoặc 06:30.');
   }
+  if (key === 'material_ruler_period' && !/^(today|yesterday|month_to_date|last_([1-9]|[1-8]\\d|90)_days|\\d{4}-\\d{2}-\\d{2}\\.\\.\\d{4}-\\d{2}-\\d{2})$/i.test(normalized)) {
+    throw new Error('Khoảng kiểm tra hợp lệ: today, yesterday, month_to_date, last_N_days (N=1–90), hoặc YYYY-MM-DD..YYYY-MM-DD.');
+  }
   await ensureSettingsTable();
   await db.run(`INSERT INTO bot_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`, [key, normalized]);
@@ -146,6 +150,7 @@ export async function getRuntimeSettingsSnapshot() {
     sheetsConcurrency,
     tiktokConcurrency,
     materialRulerRunTime,
+    materialRulerPeriod,
   ] = await Promise.all([
     getRuntimeSettingNumber('level1_interval_minutes', RUNTIME_SETTING_DEFAULTS.level1IntervalMinutes),
     getRuntimeSettingNumber('level2_interval_minutes', RUNTIME_SETTING_DEFAULTS.level2IntervalMinutes),
@@ -157,6 +162,7 @@ export async function getRuntimeSettingsSnapshot() {
     getRuntimeSettingNumber('sheets_concurrency', RUNTIME_SETTING_DEFAULTS.sheetsConcurrency),
     getRuntimeSettingNumber('tiktok_concurrency', RUNTIME_SETTING_DEFAULTS.tiktokConcurrency),
     getRuntimeSettingText('material_ruler_run_time', RUNTIME_SETTING_DEFAULTS.materialRulerRunTime),
+    getRuntimeSettingText('material_ruler_period', RUNTIME_SETTING_DEFAULTS.materialRulerPeriod),
   ]);
 
   return {
@@ -170,5 +176,6 @@ export async function getRuntimeSettingsSnapshot() {
     sheetsConcurrency,
     tiktokConcurrency,
     materialRulerRunTime,
+    materialRulerPeriod,
   };
 }
