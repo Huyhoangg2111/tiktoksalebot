@@ -16,6 +16,7 @@ import { ensureMaterialRulerSheetTemplate } from './materials/daily-ruler.js';
 import { startScheduler } from './scheduler/index.js';
 import { startServer, type SignerServerRuntime } from './playwright-signer/server.js';
 import { configureHttpResilience } from './runtime/http-resilience.js';
+import { startAdminServer } from './admin/server.js';
 
 // Load environment variables
 config();
@@ -64,6 +65,7 @@ async function main() {
 
   // Connect to database
   await connectDB();
+  await startAdminServer();
   await initializeAlertRules();
 
   try {
