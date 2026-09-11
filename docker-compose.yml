@@ -35,3 +35,12 @@ services:
       options:
         max-size: "20m"
         max-file: "5"
+
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: tiktok-sales-cloudflared
+    restart: unless-stopped
+    depends_on:
+      - tiktok-sales-bot
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
