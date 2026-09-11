@@ -131,9 +131,9 @@ function getDateAndTime(timezone: string): { dateKey: string; timeKey: string } 
 
 function campaignMatchesRule(campaign: TikTokCampaign, rule: DailyMaterialRule): boolean {
   if (rule.advertiserId && campaign.advertiser_id !== rule.advertiserId) return false;
-  if (rule.campaignId && campaign.campaign_id !== rule.campaignId) return false;
+  if (rule.campaignId && campaign.id !== rule.campaignId) return false;
   if (rule.campaignMatch) {
-    const name = String(campaign.campaign_name || '').toLocaleUpperCase('vi-VN');
+    const name = String(campaign.name || '').toLocaleUpperCase('vi-VN');
     if (!name.includes(rule.campaignMatch.toLocaleUpperCase('vi-VN'))) return false;
   }
   return true;
@@ -253,15 +253,15 @@ async function runRule(rule: DailyMaterialRule, campaigns: TikTokCampaign[]): Pr
     try {
       const snapshot = await getCampaignMaterialSnapshot(
         campaign.advertiser_id,
-        campaign.campaign_id,
-        campaign.campaign_name
+        campaign.id,
+        campaign.name
       );
       const campaignResult = await enableDisabledMaterials(snapshot.materials);
       result.changedMaterials += campaignResult.changedMaterials;
       result.failedGroups += campaignResult.failedGroups;
     } catch (error) {
       result.failedGroups += 1;
-      console.error(`[MaterialRuler] campaign=${campaign.campaign_id} thất bại:`, error);
+      console.error(`[MaterialRuler] campaign=${campaign.id} thất bại:`, error);
     }
   }
   return result;
