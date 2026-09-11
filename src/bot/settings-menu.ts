@@ -14,6 +14,7 @@ const pendingSettingsByChat = new Map<number, AnySettingKey>();
 
 const SETTING_LABELS: Record<AnySettingKey, string> = {
   material_ruler_run_time: 'Giờ chạy Material Ruler',
+  material_ruler_period: 'Khoảng kiểm tra Material Ruler',
   level1_interval_minutes: 'Lịch cảnh báo cấp 1',
   level2_interval_minutes: 'Lịch cảnh báo cấp 2',
   level3_interval_minutes: 'Lịch cảnh báo cấp 3 (tháng)',
@@ -96,6 +97,7 @@ async function buildSettingsMessage(): Promise<string> {
     '',
     '<b>🎬 Material Ruler</b>',
     `• Giờ chạy: <b>${escapeHtml(settings.materialRulerRunTime)}</b> · múi giờ Việt Nam`,
+    `• Khoảng kiểm tra: <b>${escapeHtml(settings.materialRulerPeriod)}</b>`,
     '• Chạy ngay: <code>/materialruler</code>',
     '',
     '<b>💱 Tỉ giá</b>',
@@ -123,7 +125,10 @@ function buildSettingsKeyboard() {
       Markup.button.callback('📈 %CP C2', 'settings:set:level2_cp_ads_threshold'),
       Markup.button.callback('📉 %CP C3', 'settings:set:level3_cp_ads_threshold'),
     ],
-    [Markup.button.callback('🎬 Giờ Material Ruler', 'settings:set:material_ruler_run_time')],
+    [
+      Markup.button.callback('🎬 Giờ Material Ruler', 'settings:set:material_ruler_run_time'),
+      Markup.button.callback('📅 Khoảng kiểm tra', 'settings:set:material_ruler_period'),
+    ],
     [Markup.button.callback('💱 Tỉ giá', 'settings:set:exchange_rate')],
     [
       Markup.button.callback('📄 Luồng Sheets', 'settings:set:sheets_concurrency'),
@@ -239,11 +244,12 @@ async function handlePendingSettingText(ctx: Context): Promise<boolean> {
 
   const message = ctx.message;
   const text = message && 'text' in message ? String(message.text || '') : '';
-  if (pendingKey === 'material_ruler_run_time') {
+  if (pendingKey === 'material_ruler_run_time' || pendingKey === 'material_ruler_period') {
     try {
       await setRuntimeSettingText(pendingKey, text);
       pendingSettingsByChat.delete(chatId);
-      await ctx.reply(`✅ Đã cập nhật ${SETTING_LABELS[pendingKey]}: <b>${escapeHtml(text.trim())}</b> (giờ Việt Nam)`, { parse_mode: 'HTML' });
+      const suffix = pendingKey === 'material_ruler_run_time' ? ' (giờ Việt Nam)' : '';
+      await ctx.reply(`✅ Đã cập nhật ${SETTING_LABELS[pendingKey]}: <b>${escapeHtml(text.trim())}</b>${suffix}`, { parse_mode: 'HTML' });
       await showSettings(ctx);
     } catch (error) {
       const messageText = error instanceof Error ? error.message : String(error);
