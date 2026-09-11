@@ -7,9 +7,9 @@ import { getCampaignMaterialSnapshot, setMaterialOperationStatusBatch, type Camp
 
 const SHEET='MaterialRuler', TZ='Asia/Ho_Chi_Minh';
 const DEFAULT_SHEET='1f7bH43w8kv_iiqoy9X5TzSugDuWtsKrB3-Iq8IrxvAI';
-const HEADERS=[['rule_id','campaign_match','spend_operator','spend_threshold','cpa_operator','cpa_threshold','conversions_operator','conversions_threshold','enabled','note']];
+const HEADERS=[['campaign_match','spend_operator','spend_threshold','cpa_operator','cpa_threshold','conversions_operator','conversions_threshold','enabled','note']];
 const DEMO=[
- ['enable-good-material','Mặt nạ mắt - ID','>=','1','<=','0.7','>=','3','false','Điền điều kiện cần dùng; để trống cặp operator/threshold không áp dụng'],
+ ['Mặt nạ mắt - ID','>=','1','<=','0.7','>=','3','false','Điền điều kiện cần dùng; để trống cặp operator/threshold không áp dụng'],
 ];
 type Operator='>'|'>='|'<'|'<='|'=';
 interface Condition { operator:Operator; threshold:number; }
@@ -30,12 +30,12 @@ function condition(opValue:unknown,thresholdValue:unknown):Condition|undefined {
  const op=operator(opValue),raw=t(thresholdValue);if(!op&&!raw)return undefined;
  const threshold=Number(raw.replace(',','.'));return op&&Number.isFinite(threshold)?{operator:op,threshold}:undefined;
 }
-function parseRules(rows:any[][]):Rule[]{const out:Rule[]=[];const ids=new Set<string>();
- rows.slice(1).forEach((r,i)=>{const id=t(r[0]),spend=condition(r[2],r[3]),cpa=condition(r[4],r[5]),conversions=condition(r[6],r[7]);
-  if(!id||ids.has(id)||!isEnabled(r[8]))return;
-  const hasMalformedPair=[[r[2],r[3]],[r[4],r[5]],[r[6],r[7]]].some(([op,x])=>Boolean(t(op)||t(x))&&!condition(op,x));
+function parseRules(rows:any[][]):Rule[]{const out:Rule[]=[];
+ rows.slice(1).forEach((r,i)=>{const id=`row-${i+2}`,spend=condition(r[1],r[2]),cpa=condition(r[3],r[4]),conversions=condition(r[5],r[6]);
+  if(!isEnabled(r[7]))return;
+  const hasMalformedPair=[[r[1],r[2]],[r[3],r[4]],[r[5],r[6]]].some(([op,x])=>Boolean(t(op)||t(x))&&!condition(op,x));
   if(hasMalformedPair||(!spend&&!cpa&&!conversions)){console.warn(`[MaterialRuler] invalid conditions row ${i+2}`);return;}
-  ids.add(id);out.push({id,campaignMatch:t(r[1])||undefined,spend,cpa,conversions});});
+  out.push({id,campaignMatch:t(r[0])||undefined,spend,cpa,conversions});});
  return out;}
 function vnNow(){const p=new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts();
  const g=(x:Intl.DateTimeFormatPartTypes)=>p.find(y=>y.type===x)?.value||'';
@@ -66,17 +66,20 @@ async function mark(d:string,time:string,s:MaterialRulerRunSummary){await db.run
 export async function ensureMaterialRulerSheetTemplate(){const c=client(['https://www.googleapis.com/auth/spreadsheets']),id=sheetId();
  const book=await c.spreadsheets.get({spreadsheetId:id});const exists=book.data.sheets?.some(s=>s.properties?.title===SHEET);
  if(!exists)await c.spreadsheets.batchUpdate({spreadsheetId:id,requestBody:{requests:[{addSheet:{properties:{title:SHEET}}}]}});
- await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A1:J1`,valueInputOption:'RAW',requestBody:{values:HEADERS}});
- const firstDataRow=await c.spreadsheets.values.get({spreadsheetId:id,range:`${SHEET}!A2:K2`});
- const legacyId=t(firstDataRow.data.values?.[0]?.[0]);
- const shouldReplaceDemo=!exists||legacyId==='daily-enable-all'||legacyId==='enable-good-cpa'||legacyId==='enable-converting';
- if(shouldReplaceDemo){
-  await c.spreadsheets.values.clear({spreadsheetId:id,range:`${SHEET}!A2:K2`});
-  await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A2:J2`,valueInputOption:'RAW',requestBody:{values:DEMO}});
+ const current=exists?await c.spreadsheets.values.get({spreadsheetId:id,range:`${SHEET}!A1:J`}):undefined;
+ const values=current?.data.values||[],hasLegacyId=t(values[0]?.[0])==='rule_id';
+ if(hasLegacyId){
+  const legacyDemoIds=new Set(['daily-enable-all','enable-good-cpa','enable-converting','enable-good-material']);
+  const migrated=values.slice(1).map(r=>legacyDemoIds.has(t(r[0]))?DEMO[0]:r.slice(1,10));
+  await c.spreadsheets.values.clear({spreadsheetId:id,range:`${SHEET}!A:J`});
+  await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A1:I`,valueInputOption:'RAW',requestBody:{values:[HEADERS[0],...(migrated.length?migrated:DEMO)]}});
+ }else{
+  await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A1:I1`,valueInputOption:'RAW',requestBody:{values:HEADERS}});
+  if(!exists||values.length<2)await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A2:I2`,valueInputOption:'RAW',requestBody:{values:DEMO}});
  }
  return {created:!exists};}
 async function rules(){await ensureMaterialRulerSheetTemplate();const c=client(['https://www.googleapis.com/auth/spreadsheets.readonly']);
- const r=await c.spreadsheets.values.get({spreadsheetId:sheetId(),range:`${SHEET}!A:J`});return parseRules(r.data.values||[]);}
+ const r=await c.spreadsheets.values.get({spreadsheetId:sheetId(),range:`${SHEET}!A:I`});return parseRules(r.data.values||[]);}
 async function enable(items:CampaignMaterialItem[]){const groups=new Map<string,CampaignMaterialItem[]>();
  items.filter(x=>x.status==='DISABLE').forEach(x=>groups.set(x.smartPlusAdId,[...(groups.get(x.smartPlusAdId)||[]),x]));
  let enabled=0,failed=0;for(const g of groups.values()){const x=g[0];try{const r=await setMaterialOperationStatusBatch(x.advertiserId,x.smartPlusAdId,g.map(y=>y.adMaterialId),'ENABLE');
