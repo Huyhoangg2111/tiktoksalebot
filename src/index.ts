@@ -65,7 +65,6 @@ async function main() {
 
   // Connect to database
   await connectDB();
-  await startAdminServer();
   await initializeAlertRules();
 
   try {
@@ -81,6 +80,7 @@ async function main() {
 
   // Initialize Telegram bot
   bot = new Telegraf(botToken);
+  await startAdminServer(code => bot!.telegram.sendMessage(process.env.ADMIN_CHAT_ID || '', `🔐 Mã đăng nhập Admin: <code>${code}</code>\\nCó hiệu lực 5 phút và chỉ dùng một lần.`, { parse_mode: 'HTML' }));
 
   // Retire the old alert actions before any legacy callbacks are registered.
   // This also strips their buttons from all Telegram send/edit payloads.
