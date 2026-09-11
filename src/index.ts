@@ -6,6 +6,7 @@ import { setupSmartPlusAppealHandlers } from './bot/smartplus-appeal-handlers.js
 import { setupSettingsMenuHandlers } from './bot/settings-menu.js';
 import { setupRetiredAlertActions } from './bot/retired-alert-actions.js';
 import { setupMaterialHandlers } from './bot/material-handlers.js';
+import { setupMaterialRulerHandlers } from './bot/material-ruler-handlers.js';
 import { setupAppealMenuCleanup } from './bot/appeal-menu-cleanup.js';
 import { setupCampaignAlertUiCompatibility } from './bot/campaign-alert-ui-compat.js';
 import { setupMaterialAutoActionFeedback } from './bot/material-auto-action-feedback.js';
@@ -92,6 +93,7 @@ async function main() {
 
   // Material detail/toggle callbacks must be registered before the legacy handlers.
   setupMaterialHandlers(bot);
+  setupMaterialRulerHandlers(bot);
 
   // Register settings before the legacy handlers, because setupBotHandlers() contains
   // the old settings implementation and a catch-all text fallback. The new settings
