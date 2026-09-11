@@ -60,6 +60,7 @@ const COMMAND_MENU_DEFAULT = [
   { command: 'campid', description: '🔎 Chi tiết một chiến dịch' },
   { command: 'campactive', description: '🟢 Campaign active theo sản phẩm' },
   { command: 'matactive', description: '🎬 Bật material đạt điều kiện' },
+  { command: 'rulerday', description: '⏰ Ruler material chạy 01:00' },
   { command: 'settings', description: '⚙️ Cài đặt bot' },
 ] as const;
 
