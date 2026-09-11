@@ -217,8 +217,52 @@ function parseLevel1RuleRows(rows: any[][]): Level1RuleSnapshot {
   };
 }
 
+async function readDashboardMaterialRules(): Promise<MaterialRule[]> {
+  const rows = await db.all<{ id: number; data_json: string }>(
+    'SELECT id, data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id',
+    ['material_ruler']
+  );
+  return rows.flatMap(row => {
+    try {
+      const value = JSON.parse(row.data_json) as Record<string, unknown>;
+      const metric = normalizeMetric(value.metric);
+      const metricOperator = normalizeOperator(value.metric_operator);
+      const conversionsOperator = normalizeOperator(value.conversions_operator);
+      const action = normalizeAction(value.action);
+      const threshold = parseThreshold(value.metric_threshold, metricOperator || 'eq');
+      const conversionsThreshold = parseNumber(value.conversions_threshold);
+      if (!metric || !metricOperator || !conversionsOperator || !action || !Number.isFinite(threshold.threshold) || !Number.isFinite(conversionsThreshold)) return [];
+      return [{
+        rowNumber: Number(row.id),
+        nameContains: String(value.name_contains ?? '').trim() || undefined,
+        metric,
+        metricOperator,
+        metricThreshold: threshold.threshold,
+        metricMinThreshold: threshold.min ?? (String(value.metric_min_threshold ?? '').trim() ? parseNumber(value.metric_min_threshold) : undefined),
+        conversionsOperator,
+        conversionsThreshold,
+        action,
+        note: String(value.note ?? '').trim() || undefined,
+      } satisfies MaterialRule];
+    } catch {
+      return [];
+    }
+  });
+}
+
 async function getLevel1RuleSnapshot(): Promise<Level1RuleSnapshot> {
   try {
+    const dashboardMaterialRules = await readDashboardMaterialRules();
+    if (dashboardMaterialRules.length > 0) {
+      const response = await createSheetsClient().spreadsheets.values.get({
+        spreadsheetId: getConfigSheetId(),
+        range: 'Alerts!A:O',
+      });
+      const sheetSnapshot = parseLevel1RuleRows(response.data.values || []);
+      const snapshot = { ...sheetSnapshot, materialRules: dashboardMaterialRules, loadedAtMs: Date.now() };
+      lastKnownGoodRuleSnapshot = snapshot;
+      return snapshot;
+    }
     const response = await createSheetsClient().spreadsheets.values.get({
       spreadsheetId: getConfigSheetId(),
       range: 'Alerts!A:O',
