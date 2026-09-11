@@ -218,6 +218,19 @@ function parseLevel1RuleRows(rows: any[][]): Level1RuleSnapshot {
 }
 
 async function readDashboardMaterialRules(): Promise<MaterialRule[]> {
+  const legacyRows = await db.all<Record<string, unknown>>('SELECT id,name_contains,metric,metric_operator,metric_threshold,metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note FROM alert_action_rules WHERE entity=? ORDER BY id',['material']);
+  if (legacyRows.length > 0) {
+    return legacyRows.flatMap(value => {
+      const metric = normalizeMetric(value.metric);
+      const metricOperator = normalizeOperator(value.metric_operator);
+      const conversionsOperator = normalizeOperator(value.conversions_operator);
+      const action = normalizeAction(value.action);
+      const threshold = parseThreshold(value.metric_threshold, metricOperator || 'eq');
+      const conversionsThreshold = parseNumber(value.conversions_threshold);
+      if (!metric || !metricOperator || !conversionsOperator || !action || Number(value.is_active ?? 1) === 0 || !Number.isFinite(threshold.threshold) || !Number.isFinite(conversionsThreshold)) return [];
+      return [{rowNumber:Number(value.id),nameContains:String(value.name_contains ?? '').trim()||undefined,metric,metricOperator,metricThreshold:threshold.threshold,metricMinThreshold:threshold.min ?? (value.metric_min_threshold == null ? undefined : Number(value.metric_min_threshold)),conversionsOperator,conversionsThreshold,action,note:String(value.note ?? '').trim()||undefined} satisfies MaterialRule];
+    });
+  }
   const rows = await db.all<{ id: number; data_json: string }>(
     'SELECT id, data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id',
     ['material_ruler']
