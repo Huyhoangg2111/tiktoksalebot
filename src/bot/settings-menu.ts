@@ -4,12 +4,16 @@ import { getSchedulerHealthSnapshot, restartScheduler } from '../scheduler/index
 import {
   getRuntimeSettingsSnapshot,
   setRuntimeSettingNumber,
+  setRuntimeSettingText,
   type RuntimeSettingKey,
+  type RuntimeTextSettingKey,
 } from '../settings/runtime.js';
 
-const pendingSettingsByChat = new Map<number, RuntimeSettingKey>();
+type AnySettingKey = RuntimeSettingKey | RuntimeTextSettingKey;
+const pendingSettingsByChat = new Map<number, AnySettingKey>();
 
-const SETTING_LABELS: Record<RuntimeSettingKey, string> = {
+const SETTING_LABELS: Record<AnySettingKey, string> = {
+  material_ruler_run_time: 'Giờ chạy Material Ruler',
   level1_interval_minutes: 'Lịch cảnh báo cấp 1',
   level2_interval_minutes: 'Lịch cảnh báo cấp 2',
   level3_interval_minutes: 'Lịch cảnh báo cấp 3 (tháng)',
@@ -90,6 +94,10 @@ async function buildSettingsMessage(): Promise<string> {
     `• Cấp 3 (tháng): mỗi <b>${formatSettingNumber(settings.level3IntervalMinutes)}</b> phút · %CP &gt; <b>${formatSettingNumber(settings.level3CpAdsThreshold)}%</b>`,
     `• Số dư: dưới <b>$${formatSettingNumber(settings.balanceThresholdUsd)}</b>`,
     '',
+    '<b>🎬 Material Ruler</b>',
+    `• Giờ chạy: <b>${escapeHtml(settings.materialRulerRunTime)}</b> · múi giờ Việt Nam`,
+    '• Chạy ngay: <code>/materialruler</code>',
+    '',
     '<b>💱 Tỉ giá</b>',
     `• USD/VND: <b>${formatSettingNumber(settings.exchangeRate)}</b>`,
     '',
@@ -115,6 +123,7 @@ function buildSettingsKeyboard() {
       Markup.button.callback('📈 %CP C2', 'settings:set:level2_cp_ads_threshold'),
       Markup.button.callback('📉 %CP C3', 'settings:set:level3_cp_ads_threshold'),
     ],
+    [Markup.button.callback('🎬 Giờ Material Ruler', 'settings:set:material_ruler_run_time')],
     [Markup.button.callback('💱 Tỉ giá', 'settings:set:exchange_rate')],
     [
       Markup.button.callback('📄 Luồng Sheets', 'settings:set:sheets_concurrency'),
@@ -230,6 +239,19 @@ async function handlePendingSettingText(ctx: Context): Promise<boolean> {
 
   const message = ctx.message;
   const text = message && 'text' in message ? String(message.text || '') : '';
+  if (pendingKey === 'material_ruler_run_time') {
+    try {
+      await setRuntimeSettingText(pendingKey, text);
+      pendingSettingsByChat.delete(chatId);
+      await ctx.reply(`✅ Đã cập nhật ${SETTING_LABELS[pendingKey]}: <b>${escapeHtml(text.trim())}</b> (giờ Việt Nam)`, { parse_mode: 'HTML' });
+      await showSettings(ctx);
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : String(error);
+      await ctx.reply(`❌ Không lưu được cài đặt: ${escapeHtml(messageText)}`, { parse_mode: 'HTML' });
+    }
+    return true;
+  }
+
   const value = Number(text.replace(/,/g, '').trim());
 
   if (!Number.isFinite(value) || value <= 0) {
@@ -281,7 +303,7 @@ export function setupSettingsMenuHandlers(bot: Telegraf): void {
       return;
     }
 
-    const key = ctx.match[1] as RuntimeSettingKey;
+    const key = ctx.match[1] as AnySettingKey;
     if (!SETTING_LABELS[key]) {
       await ctx.answerCbQuery('Cài đặt không hợp lệ.');
       return;
@@ -295,8 +317,9 @@ export function setupSettingsMenuHandlers(bot: Telegraf): void {
 
     pendingSettingsByChat.set(chatId, key);
     await ctx.answerCbQuery();
-    const rangeHint =
-      key === 'sheets_concurrency' || key === 'tiktok_concurrency'
+    const rangeHint = key === 'material_ruler_run_time'
+      ? '\n<i>Nhập HH:mm theo giờ Việt Nam, ví dụ 00:05 hoặc 06:30.</i>'
+      : key === 'sheets_concurrency' || key === 'tiktok_concurrency'
         ? '\n<i>Nhập số nguyên từ 1 đến 8.</i>\nThấp = nhẹ quota · Cao = /bc nhanh hơn.'
         : '';
     await ctx.reply(
