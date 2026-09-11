@@ -491,23 +491,6 @@ export function setupBcSalesHandlers(bot: Telegraf): void {
     await sendBcMenu(ctx);
   });
 
-  bot.command('bcall', async (ctx) => {
-    try {
-      const directPeriod = parseDirectBcAllCommandPeriod(ctx);
-
-      if (directPeriod) {
-        await sendBcAllReport(ctx, directPeriod);
-        return;
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      await ctx.reply(`Sai cú pháp /bcall: ${errorMessage}`);
-      return;
-    }
-
-    await sendBcAllMenu(ctx);
-  });
-
   bot.action(`${BC_CALLBACK_PREFIX}:today`, async (ctx) => {
     await ctx.answerCbQuery();
     await sendBcReport(ctx, getTodayBcReportPeriod());
@@ -564,65 +547,6 @@ export function setupBcSalesHandlers(bot: Telegraf): void {
       parse_mode: 'HTML',
       ...(keyboard ? keyboard : {}),
     });
-  });
-
-  bot.action(`${BC_ALL_CALLBACK_PREFIX}:today`, async (ctx) => {
-    await ctx.answerCbQuery();
-    await sendBcAllReport(ctx, getTodayBcReportPeriod());
-  });
-
-  bot.action(`${BC_ALL_CALLBACK_PREFIX}:month`, async (ctx) => {
-    await ctx.answerCbQuery();
-    await sendBcAllReport(ctx, getMonthBcReportPeriod());
-  });
-
-  bot.action(`${BC_ALL_CALLBACK_PREFIX}:custom`, async (ctx) => {
-    const pendingKey = getPendingKey(ctx);
-
-    if (pendingKey) {
-      pendingCustomReports.set(pendingKey, { createdAt: Date.now(), reportType: 'bcall' });
-    }
-
-    await ctx.answerCbQuery();
-    await ctx.reply(
-      [
-        'Nhập thời gian custom cho báo cáo /bcall.',
-        '',
-        'Có thể nhập một ngày hoặc một khoảng ngày:',
-        '<code>02</code>',
-        '<code>02-27</code>',
-        '<code>02/04/2026</code>',
-        '<code>02/04/2026 - 26/04/2026</code>',
-        '<code>2026-04-02 đến 2026-04-26</code>',
-        '',
-        'Gõ /cancel để hủy.',
-      ].join('\n'),
-      { parse_mode: 'HTML' }
-    );
-  });
-
-  bot.action(new RegExp(`^${BC_ALL_PRODUCT_CALLBACK_PREFIX}:(.+)$`), async (ctx) => {
-    clearExpiredBcallProductCallbacks();
-
-    const token = ctx.match[1];
-    const callbackContext = bcallProductCallbacks.get(token);
-
-    if (!callbackContext) {
-      await ctx.answerCbQuery('Nút đã hết hạn. Vui lòng chạy lại /bcall.');
-      return;
-    }
-
-    await ctx.answerCbQuery();
-
-    try {
-      const report = await buildBcAllMktProductReport(callbackContext.period, callbackContext.mktCode);
-      await replyLongMessage(ctx, report, { parse_mode: 'HTML' });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      await ctx.reply(`Không thể tạo dữ liệu sản phẩm ${escapeHtml(callbackContext.mktCode)}:\n${escapeHtml(errorMessage)}`, {
-        parse_mode: 'HTML',
-      });
-    }
   });
 
   bot.on('text', (ctx, next) => {
