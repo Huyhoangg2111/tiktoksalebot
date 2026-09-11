@@ -61,10 +61,9 @@ async function mark(d:string,time:string,s:MaterialRulerRunSummary){await db.run
  ['__day__',d,TZ,time,s.matchedCampaigns,s.enabledMaterials]);}
 export async function ensureMaterialRulerSheetTemplate(){const c=client(['https://www.googleapis.com/auth/spreadsheets']),id=sheetId();
  const book=await c.spreadsheets.get({spreadsheetId:id});const exists=book.data.sheets?.some(s=>s.properties?.title===SHEET);
- let legacy=false;if(exists){const old=await c.spreadsheets.values.get({spreadsheetId:id,range:`${SHEET}!A1:H1`});legacy=String(old.data.values?.[0]?.[2]||'')==='timezone';}
  if(!exists)await c.spreadsheets.batchUpdate({spreadsheetId:id,requestBody:{requests:[{addSheet:{properties:{title:SHEET}}}]}});
  await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A1:H1`,valueInputOption:'RAW',requestBody:{values:HEADERS}});
- if(!exists||legacy){await c.spreadsheets.values.clear({spreadsheetId:id,range:`${SHEET}!A2:H`});await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A2:H3`,valueInputOption:'RAW',requestBody:{values:DEMO}});}
+ if(!exists)await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A2:H3`,valueInputOption:'RAW',requestBody:{values:DEMO}});
  return {created:!exists};}
 async function rules(){await ensureMaterialRulerSheetTemplate();const c=client(['https://www.googleapis.com/auth/spreadsheets.readonly']);
  const r=await c.spreadsheets.values.get({spreadsheetId:sheetId(),range:`${SHEET}!A:H`});return parseRules(r.data.values||[]);}
