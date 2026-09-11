@@ -2,6 +2,7 @@ import {
   checkAndSendLevel2Alerts,
   checkAndSendLevel3Alerts,
 } from '../alerts/index.js';
+import { checkAndRunDailyMaterialRuler } from '../materials/daily-ruler.js';
 import { checkAndSendCampaignMaterialAlerts } from '../materials/rule-engine.js';
 import {
   getRuntimeSettingsSnapshot,
@@ -197,7 +198,10 @@ async function runScheduledCheck(): Promise<void> {
   await runLevelJob(
     'level1',
     'Check campaign notifications and material rules',
-    async () => checkAndSendCampaignMaterialAlerts(botInstance!)
+    async () => {
+      await checkAndRunDailyMaterialRuler(botInstance!);
+      await checkAndSendCampaignMaterialAlerts(botInstance!);
+    }
   );
 }
 
