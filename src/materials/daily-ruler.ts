@@ -67,7 +67,13 @@ export async function ensureMaterialRulerSheetTemplate(){const c=client(['https:
  const book=await c.spreadsheets.get({spreadsheetId:id});const exists=book.data.sheets?.some(s=>s.properties?.title===SHEET);
  if(!exists)await c.spreadsheets.batchUpdate({spreadsheetId:id,requestBody:{requests:[{addSheet:{properties:{title:SHEET}}}]}});
  await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A1:J1`,valueInputOption:'RAW',requestBody:{values:HEADERS}});
- if(!exists)await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A2:J2`,valueInputOption:'RAW',requestBody:{values:DEMO}});
+ const firstDataRow=await c.spreadsheets.values.get({spreadsheetId:id,range:`${SHEET}!A2:K2`});
+ const legacyId=t(firstDataRow.data.values?.[0]?.[0]);
+ const shouldReplaceDemo=!exists||legacyId==='daily-enable-all'||legacyId==='enable-good-cpa'||legacyId==='enable-converting';
+ if(shouldReplaceDemo){
+  await c.spreadsheets.values.clear({spreadsheetId:id,range:`${SHEET}!A2:K2`});
+  await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A2:J2`,valueInputOption:'RAW',requestBody:{values:DEMO}});
+ }
  return {created:!exists};}
 async function rules(){await ensureMaterialRulerSheetTemplate();const c=client(['https://www.googleapis.com/auth/spreadsheets.readonly']);
  const r=await c.spreadsheets.values.get({spreadsheetId:sheetId(),range:`${SHEET}!A:J`});return parseRules(r.data.values||[]);}
