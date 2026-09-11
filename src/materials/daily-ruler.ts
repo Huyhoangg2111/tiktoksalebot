@@ -7,13 +7,13 @@ import { getCampaignMaterialSnapshot, setMaterialOperationStatusBatch, type Camp
 
 const SHEET='MaterialRuler', TZ='Asia/Ho_Chi_Minh';
 const DEFAULT_SHEET='1f7bH43w8kv_iiqoy9X5TzSugDuWtsKrB3-Iq8IrxvAI';
-const HEADERS=[['rule_id','campaign_match','spend_operator','spend_threshold','cpa_operator','cpa_threshold','conversions_operator','conversions_threshold','period','enabled','note']];
+const HEADERS=[['rule_id','campaign_match','spend_operator','spend_threshold','cpa_operator','cpa_threshold','conversions_operator','conversions_threshold','enabled','note']];
 const DEMO=[
- ['enable-good-material','Mặt nạ mắt - ID','>=','1','<=','0.7','>=','3','today','false','Điền điều kiện cần dùng; để trống cặp operator/threshold không áp dụng'],
+ ['enable-good-material','Mặt nạ mắt - ID','>=','1','<=','0.7','>=','3','false','Điền điều kiện cần dùng; để trống cặp operator/threshold không áp dụng'],
 ];
 type Operator='>'|'>='|'<'|'<='|'=';
 interface Condition { operator:Operator; threshold:number; }
-interface Rule { id:string; campaignMatch?:string; spend?:Condition; cpa?:Condition; conversions?:Condition; period:string; }
+interface Rule { id:string; campaignMatch?:string; spend?:Condition; cpa?:Condition; conversions?:Condition; }
 export interface MaterialRulerRunSummary {
  manual:boolean; ruleCount:number; matchedCampaigns:number; matchedMaterials:number;
  enabledMaterials:number; failedGroups:number; periodLabels:string[];
@@ -32,10 +32,10 @@ function condition(opValue:unknown,thresholdValue:unknown):Condition|undefined {
 }
 function parseRules(rows:any[][]):Rule[]{const out:Rule[]=[];const ids=new Set<string>();
  rows.slice(1).forEach((r,i)=>{const id=t(r[0]),spend=condition(r[2],r[3]),cpa=condition(r[4],r[5]),conversions=condition(r[6],r[7]);
-  if(!id||ids.has(id)||!isEnabled(r[9]))return;
+  if(!id||ids.has(id)||!isEnabled(r[8]))return;
   const hasMalformedPair=[[r[2],r[3]],[r[4],r[5]],[r[6],r[7]]].some(([op,x])=>Boolean(t(op)||t(x))&&!condition(op,x));
   if(hasMalformedPair||(!spend&&!cpa&&!conversions)){console.warn(`[MaterialRuler] invalid conditions row ${i+2}`);return;}
-  ids.add(id);out.push({id,campaignMatch:t(r[1])||undefined,spend,cpa,conversions,period:t(r[8])||'today'});});
+  ids.add(id);out.push({id,campaignMatch:t(r[1])||undefined,spend,cpa,conversions});});
  return out;}
 function vnNow(){const p=new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts();
  const g=(x:Intl.DateTimeFormatPartTypes)=>p.find(y=>y.type===x)?.value||'';
@@ -66,18 +66,21 @@ async function mark(d:string,time:string,s:MaterialRulerRunSummary){await db.run
 export async function ensureMaterialRulerSheetTemplate(){const c=client(['https://www.googleapis.com/auth/spreadsheets']),id=sheetId();
  const book=await c.spreadsheets.get({spreadsheetId:id});const exists=book.data.sheets?.some(s=>s.properties?.title===SHEET);
  if(!exists)await c.spreadsheets.batchUpdate({spreadsheetId:id,requestBody:{requests:[{addSheet:{properties:{title:SHEET}}}]}});
- await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A1:K1`,valueInputOption:'RAW',requestBody:{values:HEADERS}});
- if(!exists)await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A2:K2`,valueInputOption:'RAW',requestBody:{values:DEMO}});
+ await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A1:J1`,valueInputOption:'RAW',requestBody:{values:HEADERS}});
+ if(!exists)await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A2:J2`,valueInputOption:'RAW',requestBody:{values:DEMO}});
  return {created:!exists};}
 async function rules(){await ensureMaterialRulerSheetTemplate();const c=client(['https://www.googleapis.com/auth/spreadsheets.readonly']);
- const r=await c.spreadsheets.values.get({spreadsheetId:sheetId(),range:`${SHEET}!A:K`});return parseRules(r.data.values||[]);}
+ const r=await c.spreadsheets.values.get({spreadsheetId:sheetId(),range:`${SHEET}!A:J`});return parseRules(r.data.values||[]);}
 async function enable(items:CampaignMaterialItem[]){const groups=new Map<string,CampaignMaterialItem[]>();
  items.filter(x=>x.status==='DISABLE').forEach(x=>groups.set(x.smartPlusAdId,[...(groups.get(x.smartPlusAdId)||[]),x]));
  let enabled=0,failed=0;for(const g of groups.values()){const x=g[0];try{const r=await setMaterialOperationStatusBatch(x.advertiserId,x.smartPlusAdId,g.map(y=>y.adMaterialId),'ENABLE');
  enabled+=r.verified.length;if(r.failed.length)failed++;}catch(e){failed++;console.error('[MaterialRuler] enable failed',e);}}return {enabled,failed};}
 async function execute(rs:Rule[],manual:boolean):Promise<MaterialRulerRunSummary>{const today=vnNow().dateKey,camps=await getCampaigns();
+ const configuredPeriod=await getRuntimeSettingText('material_ruler_period',RUNTIME_SETTING_DEFAULTS.materialRulerPeriod);
+ const p=period(configuredPeriod,today);if(!p)throw new Error(`Khoảng kiểm tra Material Ruler không hợp lệ: ${configuredPeriod}`);
  const s:MaterialRulerRunSummary={manual,ruleCount:rs.length,matchedCampaigns:0,matchedMaterials:0,enabledMaterials:0,failedGroups:0,periodLabels:[]};
- for(const r of rs){const p=period(r.period,today);if(!p){console.warn('[MaterialRuler] invalid period',r.id,r.period);continue;}s.periodLabels.push(p.label);
+ s.periodLabels.push(p.label);
+ for(const r of rs){
   for(const c of camps.filter(x=>campaignMatch(x,r.campaignMatch))){s.matchedCampaigns++;try{const snap=await getCampaignMaterialSnapshot(c.advertiser_id,c.id,c.name,p.start,p.end);
    const hit=snap.materials.filter(x=>matches(x,r));s.matchedMaterials+=hit.length;const z=await enable(hit);s.enabledMaterials+=z.enabled;s.failedGroups+=z.failed;
   }catch(e){s.failedGroups++;console.error('[MaterialRuler] campaign failed',c.id,e);}}}return s;}
