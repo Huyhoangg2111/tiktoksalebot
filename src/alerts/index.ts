@@ -1589,20 +1589,32 @@ function matchesAdRule(rule: AlertActionRule, ad: EnrichedSpentAd): boolean {
 export async function initializeAlertRules(): Promise<AlertInitializationResult> {
   await upsertBalanceAlertRule();
 
-  const sheetSetup = await ensureAlertsSheetTemplate();
-  const sheetRules = await getAlertRulesConfig();
-  await replaceActionRules(sheetRules);
+  const existing = await db.get<{ count: number }>('SELECT COUNT(*) AS count FROM alert_action_rules');
+  let actionRuleCount = Number(existing?.count || 0);
+  let sheetCreated = false;
+  let clearedLegacyDemo = false;
 
-  console.log(`Alert rules initialized from Alerts sheet (${sheetRules.length} action rules)`);
+  // Nhập Sheet đúng một lần khi SQLite chưa có rule. Sau đó dashboard là nguồn chính.
+  if (actionRuleCount === 0) {
+    const sheetSetup = await ensureAlertsSheetTemplate();
+    const sheetRules = await getAlertRulesConfig();
+    await replaceActionRules(sheetRules);
+    actionRuleCount = sheetRules.length;
+    sheetCreated = sheetSetup.created;
+    clearedLegacyDemo = sheetSetup.clearedLegacyDemo;
+    console.log(`Imported ${actionRuleCount} alert rules from Google Sheet into SQLite`);
+  } else {
+    console.log(`Alert rules loaded from SQLite (${actionRuleCount} action rules)`);
+  }
 
   return {
-    actionRuleCount: sheetRules.length,
+    actionRuleCount,
     balanceThreshold: await getRuntimeSettingNumber(
       'balance_threshold_usd',
       RUNTIME_SETTING_DEFAULTS.balanceThresholdUsd
     ),
-    sheetCreated: sheetSetup.created,
-    clearedLegacyDemo: sheetSetup.clearedLegacyDemo,
+    sheetCreated,
+    clearedLegacyDemo,
   };
 }
 
