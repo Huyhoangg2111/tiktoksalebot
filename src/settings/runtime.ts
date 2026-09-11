@@ -15,7 +15,10 @@ export const RUNTIME_SETTING_DEFAULTS = {
   sheetsConcurrency: 4,
   /** Concurrent TikTok advertiser report workers for /bc. */
   tiktokConcurrency: 5,
+  materialRulerRunTime: '00:05',
 } as const;
+
+export type RuntimeTextSettingKey = 'material_ruler_run_time';
 
 export type RuntimeSettingKey =
   | 'level1_interval_minutes'
@@ -109,6 +112,28 @@ export async function setRuntimeSettingNumber(
   );
 }
 
+export async function getRuntimeSettingText(
+  key: RuntimeTextSettingKey,
+  fallback: string
+): Promise<string> {
+  await ensureSettingsTable();
+  const row = await db.get<BotSettingRow>('SELECT value FROM bot_settings WHERE key = ?', [key]);
+  return String(row?.value || '').trim() || fallback;
+}
+
+export async function setRuntimeSettingText(
+  key: RuntimeTextSettingKey,
+  value: string
+): Promise<void> {
+  const normalized = String(value || '').trim();
+  if (key === 'material_ruler_run_time' && !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(normalized)) {
+    throw new Error('Giờ chạy phải theo định dạng HH:mm, ví dụ 00:05 hoặc 06:30.');
+  }
+  await ensureSettingsTable();
+  await db.run(`INSERT INTO bot_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`, [key, normalized]);
+}
+
 export async function getRuntimeSettingsSnapshot() {
   const [
     level1IntervalMinutes,
@@ -120,6 +145,7 @@ export async function getRuntimeSettingsSnapshot() {
     level3CpAdsThreshold,
     sheetsConcurrency,
     tiktokConcurrency,
+    materialRulerRunTime,
   ] = await Promise.all([
     getRuntimeSettingNumber('level1_interval_minutes', RUNTIME_SETTING_DEFAULTS.level1IntervalMinutes),
     getRuntimeSettingNumber('level2_interval_minutes', RUNTIME_SETTING_DEFAULTS.level2IntervalMinutes),
@@ -130,6 +156,7 @@ export async function getRuntimeSettingsSnapshot() {
     getRuntimeSettingNumber('level3_cp_ads_threshold', RUNTIME_SETTING_DEFAULTS.level3CpAdsThreshold),
     getRuntimeSettingNumber('sheets_concurrency', RUNTIME_SETTING_DEFAULTS.sheetsConcurrency),
     getRuntimeSettingNumber('tiktok_concurrency', RUNTIME_SETTING_DEFAULTS.tiktokConcurrency),
+    getRuntimeSettingText('material_ruler_run_time', RUNTIME_SETTING_DEFAULTS.materialRulerRunTime),
   ]);
 
   return {
@@ -142,5 +169,6 @@ export async function getRuntimeSettingsSnapshot() {
     level3CpAdsThreshold,
     sheetsConcurrency,
     tiktokConcurrency,
+    materialRulerRunTime,
   };
 }
