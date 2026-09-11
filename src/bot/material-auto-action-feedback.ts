@@ -55,6 +55,7 @@ interface LocalMaterialOperationRow {
 
 interface CampaignMaterialDisplaySnapshot {
   byCampaignId: Map<string, CampaignMaterialDisplayStatus>;
+  materialCountsByCampaignId: Map<string, { active: number; paused: number }>;
   campaignRows: SpentCampaignStatusRow[];
 }
 
@@ -224,6 +225,7 @@ async function getCampaignMaterialDisplaySnapshot(
     ])
   );
   const operationStatusesByCampaignId = new Map<string, Set<MaterialOperationStatus>>();
+  const materialCountsByCampaignId = new Map<string, { active: number; paused: number; seen: Set<string> }>();
 
   await Promise.all(advertiserIds.map(async advertiserId => {
     try {
@@ -268,6 +270,18 @@ async function getCampaignMaterialDisplaySnapshot(
 
           if (effectiveStatus === 'ENABLE' || effectiveStatus === 'DISABLE') {
             statuses.add(effectiveStatus);
+            const counts = materialCountsByCampaignId.get(campaignId) || {
+              active: 0,
+              paused: 0,
+              seen: new Set<string>(),
+            };
+            const materialKey = `${smartPlusAdId}:${adMaterialId}`;
+            if (!counts.seen.has(materialKey)) {
+              counts.seen.add(materialKey);
+              if (effectiveStatus === 'ENABLE') counts.active += 1;
+              if (effectiveStatus === 'DISABLE') counts.paused += 1;
+            }
+            materialCountsByCampaignId.set(campaignId, counts);
           }
         }
 
@@ -291,7 +305,17 @@ async function getCampaignMaterialDisplaySnapshot(
     }
   }
 
-  const snapshot = { byCampaignId, campaignRows };
+  const normalizedMaterialCounts = new Map(
+    [...materialCountsByCampaignId.entries()].map(([campaignId, counts]) => [
+      campaignId,
+      { active: counts.active, paused: counts.paused },
+    ])
+  );
+  const snapshot = {
+    byCampaignId,
+    materialCountsByCampaignId: normalizedMaterialCounts,
+    campaignRows,
+  };
   if (!sourceCampaigns) {
     campaignMaterialDisplayCache = {
       expiresAt: Date.now() + CAMPAIGN_MATERIAL_DISPLAY_CACHE_TTL_MS,
@@ -307,13 +331,18 @@ export async function applyMaterialDisplayStatusesToCampaigns(
   if (campaigns.length === 0) return campaigns;
 
   const snapshot = await getCampaignMaterialDisplaySnapshot(true, campaigns);
-  return campaigns.map(campaign => ({
-    ...campaign,
-    ad_status: campaign.status === 'deleted'
-      ? undefined
-      : snapshot.byCampaignId.get(campaign.campaign_id) || campaign.status,
-    raw_ad_status: undefined,
-  }));
+  return campaigns.map(campaign => {
+    const materialCounts = snapshot.materialCountsByCampaignId.get(campaign.campaign_id);
+    return {
+      ...campaign,
+      ad_status: campaign.status === 'deleted'
+        ? undefined
+        : snapshot.byCampaignId.get(campaign.campaign_id) || campaign.status,
+      raw_ad_status: undefined,
+      material_active_count: materialCounts?.active || 0,
+      material_paused_count: materialCounts?.paused || 0,
+    };
+  });
 }
 
 function getCampaignStatusIcon(status: CampaignDisplayStatus): string {
