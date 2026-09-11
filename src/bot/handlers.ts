@@ -1090,21 +1090,20 @@ function formatCampaignSummary(summary: ReturnType<typeof summarizeCampaigns>, i
   return `${prefix}${formatCurrency(summary.spend)} - ${summary.clicks.toLocaleString()}/${formatPercent(summary.ctr)} - ${summary.conversions.toLocaleString()} - ${formatCurrency(summary.cpa)}`;
 }
 
-function formatCampaignStatusSummary(campaigns: Array<{ status: CampaignMessageStatus; ad_status?: CampaignVisualStatus }>): string {
-  const statusCounts = campaigns.reduce(
-    (counts, campaign) => {
-      const visualStatus = getCampaignVisualStatus(campaign);
-      if (visualStatus === 'mixed') {
-        counts.mixed += 1;
-      } else {
-        counts[visualStatus] += 1;
-      }
-      return counts;
-    },
-    { active: 0, paused: 0, deleted: 0, mixed: 0 } satisfies Record<CampaignVisualStatus, number>
+function formatCampaignStatusSummary(campaigns: Array<{
+  material_active_count?: number;
+  material_paused_count?: number;
+}>): string {
+  const activeMaterials = campaigns.reduce(
+    (sum, campaign) => sum + Number(campaign.material_active_count || 0),
+    0
+  );
+  const pausedMaterials = campaigns.reduce(
+    (sum, campaign) => sum + Number(campaign.material_paused_count || 0),
+    0
   );
 
-  return `Tr\u1ea1ng th\u00e1i QC: \u{1F7E2} Active ${statusCounts.active} \u00b7 \u{1F7E1} Pause ${statusCounts.paused} \u00b7 \u{1F7E0} Mix ${statusCounts.mixed} \u00b7 \u26AA Deleted ${statusCounts.deleted}`;
+  return `Material: \u{1F7E2} Active ${activeMaterials.toLocaleString('vi-VN')} \u00b7 \u{1F7E1} Pause ${pausedMaterials.toLocaleString('vi-VN')}`;
 }
 
 function extractCampaignProductMarket(campaignName: string): { productName: string; marketCode: string } {
