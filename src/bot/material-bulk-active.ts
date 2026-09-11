@@ -10,7 +10,7 @@ const MAX_LOOKBACK_DAYS = 90;
 const SCAN_CONCURRENCY = 3;
 const PROGRESS_EDIT_INTERVAL_MS = 1_500;
 
-export interface MaterialActiveArgs {
+interface MaterialActiveArgs {
   days: number;
   minConversions: number;
   maxCpa: number;
@@ -196,13 +196,13 @@ async function safeEditProgress(
   }
 }
 
-async function handleMaterialActive(ctx: Context, scheduledArgs?: MaterialActiveArgs): Promise<void> {
+async function handleMaterialActive(ctx: Context): Promise<void> {
   if (!isAdmin(ctx)) {
     await ctx.reply('❌ Chỉ admin mới có thể thực hiện hành động này.');
     return;
   }
 
-  const args = scheduledArgs || parseArgs(ctx);
+  const args = parseArgs(ctx);
   if (!args) {
     await ctx.reply([
       '<b>Tự động bật material đạt điều kiện</b>',
@@ -377,25 +377,6 @@ async function handleMaterialActive(ctx: Context, scheduledArgs?: MaterialActive
   } finally {
     materialActiveRunning = false;
   }
-}
-
-export async function runScheduledMaterialActivation(
-  bot: Telegraf,
-  args: MaterialActiveArgs
-): Promise<void> {
-  const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
-  if (!adminChatId) {
-    throw new Error('Thiếu ADMIN_CHAT_ID để gửi kết quả ruler ngày.');
-  }
-
-  const scheduledContext = {
-    chat: { id: Number(adminChatId), type: 'private' },
-    telegram: bot.telegram,
-    reply: (text: string, extra?: unknown) =>
-      bot.telegram.sendMessage(adminChatId, text, extra as any),
-  } as unknown as Context;
-
-  await handleMaterialActive(scheduledContext, args);
 }
 
 export function setupMaterialBulkActiveHandlers(bot: Telegraf): void {
