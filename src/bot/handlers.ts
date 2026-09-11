@@ -1090,7 +1090,7 @@ function formatCampaignSummary(summary: ReturnType<typeof summarizeCampaigns>, i
   return `${prefix}${formatCurrency(summary.spend)} - ${summary.clicks.toLocaleString()}/${formatPercent(summary.ctr)} - ${summary.conversions.toLocaleString()} - ${formatCurrency(summary.cpa)}`;
 }
 
-function formatCampaignStatusSummary(campaigns: Array<{
+function formatCampaignStatusSummary(campaigns: Array<TikTokSpentCampaign & {
   material_active_count?: number;
   material_paused_count?: number;
 }>): string {
