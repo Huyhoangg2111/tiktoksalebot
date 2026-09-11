@@ -273,8 +273,12 @@ function getCampaignStatusIcon(campaign: { status?: CampaignMessageStatus; ad_st
     return '\u{1F7E2}';
   }
 
-  if (status === 'paused' || status === 'mixed') {
+  if (status === 'paused') {
     return '\u{1F7E1}';
+  }
+
+  if (status === 'mixed') {
+    return '\u{1F7E0}';
   }
 
   if (status === 'deleted') {
@@ -1100,7 +1104,7 @@ function formatCampaignStatusSummary(campaigns: Array<{ status: CampaignMessageS
     { active: 0, paused: 0, deleted: 0, mixed: 0 } satisfies Record<CampaignVisualStatus, number>
   );
 
-  return `Tr\u1ea1ng th\u00e1i QC: \u{1F7E2} Active ${statusCounts.active} \u00b7 \u{1F7E1} Pause ${statusCounts.paused} \u00b7 Mix ${statusCounts.mixed} \u00b7 \u26AA Deleted ${statusCounts.deleted}`;
+  return `Tr\u1ea1ng th\u00e1i QC: \u{1F7E2} Active ${statusCounts.active} \u00b7 \u{1F7E1} Pause ${statusCounts.paused} \u00b7 \u{1F7E0} Mix ${statusCounts.mixed} \u00b7 \u26AA Deleted ${statusCounts.deleted}`;
 }
 
 function extractCampaignProductMarket(campaignName: string): { productName: string; marketCode: string } {
