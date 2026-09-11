@@ -356,7 +356,8 @@ interface MaterialReportRow {
 async function fetchMaterialReportForAd(
   advertiserId: string,
   smartPlusAdId: string,
-  dateKey: string
+  startDate: string,
+  endDate = startDate
 ): Promise<MaterialReportRow[]> {
   const accessToken = await getReadToken();
   const request = async () => axios.get(`${TIKTOK_API_BASE}/smart_plus/material_report/breakdown/`, {
@@ -374,8 +375,8 @@ async function fetchMaterialReportForAd(
         'video_play_actions',
       ]),
       filtering: JSON.stringify({ smart_plus_ad_ids: [smartPlusAdId] }),
-      start_date: dateKey,
-      end_date: dateKey,
+      start_date: startDate,
+      end_date: endDate,
       page: 1,
       page_size: SMART_PLUS_PAGE_SIZE,
     },
@@ -427,7 +428,8 @@ export async function getCampaignMaterialSnapshot(
   advertiserId: string,
   campaignId: string,
   campaignName?: string,
-  dateKey = getVietnamDateKey()
+  dateKey = getVietnamDateKey(),
+  endDate = dateKey
 ): Promise<CampaignMaterialSnapshot> {
   const ads = await getCampaignSmartPlusAds(advertiserId, campaignId);
   const materials: CampaignMaterialItem[] = [];
@@ -437,7 +439,7 @@ export async function getCampaignMaterialSnapshot(
     const smartPlusAdId = String(ad?.smart_plus_ad_id || '');
     if (!smartPlusAdId) continue;
 
-    const reportRows = await fetchMaterialReportForAd(advertiserId, smartPlusAdId, dateKey);
+    const reportRows = await fetchMaterialReportForAd(advertiserId, smartPlusAdId, dateKey, endDate);
     const reportByTikTokItemId = new Map(reportRows.map(row => [row.mainMaterialId, row.metrics]));
     const creatives = Array.isArray(ad?.creative_list) ? ad.creative_list : [];
     const resolvedStatusByMaterialId = await reconcileCreativeStatuses(
