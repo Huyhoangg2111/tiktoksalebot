@@ -250,6 +250,33 @@ async function readDashboardMaterialRules(): Promise<MaterialRule[]> {
   });
 }
 
+async function seedDashboardMaterialRules(rules: MaterialRule[]): Promise<void> {
+  const existing = await db.get<{ count: number }>(
+    'SELECT COUNT(*) AS count FROM admin_config_rows WHERE section = ?',
+    ['material_ruler']
+  );
+  if (Number(existing?.count || 0) > 0 || rules.length === 0) return;
+  for (let index = 0; index < rules.length; index += 1) {
+    const rule = rules[index];
+    await db.run(
+      'INSERT INTO admin_config_rows(section, data_json, position) VALUES (?, ?, ?)',
+      ['material_ruler', JSON.stringify({
+        name_contains: rule.nameContains || '',
+        metric: rule.metric,
+        metric_operator: rule.metricOperator,
+        metric_threshold: String(rule.metricThreshold),
+        metric_min_threshold: rule.metricMinThreshold == null ? '' : String(rule.metricMinThreshold),
+        conversions_operator: rule.conversionsOperator,
+        conversions_threshold: String(rule.conversionsThreshold),
+        action: rule.action,
+        enabled: true,
+        note: rule.note || '',
+      }), index]
+    );
+  }
+  console.log(`[Level1Rules] Imported ${rules.length} material rules from Alerts into dashboard SQLite`);
+}
+
 async function getLevel1RuleSnapshot(): Promise<Level1RuleSnapshot> {
   try {
     const dashboardMaterialRules = await readDashboardMaterialRules();
@@ -268,6 +295,7 @@ async function getLevel1RuleSnapshot(): Promise<Level1RuleSnapshot> {
       range: 'Alerts!A:O',
     });
     const snapshot = parseLevel1RuleRows(response.data.values || []);
+    await seedDashboardMaterialRules(snapshot.materialRules);
     lastKnownGoodRuleSnapshot = snapshot;
     return snapshot;
   } catch (error) {
