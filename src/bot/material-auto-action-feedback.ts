@@ -177,19 +177,33 @@ function materialStateKey(advertiserId: string, smartPlusAdId: string, adMateria
   return `${advertiserId}:${smartPlusAdId}:${adMaterialId}`;
 }
 
-async function getCampaignMaterialDisplaySnapshot(forceRefresh = false): Promise<CampaignMaterialDisplaySnapshot> {
+async function getCampaignMaterialDisplaySnapshot(
+  forceRefresh = false,
+  sourceCampaigns?: TikTokSpentCampaign[]
+): Promise<CampaignMaterialDisplaySnapshot> {
   const now = Date.now();
-  if (!forceRefresh && campaignMaterialDisplayCache?.expiresAt && campaignMaterialDisplayCache.expiresAt > now) {
+  if (
+    !sourceCampaigns &&
+    !forceRefresh &&
+    campaignMaterialDisplayCache?.expiresAt &&
+    campaignMaterialDisplayCache.expiresAt > now
+  ) {
     return campaignMaterialDisplayCache.snapshot;
   }
 
   const dateKey = getVietnamDateKey();
-  const campaignRows = await db.all<SpentCampaignStatusRow>(
-    `SELECT advertiser_id, campaign_id, status
-     FROM spent_campaign_cache
-     WHERE date_key = ?`,
-    [dateKey]
-  );
+  const campaignRows: SpentCampaignStatusRow[] = sourceCampaigns
+    ? sourceCampaigns.map(campaign => ({
+      advertiser_id: campaign.advertiser_id,
+      campaign_id: campaign.campaign_id,
+      status: campaign.status,
+    }))
+    : await db.all<SpentCampaignStatusRow>(
+      `SELECT advertiser_id, campaign_id, status
+       FROM spent_campaign_cache
+       WHERE date_key = ?`,
+      [dateKey]
+    );
   const campaignIds = new Set(campaignRows.map(row => String(row.campaign_id || '')).filter(Boolean));
   const advertiserIds = [...new Set(campaignRows.map(row => String(row.advertiser_id || '')).filter(Boolean))];
 
@@ -278,11 +292,28 @@ async function getCampaignMaterialDisplaySnapshot(forceRefresh = false): Promise
   }
 
   const snapshot = { byCampaignId, campaignRows };
-  campaignMaterialDisplayCache = {
-    expiresAt: Date.now() + CAMPAIGN_MATERIAL_DISPLAY_CACHE_TTL_MS,
-    snapshot,
-  };
+  if (!sourceCampaigns) {
+    campaignMaterialDisplayCache = {
+      expiresAt: Date.now() + CAMPAIGN_MATERIAL_DISPLAY_CACHE_TTL_MS,
+      snapshot,
+    };
+  }
   return snapshot;
+}
+
+export async function applyMaterialDisplayStatusesToCampaigns(
+  campaigns: TikTokSpentCampaign[]
+): Promise<TikTokSpentCampaign[]> {
+  if (campaigns.length === 0) return campaigns;
+
+  const snapshot = await getCampaignMaterialDisplaySnapshot(true, campaigns);
+  return campaigns.map(campaign => ({
+    ...campaign,
+    ad_status: campaign.status === 'deleted'
+      ? undefined
+      : snapshot.byCampaignId.get(campaign.campaign_id) || campaign.status,
+    raw_ad_status: undefined,
+  }));
 }
 
 function getCampaignStatusIcon(status: CampaignDisplayStatus): string {
