@@ -38,7 +38,7 @@ import {
   toggleAdvertiserTracking,
   type AdvertiserTrackingState,
 } from '../accounts/tracking.js';
-import { sendBcAllMenu, sendBcMenu, setupBcSalesHandlers } from '../sales/bc-command.js';
+import { sendBcMenu, setupBcSalesHandlers } from '../sales/bc-command.js';
 import { restartScheduler } from '../scheduler/index.js';
 import {
   getRuntimeSettingsSnapshot,
@@ -55,12 +55,11 @@ type CampaignOperationStatus = 'ENABLE' | 'DISABLE';
 const COMMAND_MENU_DEFAULT = [
   { command: 'start', description: '🚀 Mở hướng dẫn nhanh' },
   { command: 'balance', description: '💰 Kiểm tra số dư TKQC' },
+  { command: 'bc', description: '🧾 Báo cáo doanh số MKT' },
   { command: 'campaigns', description: '📊 Chiến dịch có chi tiêu hôm nay' },
   { command: 'campid', description: '🔎 Chi tiết một chiến dịch' },
   { command: 'campactive', description: '🟢 Campaign active theo sản phẩm' },
   { command: 'matactive', description: '🎬 Bật material đạt điều kiện' },
-  { command: 'bc', description: '🧾 Báo cáo doanh số MKT' },
-  { command: 'bcall', description: '📦 Báo cáo doanh số all MKT' },
   { command: 'settings', description: '⚙️ Cài đặt bot' },
 ] as const;
 
