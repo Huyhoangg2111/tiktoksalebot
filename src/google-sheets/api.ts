@@ -1,5 +1,6 @@
 import * as googleSheets from '@googleapis/sheets';
 import type { sheets_v4 } from '@googleapis/sheets';
+import { db } from '../db/index.js';
 import {
   getRuntimeSettingNumber,
   RUNTIME_SETTING_DEFAULTS,
@@ -908,6 +909,16 @@ function findPageMapping(pageMap: PageMapping[], channelLink: string, pageName?:
  * Get TikTok Business Center ID from the "BC" tab.
  */
 export async function getBusinessCenterId(): Promise<string | undefined> {
+  const local = await db.get<{ data_json: string }>(
+    'SELECT data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id LIMIT 1',
+    ['tiktok']
+  ).catch(() => undefined);
+  if (local?.data_json) {
+    const value = JSON.parse(local.data_json);
+    const businessCenterId = String(value.business_center_id || '').trim();
+    if (businessCenterId) return businessCenterId;
+  }
+
   const sheetsClient = createSheetsClient(['https://www.googleapis.com/auth/spreadsheets.readonly']);
 
   const response = await sheetsClient.spreadsheets.values.get({
@@ -951,6 +962,17 @@ export async function getAlertRulesConfig(): Promise<AlertActionRuleSheetRow[]> 
 }
 
 export async function getTikTokTokenConfig(): Promise<TikTokTokenConfig> {
+  const local = await db.get<{ data_json: string }>(
+    'SELECT data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id LIMIT 1',
+    ['tiktok']
+  ).catch(() => undefined);
+  if (local?.data_json) {
+    const value = JSON.parse(local.data_json);
+    if (value.read_token || value.write_token) {
+      return { readAccessToken: String(value.read_token || ''), writeAccessToken: String(value.write_token || '') };
+    }
+  }
+
   const sheetsClient = createSheetsClient(['https://www.googleapis.com/auth/spreadsheets.readonly']);
 
   try {
