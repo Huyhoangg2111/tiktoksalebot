@@ -78,7 +78,10 @@ export async function ensureMaterialRulerSheetTemplate(){const c=client(['https:
   if(!exists||values.length<2)await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A2:I2`,valueInputOption:'RAW',requestBody:{values:DEMO}});
  }
  return {created:!exists};}
-async function rules(){await ensureMaterialRulerSheetTemplate();const c=client(['https://www.googleapis.com/auth/spreadsheets.readonly']);
+async function rules(){
+ const local=await db.all<{data_json:string}>('SELECT data_json FROM admin_config_rows WHERE section=? ORDER BY position,id',['material_ruler']).catch(()=>[]);
+ if(local.length){const rows=local.map(x=>{const r=JSON.parse(x.data_json);return [r.campaign_match,r.spend_operator,r.spend_threshold,r.cpa_operator,r.cpa_threshold,r.conversions_operator,r.conversions_threshold,r.enabled,r.note];});return parseRules([HEADERS[0],...rows]);}
+ await ensureMaterialRulerSheetTemplate();const c=client(['https://www.googleapis.com/auth/spreadsheets.readonly']);
  const r=await c.spreadsheets.values.get({spreadsheetId:sheetId(),range:`${SHEET}!A:I`});return parseRules(r.data.values||[]);}
 async function enable(items:CampaignMaterialItem[]){const groups=new Map<string,CampaignMaterialItem[]>();
  items.filter(x=>x.status==='DISABLE').forEach(x=>groups.set(x.smartPlusAdId,[...(groups.get(x.smartPlusAdId)||[]),x]));
