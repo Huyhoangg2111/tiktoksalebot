@@ -11,6 +11,7 @@ import { setupCampaignAlertUiCompatibility } from './bot/campaign-alert-ui-compa
 import { setupMaterialAutoActionFeedback } from './bot/material-auto-action-feedback.js';
 import { setupCampaignDetailHandlers } from './bot/campaign-detail.js';
 import { initializeAlertRules } from './alerts/index.js';
+import { ensureMaterialRulerSheetTemplate } from './materials/daily-ruler.js';
 import { startScheduler } from './scheduler/index.js';
 import { startServer, type SignerServerRuntime } from './playwright-signer/server.js';
 import { configureHttpResilience } from './runtime/http-resilience.js';
@@ -63,6 +64,17 @@ async function main() {
   // Connect to database
   await connectDB();
   await initializeAlertRules();
+
+  try {
+    const materialRulerSheet = await ensureMaterialRulerSheetTemplate();
+    console.log(
+      materialRulerSheet.created
+        ? 'Created Google Sheet tab MaterialRuler'
+        : 'Google Sheet tab MaterialRuler is ready'
+    );
+  } catch (error) {
+    console.error('[MaterialRuler] Cannot initialize Google Sheet tab at startup:', error);
+  }
 
   // Initialize Telegram bot
   bot = new Telegraf(botToken);
