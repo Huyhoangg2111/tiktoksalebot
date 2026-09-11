@@ -45,6 +45,7 @@ import {
   setRuntimeSettingNumber,
   type RuntimeSettingKey,
 } from '../settings/runtime.js';
+import { applyMaterialDisplayStatusesToCampaigns } from './material-auto-action-feedback.js';
 
 type ReplyOptions = Parameters<Context['reply']>[1];
 type CampaignMessageStatus = 'active' | 'paused' | 'deleted';
@@ -260,9 +261,9 @@ function getCampaignShortName(campaignName: string): string {
   return campaignName.trim();
 }
 
-/** Chỉ hiển thị / thao tác theo status CẤP CAMPAIGN. */
+/** Màu hiển thị campaign được tổng hợp từ trạng thái material Smart+. */
 function getCampaignVisualStatus(campaign: { status?: CampaignMessageStatus; ad_status?: CampaignVisualStatus }): CampaignVisualStatus {
-  return campaign.status || 'deleted';
+  return campaign.ad_status || campaign.status || 'deleted';
 }
 
 function getCampaignStatusIcon(campaign: { status?: CampaignMessageStatus; ad_status?: CampaignVisualStatus }): string {
@@ -685,7 +686,7 @@ function summarizeAdStatusesForCampaign(ads: TikTokSpentAd[]): CampaignVisualSta
   return 'mixed';
 }
 
-/** Không còn enrich status từ ads — giữ status campaign từ report/API. */
+/** Tổng hợp trạng thái hiển thị từ material: all active, all paused hoặc mixed. */
 async function applyTodayAdStatusesToCampaigns(
   campaigns: TikTokSpentCampaign[],
   _options: {
@@ -693,11 +694,7 @@ async function applyTodayAdStatusesToCampaigns(
     advertiserAccounts?: Array<{ advertiserId: string; advertiserName?: string; mktCode?: string }>;
   } = {}
 ): Promise<TikTokSpentCampaign[]> {
-  return campaigns.map(campaign => ({
-    ...campaign,
-    ad_status: undefined,
-    raw_ad_status: undefined,
-  }));
+  return applyMaterialDisplayStatusesToCampaigns(campaigns);
 }
 
 async function getCampaignsForCampaignsList(forceRefresh = false): Promise<TikTokSpentCampaign[]> {
