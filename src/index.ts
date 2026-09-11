@@ -11,10 +11,6 @@ import { setupCampaignAlertUiCompatibility } from './bot/campaign-alert-ui-compa
 import { setupMaterialAutoActionFeedback } from './bot/material-auto-action-feedback.js';
 import { setupCampaignDetailHandlers } from './bot/campaign-detail.js';
 import { setupMaterialBulkActiveHandlers } from './bot/material-bulk-active.js';
-import {
-  setupDailyMaterialRulerHandlers,
-  startDailyMaterialRulerScheduler,
-} from './bot/daily-material-ruler.js';
 import { initializeAlertRules } from './alerts/index.js';
 import { startScheduler } from './scheduler/index.js';
 import { startServer, type SignerServerRuntime } from './playwright-signer/server.js';
@@ -102,14 +98,12 @@ async function main() {
   // Commands in standalone modules must be registered before the legacy catch-all text handler.
   setupCampaignDetailHandlers(bot);
   setupMaterialBulkActiveHandlers(bot);
-  setupDailyMaterialRulerHandlers(bot);
 
   // Setup the rest of the bot command handlers and text fallbacks.
   setupBotHandlers(bot);
 
   // Start the scheduler before awaiting launch so periodic checks are always registered.
   startScheduler(bot);
-  startDailyMaterialRulerScheduler(bot);
 
   // Start the bot
   await bot.launch();
