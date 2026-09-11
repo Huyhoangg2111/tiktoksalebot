@@ -1422,6 +1422,32 @@ async function getConfigData(
     console.warn('Could not fetch spMap from SpMap tab');
   }
   
+  // Nhập cấu hình cũ vào SQLite một lần để dashboard trở thành nguồn chính.
+  if (adminSources.length === 0 && sources.length > 0) {
+    for (const sheetId of sources) {
+      await db.run('INSERT INTO admin_config_rows(section,data_json,position) VALUES(?,?,?)', [
+        'sources', JSON.stringify({ name: sheetId, sheet_id: sheetId, enabled: 1, note: 'Nhập từ Google Sheets' }), 0
+      ]).catch(() => undefined);
+    }
+  }
+  if (adminPages.length === 0 && pageMap.length > 0) {
+    for (const [position, row] of pageMap.entries()) {
+      await db.run('INSERT INTO admin_config_rows(section,data_json,position) VALUES(?,?,?)', [
+        'pages', JSON.stringify({ page_handle: row.pageHandle, market_code: row.marketCode, page_name: row.pageName, page_url: row.pageUrl, enabled: 1 }), position
+      ]).catch(() => undefined);
+    }
+  }
+  if (adminProducts.length === 0 && spMap.length > 0) {
+    for (const [position, row] of spMap.entries()) {
+      await db.run('INSERT INTO admin_config_rows(section,data_json,position) VALUES(?,?,?)', [
+        'products', JSON.stringify({ material_name: row.materialName || '', variant_name: row.variantName, campaign_key: row.shortName, enabled: 1 }), position
+      ]).catch(() => undefined);
+    }
+  }
+  if (!adminSettings.some(row => row.key === 'exchange_rate')) {
+    await db.run('INSERT OR IGNORE INTO bot_settings(key,value) VALUES(?,?)', ['exchange_rate', String(exchangeRate)]).catch(() => undefined);
+  }
+
   return {
     sources,
     exchangeRate,
