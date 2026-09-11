@@ -58,8 +58,6 @@ const COMMAND_MENU_DEFAULT = [
   { command: 'campid', description: '🔎 Chi tiết một chiến dịch' },
   { command: 'campactive', description: '🟢 Campaign active theo sản phẩm' },
   { command: 'matactive', description: '🎬 Bật material đạt điều kiện' },
-  { command: 'campmkt', description: '📈 Chiến dịch theo MKT và thời gian' },
-  { command: 'tkqc', description: '📋 Chiến dịch theo TKQC' },
   { command: 'bc', description: '🧾 Báo cáo doanh số MKT' },
   { command: 'bcall', description: '📦 Báo cáo doanh số all MKT' },
   { command: 'settings', description: '⚙️ Cài đặt bot' },
@@ -2718,8 +2716,6 @@ export function setupBotHandlers(bot: Telegraf) {
 
   bot.command('balance', (ctx) => void handleBalanceRequest(ctx));
   bot.command('campactive', (ctx) => void handleActiveCampaignProductsRequest(ctx));
-  bot.command('campmkt', (ctx) => void handleCampaignMktReportRequest(ctx));
-  bot.command('tkqc', (ctx) => void handleCampaignAccountReportRequest(ctx));
   bot.command('settings', (ctx) => void handleSettingsRequest(ctx));
   setupBcSalesHandlers(bot);
 
@@ -2870,95 +2866,6 @@ export function setupBotHandlers(bot: Telegraf) {
       await ctx.answerCbQuery('Có lỗi khi cập nhật trạng thái theo dõi.');
     }
 
-  });
-
-  bot.action(/^cmp:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/, async (ctx) => {
-    const period = buildCampaignAccountReportPeriod(ctx.match[1], ctx.match[2]);
-
-    await ctx.answerCbQuery();
-
-    try {
-      await editCampaignMktSelector(ctx, period);
-    } catch (error) {
-      console.error('Error showing campaign MKT selector:', error);
-      await ctx.reply('Có lỗi khi tải danh sách MKT.');
-    }
-  });
-
-  bot.action(/^cmr:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2}):(.+)$/, async (ctx) => {
-    const period = buildCampaignAccountReportPeriod(ctx.match[1], ctx.match[2]);
-    const mktCode = decodeCallbackValue(ctx.match[3]);
-
-    await ctx.answerCbQuery('Đang lấy dữ liệu...');
-
-    try {
-      await sendCampaignMktReport(ctx, period, mktCode);
-    } catch (error) {
-      console.error('Error fetching campaign MKT report:', error);
-
-      try {
-        await ctx.editMessageText(`Lấy dữ liệu thất bại: ${getErrorMessage(error)}`);
-      } catch (editError) {
-        console.error('Error editing failed campaign MKT report message:', editError);
-        await ctx.reply(`Lấy dữ liệu thất bại: ${getErrorMessage(error)}`);
-      }
-    }
-  });
-
-  bot.action(/^cmpg:(\d+)$/, async (ctx) => {
-    const requestedPage = Number(ctx.match[1] || 0);
-
-    await ctx.answerCbQuery();
-
-    try {
-      const message = ctx.callbackQuery.message;
-
-      if (!message?.chat?.id || !message.message_id) {
-        return;
-      }
-
-      await editCampaignMktReportMessage(
-        ctx.telegram,
-        message.chat.id,
-        message.message_id,
-        requestedPage
-      );
-    } catch (error) {
-      console.error('Error editing campaign MKT page:', error);
-    }
-  });
-
-  bot.action(/^cap:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/, async (ctx) => {
-    const period = buildCampaignAccountReportPeriod(ctx.match[1], ctx.match[2]);
-
-    await ctx.answerCbQuery();
-
-    try {
-      await editCampaignAccountSelector(ctx, period);
-    } catch (error) {
-      console.error('Error showing campaign account selector:', error);
-      await ctx.reply('Có lỗi khi tải danh sách TKQC.');
-    }
-  });
-
-  bot.action(/^car:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2}):([^:]+)$/, async (ctx) => {
-    const period = buildCampaignAccountReportPeriod(ctx.match[1], ctx.match[2]);
-    const advertiserId = ctx.match[3];
-
-    await ctx.answerCbQuery('Đang lấy dữ liệu...');
-
-    try {
-      await sendCampaignAccountReport(ctx, period, advertiserId);
-    } catch (error) {
-      console.error('Error fetching campaign account report:', error);
-
-      try {
-        await ctx.editMessageText(`❌ Lấy dữ liệu thất bại: ${getErrorMessage(error)}`);
-      } catch (editError) {
-        console.error('Error editing failed campaign account report message:', editError);
-        await ctx.reply(`❌ Lấy dữ liệu thất bại: ${getErrorMessage(error)}`);
-      }
-    }
   });
 
   bot.action(/^campaigns_page:(\d+)$/, async (ctx) => {
