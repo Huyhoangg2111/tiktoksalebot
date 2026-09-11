@@ -1293,18 +1293,34 @@ async function getConfigData(
   sheetsClient: SheetsClient,
   options: MktScopeOptions = {}
 ): Promise<ConfigData> {
-  // Get sources from "Sources" tab
-  const sourcesResponse = await sheetsClient.spreadsheets.values.get({
-    spreadsheetId: configSheetId,
-    range: 'Sources!A:E',
-  });
+  const readAdminRows = async (section: string): Promise<Record<string, any>[]> => {
+    const rows = await db.all<{ data_json: string }>(
+      'SELECT data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id',
+      [section]
+    ).catch(() => []);
+    return rows.map(row => JSON.parse(row.data_json));
+  };
+  const [adminSources, adminPages, adminProducts, adminSettings] = await Promise.all([
+    readAdminRows('sources'), readAdminRows('pages'), readAdminRows('products'), readAdminRows('settings')
+  ]);
 
-  const sources = getSourceSpreadsheetIds(sourcesResponse.data.values || []);
+  // Get sources from local admin database first, then legacy Sources tab
+  let sources = adminSources
+    .filter(row => parseEnabled(row.enabled))
+    .map(row => extractGoogleSpreadsheetId(row.sheet_id))
+    .filter((value): value is string => Boolean(value));
+  if (sources.length === 0) {
+    const sourcesResponse = await sheetsClient.spreadsheets.values.get({
+      spreadsheetId: configSheetId,
+      range: 'Sources!A:E',
+    });
+    sources = getSourceSpreadsheetIds(sourcesResponse.data.values || []);
+  }
   
   // Get exchange rate from "Settings" tab
-  let exchangeRate = DEFAULT_EXCHANGE_RATE; // Default value in case we can't fetch it
+  let exchangeRate = Number(adminSettings.find(row => row.key === 'exchange_rate')?.value) || DEFAULT_EXCHANGE_RATE;
   
-  try {
+  if (!adminSettings.some(row => row.key === 'exchange_rate')) try {
     const settingsResponse = await sheetsClient.spreadsheets.values.get({
       spreadsheetId: configSheetId,
       range: 'Settings!A:B', // Assuming settings are in columns A (key) and B (value)
@@ -1343,9 +1359,9 @@ async function getConfigData(
   }
   
   // Get page mapping from "PageMap" tab
-  let pageMap: PageMapping[] = [];
+  let pageMap: PageMapping[] = adminPages.filter(row => parseEnabled(row.enabled)).map(row => ({ pageHandle: String(row.page_handle || ''), marketCode: String(row.market_code || ''), pageName: String(row.page_name || ''), pageUrl: String(row.page_url || '') }));
   
-  try {
+  if (pageMap.length === 0) try {
     const pageMapResponse = await sheetsClient.spreadsheets.values.get({
       spreadsheetId: configSheetId,
       range: 'PageMap!A:D', // Assuming PageMap has columns: page_handle, market_code, page_name, page_url
@@ -1369,8 +1385,8 @@ async function getConfigData(
   // Get SpMap from "SpMap" tab
   // Layout thực tế: A=STT | B=Tên vật tư | C=DANH MỤC | D=? | E=KEY MAP
   // Sales sheet cột F map với DANH MỤC (C); campaign name map với KEY MAP (E).
-  let spMap: SpMapping[] = [];
-  try {
+  let spMap: SpMapping[] = adminProducts.filter(row => parseEnabled(row.enabled)).map(row => ({ variantName: String(row.variant_name || row.material_name || ''), shortName: String(row.campaign_key || row.variant_name || ''), materialName: String(row.material_name || '') || undefined })).filter(row => row.variantName && row.shortName);
+  if (spMap.length === 0) try {
     const spMapResponse = await sheetsClient.spreadsheets.values.get({
       spreadsheetId: configSheetId,
       range: 'SpMap!A:E',
