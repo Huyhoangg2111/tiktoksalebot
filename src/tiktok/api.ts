@@ -1,6 +1,12 @@
 import axios from 'axios';
 import { duplicateSmartPlusCampaign } from '../campaigns/smartplus-duplicator.js';
-import { getTikTokBalanceConfig, getTikTokConfig, getTikTokWriteAccessToken } from './config.js';
+import {
+  assertAdvertiserAllowed,
+  getAllowedAdvertiserIds,
+  getTikTokBalanceConfig,
+  getTikTokConfig,
+  getTikTokWriteAccessToken,
+} from './config.js';
 import { db } from '../db/index.js';
 
 // Define interfaces for TikTok API responses
@@ -963,6 +969,11 @@ export async function getTikTokAccountBalance(): Promise<TikTokAccountBalance[]>
   const requestedAdvertiserIds = new Set(advertiserIds);
   const advertiserAccountById = new Map(advertiserAccounts.map(account => [account.advertiserId, account]));
   const balances: TikTokAccountBalance[] = [];
+
+  // Fail closed: không có danh sách chỉ định thì tuyệt đối không quét toàn bộ BC.
+  if (requestedAdvertiserIds.size === 0) {
+    return balances;
+  }
   let page = 1;
   let hasMore = true;
 
@@ -989,7 +1000,7 @@ export async function getTikTokAccountBalance(): Promise<TikTokAccountBalance[]>
 
     balances.push(
       ...accountList
-        .filter(account => requestedAdvertiserIds.size === 0 || requestedAdvertiserIds.has(String(account.advertiser_id)))
+        .filter(account => requestedAdvertiserIds.has(String(account.advertiser_id)))
         .map(account => {
           const advertiserId = String(account.advertiser_id);
           const advertiserAccount = advertiserAccountById.get(advertiserId);
@@ -1058,9 +1069,11 @@ export async function getTodaySpentCampaigns(
   const tiktokConfig = await getTikTokConfig();
   const balanceConfig = await getTikTokBalanceConfig();
   const accessToken = tiktokConfig.accessToken;
-  const advertiserIds = options.advertiserIds?.length
+  const allowedAdvertiserIds = new Set(tiktokConfig.advertiserIds);
+  const requestedAdvertiserIds = options.advertiserIds?.length
     ? normalizeAdvertiserIds(options.advertiserIds)
     : tiktokConfig.advertiserIds;
+  const advertiserIds = requestedAdvertiserIds.filter(advertiserId => allowedAdvertiserIds.has(advertiserId));
   const advertiserAccounts = options.advertiserAccounts || balanceConfig.advertiserAccounts;
   const advertiserAccountById = new Map(advertiserAccounts.map(account => [account.advertiserId, account]));
   const today = getTodayDate();
@@ -1212,9 +1225,11 @@ export async function getTodaySpentAds(options: TikTokSpentAdOptions = {}): Prom
   const tiktokConfig = await getTikTokConfig();
   const balanceConfig = await getTikTokBalanceConfig();
   const accessToken = tiktokConfig.accessToken;
-  const advertiserIds = options.advertiserIds?.length
+  const allowedAdvertiserIds = new Set(tiktokConfig.advertiserIds);
+  const requestedAdvertiserIds = options.advertiserIds?.length
     ? normalizeAdvertiserIds(options.advertiserIds)
     : tiktokConfig.advertiserIds;
+  const advertiserIds = requestedAdvertiserIds.filter(advertiserId => allowedAdvertiserIds.has(advertiserId));
   const advertiserAccounts = options.advertiserAccounts || balanceConfig.advertiserAccounts;
   const advertiserAccountById = new Map(advertiserAccounts.map(account => [account.advertiserId, account]));
   const today = getTodayDate();
@@ -2072,6 +2087,7 @@ export async function setCampaignStatus(
   campaignId: string,
   operationStatus: TikTokCampaignOperationStatus
 ): Promise<TikTokSpentCampaign['status']> {
+  await assertAdvertiserAllowed(advertiserId);
   const accessToken = await getTikTokWriteAccessToken();
 
   try {
@@ -2143,17 +2159,30 @@ export async function setCampaignStatusesBatch(
     return { succeeded: [], failed: [] };
   }
 
+  const allowedAdvertiserIds = new Set(await getAllowedAdvertiserIds(true));
+  const allowedCampaigns = normalizedCampaigns.filter(campaign => allowedAdvertiserIds.has(campaign.advertiserId));
+  const permissionFailures: TikTokCampaignStatusFailure[] = normalizedCampaigns
+    .filter(campaign => !allowedAdvertiserIds.has(campaign.advertiserId))
+    .map(campaign => ({
+      ...campaign,
+      error: `TKQC ${campaign.advertiserId} chưa được chỉ định trong mục Tài khoản quảng cáo.`,
+    }));
+
+  if (allowedCampaigns.length === 0) {
+    return { succeeded: [], failed: permissionFailures };
+  }
+
   const accessToken = await getTikTokWriteAccessToken();
   const byAdvertiser = new Map<string, TikTokCampaignStatusRef[]>();
 
-  for (const campaign of normalizedCampaigns) {
+  for (const campaign of allowedCampaigns) {
     const items = byAdvertiser.get(campaign.advertiserId) || [];
     items.push(campaign);
     byAdvertiser.set(campaign.advertiserId, items);
   }
 
   const succeeded: TikTokCampaignStatusRef[] = [];
-  const failed: TikTokCampaignStatusFailure[] = [];
+  const failed: TikTokCampaignStatusFailure[] = [...permissionFailures];
 
   const updateChunk = async (
     advertiserId: string,

@@ -1,6 +1,10 @@
 import axios from 'axios';
 import { db } from '../db/index.js';
-import { getTikTokReadAccessToken, getTikTokWriteAccessToken } from '../tiktok/config.js';
+import {
+  assertAdvertiserAllowed,
+  getTikTokReadAccessToken,
+  getTikTokWriteAccessToken,
+} from '../tiktok/config.js';
 
 const TIKTOK_API_BASE = 'https://business-api.tiktok.com/open_api/v1.3';
 const SMART_PLUS_PAGE_SIZE = 100;
@@ -269,6 +273,7 @@ export async function getSmartPlusAdsForAdvertiser(
   advertiserId: string,
   forceRefresh = false
 ): Promise<any[]> {
+  await assertAdvertiserAllowed(advertiserId);
   const cached = smartPlusAdsCache.get(advertiserId);
   if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
     return cached.ads;
@@ -292,6 +297,7 @@ export async function getSmartPlusAdsByIds(
   advertiserId: string,
   smartPlusAdIds: string[]
 ): Promise<any[]> {
+  await assertAdvertiserAllowed(advertiserId);
   const uniqueIds = [...new Set(smartPlusAdIds.map(id => String(id || '').trim()).filter(Boolean))];
   if (uniqueIds.length === 0) return [];
 
@@ -431,6 +437,7 @@ export async function getCampaignMaterialSnapshot(
   dateKey = getVietnamDateKey(),
   endDate = dateKey
 ): Promise<CampaignMaterialSnapshot> {
+  await assertAdvertiserAllowed(advertiserId);
   const ads = await getCampaignSmartPlusAds(advertiserId, campaignId);
   const materials: CampaignMaterialItem[] = [];
   let runningNumber = 0;
@@ -549,6 +556,7 @@ export async function setMaterialOperationStatusBatch(
   adMaterialIds: string[],
   operationStatus: MaterialOperationStatus
 ): Promise<MaterialBatchUpdateResult> {
+  await assertAdvertiserAllowed(advertiserId);
   const uniqueIds = [...new Set(adMaterialIds.filter(Boolean))];
   if (uniqueIds.length === 0) {
     return { requested: [], verified: [], failed: [] };

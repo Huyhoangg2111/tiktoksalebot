@@ -133,6 +133,20 @@ async function getConfiguredAdvertiserIds(required: boolean): Promise<string[]> 
   return [...new Set(advertiserAccounts.map(account => account.advertiserId))];
 }
 
+/** Danh sách cho phép duy nhất cho mọi luồng đọc/ghi TikTok. */
+export async function getAllowedAdvertiserIds(required = true): Promise<string[]> {
+  return getConfiguredAdvertiserIds(required);
+}
+
+export async function assertAdvertiserAllowed(advertiserId: string): Promise<void> {
+  const normalizedAdvertiserId = String(advertiserId || '').trim();
+  const allowedAdvertiserIds = new Set(await getConfiguredAdvertiserIds(true));
+
+  if (!normalizedAdvertiserId || !allowedAdvertiserIds.has(normalizedAdvertiserId)) {
+    throw new Error(`TKQC ${normalizedAdvertiserId || '(trống)'} chưa được chỉ định trong mục Tài khoản quảng cáo.`);
+  }
+}
+
 async function getConfiguredBusinessCenterId(): Promise<string> {
   const envBusinessCenterId = process.env.TIKTOK_BC_ID?.trim();
 
