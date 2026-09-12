@@ -91,6 +91,13 @@ function formatNumber(value: number): string {
   return value.toLocaleString('vi-VN');
 }
 
+function formatCampaignDisplayName(value: string | undefined): string {
+  const fullName = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!fullName) return 'Không rõ tên';
+  const parts = fullName.split(/\s+-\s+/).map(part => part.trim()).filter(Boolean);
+  return parts.length >= 2 ? `${parts[0]} - ${parts[1]}` : fullName;
+}
+
 async function handleCampaignDetail(ctx: Context): Promise<void> {
   const args = getCommandArgs(ctx);
   const campaignId = String(args[0] || '').trim();
@@ -152,7 +159,7 @@ async function handleCampaignDetail(ctx: Context): Promise<void> {
 
     const lines = [
       '<b>📊 Chi tiết chiến dịch</b>',
-      `<b>${escapeHtml(defaults.campaignName || campaign?.campaign_name || 'Không rõ tên')}</b>`,
+      `<b>${escapeHtml(formatCampaignDisplayName(defaults.campaignName || campaign?.campaign_name))}</b>`,
       `<code>${escapeHtml(campaignId)}</code>`,
       `<b>${formatStatus(campaign?.status)}</b>`,
       budgetAndBid,
@@ -182,7 +189,7 @@ async function handleCampaignDetail(ctx: Context): Promise<void> {
           for (const material of snapshot.materials.slice(0, 10)) {
             const icon = material.status === 'ENABLE' ? '🟢' : material.status === 'DISABLE' ? '🟡' : '⚪';
             lines.push(
-              `${material.materialNumber}. ${icon} 💸 $${material.spend.toFixed(2)} · 🎯 ${formatNumber(material.conversions)} · 💰 $${material.cpa.toFixed(2)}`
+              `${material.materialNumber}. ${icon} 💸 ${material.spend.toFixed(2)} · 👆 ${formatNumber(material.clicks)}/${material.ctr.toFixed(2)}% · 🎯 ${formatNumber(material.conversions)} · 💰 ${material.cpa.toFixed(2)}`
             );
           }
           if (snapshot.materials.length > 10) {
