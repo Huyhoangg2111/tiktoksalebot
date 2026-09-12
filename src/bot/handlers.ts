@@ -2644,7 +2644,7 @@ async function handleReloadRequest(ctx: Context): Promise<void> {
     if (alertSyncResult.status === 'fulfilled') {
       lines.push(
         `✅ Alerts: ${alertSyncResult.value.actionRuleCount} action rules`,
-        `✅ Alerts sheet: ${alertSyncResult.value.sheetCreated ? 'created' : 'exists'}${alertSyncResult.value.clearedLegacyDemo ? ' · cleared legacy demo' : ''}`,
+        '✅ Nguồn rule: SQLite/dashboard',
         `✅ Balance rule: < ${formatCurrency(alertSyncResult.value.balanceThreshold)}`
       );
     } else if (alertSyncResult.status === 'rejected') {

@@ -1,4 +1,3 @@
-import * as googleSheets from '@googleapis/sheets';
 import type { Telegraf } from 'telegraf';
 import { getTrackedAdvertiserIdSet } from '../accounts/tracking.js';
 import { db } from '../db/index.js';
@@ -19,7 +18,6 @@ import {
   type MaterialOperationStatus,
 } from './service.js';
 
-const DEFAULT_CONFIG_SHEET_ID = '1f7bH43w8kv_iiqoy9X5TzSugDuWtsKrB3-Iq8IrxvAI';
 const CAMPAIGN_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
 const MATERIAL_NOTIFY_COOLDOWN_MS = 30 * 60 * 1000;
 
@@ -51,22 +49,6 @@ interface RuleConditionShape {
   conversionsThreshold: number;
 }
 
-let lastKnownGoodRuleSnapshot: Level1RuleSnapshot | undefined;
-
-function getConfigSheetId(): string {
-  return process.env.CONFIG_GOOGLE_SHEET_ID || process.env.GOOGLE_SHEET_ID || DEFAULT_CONFIG_SHEET_ID;
-}
-
-function createSheetsClient() {
-  const auth = new googleSheets.auth.GoogleAuth({
-    credentials: {
-      client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-      private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-    },
-    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-  });
-  return googleSheets.sheets({ version: 'v4', auth });
-}
 
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
@@ -217,108 +199,29 @@ function parseLevel1RuleRows(rows: any[][]): Level1RuleSnapshot {
   };
 }
 
-async function readDashboardMaterialRules(): Promise<MaterialRule[]> {
-  const legacyRows = await db.all<Record<string, unknown>>('SELECT id,name_contains,metric,metric_operator,metric_threshold,metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note FROM alert_action_rules WHERE entity=? ORDER BY id',['material']);
-  if (legacyRows.length > 0) {
-    return legacyRows.flatMap(value => {
-      const metric = normalizeMetric(value.metric);
-      const metricOperator = normalizeOperator(value.metric_operator);
-      const conversionsOperator = normalizeOperator(value.conversions_operator);
-      const action = normalizeAction(value.action);
-      const threshold = parseThreshold(value.metric_threshold, metricOperator || 'eq');
-      const conversionsThreshold = parseNumber(value.conversions_threshold);
-      if (!metric || !metricOperator || !conversionsOperator || !action || Number(value.is_active ?? 1) === 0 || !Number.isFinite(threshold.threshold) || !Number.isFinite(conversionsThreshold)) return [];
-      return [{rowNumber:Number(value.id),nameContains:String(value.name_contains ?? '').trim()||undefined,metric,metricOperator,metricThreshold:threshold.threshold,metricMinThreshold:threshold.min ?? (value.metric_min_threshold == null ? undefined : Number(value.metric_min_threshold)),conversionsOperator,conversionsThreshold,action,note:String(value.note ?? '').trim()||undefined} satisfies MaterialRule];
-    });
-  }
-  const rows = await db.all<{ id: number; data_json: string }>(
-    'SELECT id, data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id',
-    ['material_ruler']
+async function readDashboardRules(entity: 'campaign' | 'material'): Promise<MaterialRule[]> {
+  const rows = await db.all<Record<string, unknown>>(
+    'SELECT id,name_contains,metric,metric_operator,metric_threshold,metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note FROM alert_action_rules WHERE entity=? ORDER BY id',
+    [entity]
   );
-  return rows.flatMap(row => {
-    try {
-      const value = JSON.parse(row.data_json) as Record<string, unknown>;
-      const metric = normalizeMetric(value.metric);
-      const metricOperator = normalizeOperator(value.metric_operator);
-      const conversionsOperator = normalizeOperator(value.conversions_operator);
-      const action = normalizeAction(value.action);
-      const threshold = parseThreshold(value.metric_threshold, metricOperator || 'eq');
-      const conversionsThreshold = parseNumber(value.conversions_threshold);
-      if (!metric || !metricOperator || !conversionsOperator || !action || !Number.isFinite(threshold.threshold) || !Number.isFinite(conversionsThreshold)) return [];
-      return [{
-        rowNumber: Number(row.id),
-        nameContains: String(value.name_contains ?? '').trim() || undefined,
-        metric,
-        metricOperator,
-        metricThreshold: threshold.threshold,
-        metricMinThreshold: threshold.min ?? (String(value.metric_min_threshold ?? '').trim() ? parseNumber(value.metric_min_threshold) : undefined),
-        conversionsOperator,
-        conversionsThreshold,
-        action,
-        note: String(value.note ?? '').trim() || undefined,
-      } satisfies MaterialRule];
-    } catch {
-      return [];
-    }
+  return rows.flatMap(value => {
+    const metric = normalizeMetric(value.metric);
+    const metricOperator = normalizeOperator(value.metric_operator);
+    const conversionsOperator = normalizeOperator(value.conversions_operator);
+    const action = normalizeAction(value.action);
+    const threshold = parseThreshold(value.metric_threshold, metricOperator || 'eq');
+    const conversionsThreshold = parseNumber(value.conversions_threshold);
+    if (!metric || !metricOperator || !conversionsOperator || !action || Number(value.is_active ?? 1) === 0 || !Number.isFinite(threshold.threshold) || !Number.isFinite(conversionsThreshold)) return [];
+    return [{rowNumber:Number(value.id),nameContains:String(value.name_contains ?? '').trim()||undefined,metric,metricOperator,metricThreshold:threshold.threshold,metricMinThreshold:threshold.min ?? (value.metric_min_threshold == null ? undefined : Number(value.metric_min_threshold)),conversionsOperator,conversionsThreshold,action,note:String(value.note ?? '').trim()||undefined} satisfies MaterialRule];
   });
 }
 
-async function seedDashboardMaterialRules(rules: MaterialRule[]): Promise<void> {
-  const existing = await db.get<{ count: number }>(
-    'SELECT COUNT(*) AS count FROM admin_config_rows WHERE section = ?',
-    ['material_ruler']
-  );
-  if (Number(existing?.count || 0) > 0 || rules.length === 0) return;
-  for (let index = 0; index < rules.length; index += 1) {
-    const rule = rules[index];
-    await db.run(
-      'INSERT INTO admin_config_rows(section, data_json, position) VALUES (?, ?, ?)',
-      ['material_ruler', JSON.stringify({
-        name_contains: rule.nameContains || '',
-        metric: rule.metric,
-        metric_operator: rule.metricOperator,
-        metric_threshold: String(rule.metricThreshold),
-        metric_min_threshold: rule.metricMinThreshold == null ? '' : String(rule.metricMinThreshold),
-        conversions_operator: rule.conversionsOperator,
-        conversions_threshold: String(rule.conversionsThreshold),
-        action: rule.action,
-        enabled: true,
-        note: rule.note || '',
-      }), index]
-    );
-  }
-  console.log(`[Level1Rules] Imported ${rules.length} material rules from Alerts into dashboard SQLite`);
-}
-
 async function getLevel1RuleSnapshot(): Promise<Level1RuleSnapshot> {
-  try {
-    const dashboardMaterialRules = await readDashboardMaterialRules();
-    if (dashboardMaterialRules.length > 0) {
-      const response = await createSheetsClient().spreadsheets.values.get({
-        spreadsheetId: getConfigSheetId(),
-        range: 'Alerts!A:O',
-      });
-      const sheetSnapshot = parseLevel1RuleRows(response.data.values || []);
-      const snapshot = { ...sheetSnapshot, materialRules: dashboardMaterialRules, loadedAtMs: Date.now() };
-      lastKnownGoodRuleSnapshot = snapshot;
-      return snapshot;
-    }
-    const response = await createSheetsClient().spreadsheets.values.get({
-      spreadsheetId: getConfigSheetId(),
-      range: 'Alerts!A:O',
-    });
-    const snapshot = parseLevel1RuleRows(response.data.values || []);
-    await seedDashboardMaterialRules(snapshot.materialRules);
-    lastKnownGoodRuleSnapshot = snapshot;
-    return snapshot;
-  } catch (error) {
-    if (lastKnownGoodRuleSnapshot) {
-      const ageSeconds = Math.max(0, Math.round((Date.now() - lastKnownGoodRuleSnapshot.loadedAtMs) / 1000));
-      console.warn(`[Level1Rules] Alerts read failed; using last-known-good snapshot (${ageSeconds}s old):`, error);
-      return lastKnownGoodRuleSnapshot;
-    }
-    throw error;
-  }
+  const [campaignRules, materialRules] = await Promise.all([
+    readDashboardRules('campaign'),
+    readDashboardRules('material'),
+  ]);
+  return { campaignRules, materialRules, loadedAtMs: Date.now() };
 }
 
 function compareValues(
@@ -675,7 +578,7 @@ async function evaluateMaterialRules(
 
 /**
  * Level 1 architecture:
- * - Alerts sheet is loaded exactly once per Level 1 pass and shared by campaign/material rules;
+ * - Rule cấp 1 được đọc trực tiếp từ SQLite/dashboard;
  * - if that read fails, the last-known-good in-memory snapshot is used;
  * - campaign rules: qualified notify only; no campaign status writes;
  * - ad rules: deliberately ignored;

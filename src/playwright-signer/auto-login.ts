@@ -1,6 +1,6 @@
 /**
  * Auto Login - Tự động đăng nhập TikTok Ads Manager
- * - Đọc ACCOUNT_BOT từ Google Sheet (Tab Token)
+ * - Đọc tài khoản bot từ SQLite/dashboard
  * - Tự tạo mã TOTP từ secret
  * - Gọi BrowserManager để login + xử lý 2FA
  */
@@ -33,7 +33,7 @@ const WAIT_BETWEEN_ATTEMPTS_MS = 3000;
 
 /**
  * Tự động đăng nhập TikTok Ads Manager:
- * 1. Đọc ACCOUNT_BOT từ Google Sheet
+ * 1. Đọc tài khoản bot từ SQLite/dashboard
  * 2. Kiểm tra login status
  * 3. Nếu chưa login → nhập credentials
  * 4. Nếu cần 2FA → generate TOTP code và nhập
@@ -47,24 +47,24 @@ export async function autoLogin(
     onStatus?.(msg);
   };
 
-  // Step 1: Đọc credentials từ Google Sheet
-  log('Dang doc ACCOUNT_BOT tu Google Sheet...');
+  // Step 1: Đọc credentials từ SQLite/dashboard
+  log('Dang doc tai khoan TikTok tu SQLite/dashboard...');
   let credentials: AccountBotCredentials | undefined;
 
   try {
     credentials = await getAccountBotCredentials();
   } catch (error) {
-    log(`Loi doc Google Sheet: ${error instanceof Error ? error.message : String(error)}`);
+    log(`Loi doc cau hinh dang nhap: ${error instanceof Error ? error.message : String(error)}`);
     return {
       success: false,
       stage: 'read_credentials',
-      reason: 'Khong doc duoc ACCOUNT_BOT tu Google Sheet.',
+      reason: 'Khong doc duoc tai khoan TikTok tu SQLite/dashboard.',
       attempts: 0,
     };
   }
 
   if (!credentials) {
-    log('Khong tim thay ACCOUNT_BOT trong Google Sheet tab Token.');
+    log('Khong tim thay tai khoan TikTok day du trong dashboard hoac bien moi truong.');
     return {
       success: false,
       stage: 'read_credentials',

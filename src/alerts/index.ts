@@ -1,8 +1,6 @@
 import type { Telegraf } from 'telegraf';
 import { db } from '../db/index.js';
 import {
-  ensureAlertsSheetTemplate,
-  getAlertRulesConfig,
   type AlertAction,
   type AlertCampaignStatus,
   type AlertActionRuleSheetRow,
@@ -1590,22 +1588,8 @@ export async function initializeAlertRules(): Promise<AlertInitializationResult>
   await upsertBalanceAlertRule();
 
   const existing = await db.get<{ count: number }>('SELECT COUNT(*) AS count FROM alert_action_rules');
-  let actionRuleCount = Number(existing?.count || 0);
-  let sheetCreated = false;
-  let clearedLegacyDemo = false;
-
-  // Nhập Sheet đúng một lần khi SQLite chưa có rule. Sau đó dashboard là nguồn chính.
-  if (actionRuleCount === 0) {
-    const sheetSetup = await ensureAlertsSheetTemplate();
-    const sheetRules = await getAlertRulesConfig();
-    await replaceActionRules(sheetRules);
-    actionRuleCount = sheetRules.length;
-    sheetCreated = sheetSetup.created;
-    clearedLegacyDemo = sheetSetup.clearedLegacyDemo;
-    console.log(`Imported ${actionRuleCount} alert rules from Google Sheet into SQLite`);
-  } else {
-    console.log(`Alert rules loaded from SQLite (${actionRuleCount} action rules)`);
-  }
+  const actionRuleCount = Number(existing?.count || 0);
+  console.log(`Alert rules loaded from SQLite (${actionRuleCount} action rules)`);
 
   return {
     actionRuleCount,
@@ -1613,8 +1597,8 @@ export async function initializeAlertRules(): Promise<AlertInitializationResult>
       'balance_threshold_usd',
       RUNTIME_SETTING_DEFAULTS.balanceThresholdUsd
     ),
-    sheetCreated,
-    clearedLegacyDemo,
+    sheetCreated: false,
+    clearedLegacyDemo: false,
   };
 }
 

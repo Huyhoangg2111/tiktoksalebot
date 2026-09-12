@@ -58,7 +58,7 @@ async function getCachedTikTokTokenConfig(): Promise<TikTokTokenConfig> {
     return value;
   } catch (error) {
     if (cachedTikTokTokenConfig) {
-      console.warn('[TikTokConfig] Token sheet read failed; using last-known-good token config:', error);
+      console.warn('[TikTokConfig] Cannot refresh token config; using last-known-good config:', error);
       return cachedTikTokTokenConfig.value;
     }
     throw error;
@@ -73,7 +73,7 @@ async function getReadAccessToken(): Promise<string> {
     return readToken;
   }
 
-  throw new Error('Missing TIKTOK_READ_ACCESS_TOKEN in Google Sheet tab Token');
+  throw new Error('Thiếu token đọc TikTok trong dashboard hoặc TIKTOK_READ_ACCESS_TOKEN');
 }
 
 async function getWriteAccessToken(): Promise<string> {
@@ -84,7 +84,7 @@ async function getWriteAccessToken(): Promise<string> {
     return writeToken;
   }
 
-  throw new Error('Missing TIKTOK_WRITE_ACCESS_TOKEN in Google Sheet tab Token');
+  throw new Error('Thiếu token ghi TikTok trong dashboard hoặc TIKTOK_WRITE_ACCESS_TOKEN');
 }
 
 function getAdvertiserIdsFromEnv(required: boolean): string[] {
@@ -122,7 +122,7 @@ async function getConfiguredAdvertiserAccounts(required: boolean): Promise<Adver
   }
 
   if (required && advertiserAccounts.length === 0) {
-    throw new Error('Missing TikTok advertiser IDs. Add TIKTOK_ADVERTISER_IDS in .env or enabled rows in Google Sheet tab Permissions.');
+    throw new Error('Thiếu tài khoản quảng cáo. Hãy thêm dòng đang dùng trong dashboard hoặc TIKTOK_ADVERTISER_IDS.');
   }
 
   return advertiserAccounts;
@@ -143,7 +143,7 @@ async function getConfiguredBusinessCenterId(): Promise<string> {
   const sheetBusinessCenterId = await getBusinessCenterId();
 
   if (!sheetBusinessCenterId || isPlaceholder(sheetBusinessCenterId)) {
-    throw new Error('Missing TikTok Business Center ID. Add TIKTOK_BC_ID in .env or put it in Google Sheet tab BC cell A2.');
+    throw new Error('Thiếu Business Center ID trong dashboard hoặc TIKTOK_BC_ID.');
   }
 
   return sheetBusinessCenterId;
@@ -155,7 +155,10 @@ async function getConfiguredBusinessCenterId(): Promise<string> {
 export async function getTikTokConfig(): Promise<TikTokConfig> {
   const accessToken = await getReadAccessToken();
   const advertiserIds = await getConfiguredAdvertiserIds(true);
-  const businessCenterId = process.env.TIKTOK_BC_ID?.trim();
+  const envBusinessCenterId = process.env.TIKTOK_BC_ID?.trim();
+  const businessCenterId = envBusinessCenterId && !isPlaceholder(envBusinessCenterId)
+    ? envBusinessCenterId
+    : await getBusinessCenterId();
 
   return {
     accessToken,

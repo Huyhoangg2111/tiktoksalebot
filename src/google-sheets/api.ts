@@ -9,19 +9,8 @@ import {
 type SheetsClient = sheets_v4.Sheets;
 type Sheet = sheets_v4.Schema$Sheet;
 
-const DEFAULT_CONFIG_SHEET_ID = '1f7bH43w8kv_iiqoy9X5TzSugDuWtsKrB3-Iq8IrxvAI';
 const DEFAULT_TARGET_MKT_CODE = 'MKT80.HOÀNG-TH';
 const DEFAULT_EXCHANGE_RATE = 28119;
-
-function getConfigSheetId(): string {
-  const configSheetId = process.env.CONFIG_GOOGLE_SHEET_ID || process.env.GOOGLE_SHEET_ID || DEFAULT_CONFIG_SHEET_ID;
-
-  if (!configSheetId) {
-    throw new Error('Missing CONFIG_GOOGLE_SHEET_ID or GOOGLE_SHEET_ID in environment variables');
-  }
-
-  return configSheetId;
-}
 
 function createSheetsClient(scopes: string[]): SheetsClient {
   const auth = new googleSheets.auth.GoogleAuth({
@@ -919,46 +908,28 @@ export async function getBusinessCenterId(): Promise<string | undefined> {
     if (businessCenterId) return businessCenterId;
   }
 
-  const sheetsClient = createSheetsClient(['https://www.googleapis.com/auth/spreadsheets.readonly']);
-
-  const response = await sheetsClient.spreadsheets.values.get({
-    spreadsheetId: getConfigSheetId(),
-    range: 'BC!A2:A',
-  });
-
-  const businessCenterIds = (response.data.values || [])
-    .flat()
-    .map(value => String(value).trim())
-    .filter(Boolean);
-
-  return businessCenterIds[0];
+  return undefined;
 }
 
 /**
  * Get enabled TikTok advertisers from the "Permissions" tab.
  */
 export async function getAdvertiserPermissions(options: MktScopeOptions = {}): Promise<AdvertiserPermission[]> {
-  const sheetsClient = createSheetsClient(['https://www.googleapis.com/auth/spreadsheets.readonly']);
-
-  const response = await sheetsClient.spreadsheets.values.get({
-    spreadsheetId: getConfigSheetId(),
-    range: 'Permissions!A:E',
-  });
-
-  const rows = response.data.values || [];
-
-  return parseAdvertiserPermissionRows(rows, options);
-}
-
-export async function getAlertRulesConfig(): Promise<AlertActionRuleSheetRow[]> {
-  const sheetsClient = createSheetsClient(['https://www.googleapis.com/auth/spreadsheets.readonly']);
-
-  const response = await sheetsClient.spreadsheets.values.get({
-    spreadsheetId: getConfigSheetId(),
-    range: 'Alerts!A:O',
-  });
-
-  return parseAlertRuleRows(response.data.values || []);
+  const rows = await db.all<{ data_json: string }>(
+    'SELECT data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id',
+    ['advertisers']
+  ).catch(() => []);
+  const table = [['market_code', 'advertiser_id', 'enabled', 'note', 'advertiser_name']];
+  for (const row of rows) {
+    const value = JSON.parse(row.data_json);
+    table.push([value.market_code, value.advertiser_id, value.enabled, value.note, value.advertiser_name]);
+  }
+  if (rows.length === 0) {
+    for (const advertiserId of String(process.env.TIKTOK_ADVERTISER_IDS || '').split(',').map(value => value.trim()).filter(Boolean)) {
+      table.push([getTargetMktCode(), advertiserId, 'true', 'Biến môi trường', '']);
+    }
+  }
+  return parseAdvertiserPermissionRows(table, options);
 }
 
 export async function getTikTokTokenConfig(): Promise<TikTokTokenConfig> {
@@ -973,19 +944,10 @@ export async function getTikTokTokenConfig(): Promise<TikTokTokenConfig> {
     }
   }
 
-  const sheetsClient = createSheetsClient(['https://www.googleapis.com/auth/spreadsheets.readonly']);
-
-  try {
-    const response = await sheetsClient.spreadsheets.values.get({
-      spreadsheetId: getConfigSheetId(),
-      range: 'Token!A:B',
-    });
-
-    return parseTokenRows(response.data.values || []);
-  } catch (error) {
-    console.warn('Could not fetch token config from Token tab, falling back to .env');
-    return {};
-  }
+  return {
+    readAccessToken: process.env.TIKTOK_READ_ACCESS_TOKEN?.trim(),
+    writeAccessToken: process.env.TIKTOK_WRITE_ACCESS_TOKEN?.trim(),
+  };
 }
 
 /**
@@ -993,19 +955,21 @@ export async function getTikTokTokenConfig(): Promise<TikTokTokenConfig> {
  * Format in sheet: ACCOUNT_BOT | email|password|totp_secret
  */
 export async function getAccountBotCredentials(): Promise<AccountBotCredentials | undefined> {
-  const sheetsClient = createSheetsClient(['https://www.googleapis.com/auth/spreadsheets.readonly']);
-
-  try {
-    const response = await sheetsClient.spreadsheets.values.get({
-      spreadsheetId: getConfigSheetId(),
-      range: 'Token!A:B',
-    });
-
-    return parseAccountBotRow(response.data.values || []);
-  } catch (error) {
-    console.warn('Could not fetch ACCOUNT_BOT from Token tab:', error);
-    return undefined;
+  const local = await db.get<{ data_json: string }>(
+    'SELECT data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id LIMIT 1',
+    ['signer']
+  ).catch(() => undefined);
+  if (local?.data_json) {
+    const value = JSON.parse(local.data_json);
+    const email = String(value.email || '').trim();
+    const password = String(value.password || '').trim();
+    const totpSecret = String(value.totp_secret || '').trim();
+    if (email && password && totpSecret) return { email, password, totpSecret };
   }
+  const email = String(process.env.TIKTOK_ACCOUNT_EMAIL || '').trim();
+  const password = String(process.env.TIKTOK_ACCOUNT_PASSWORD || '').trim();
+  const totpSecret = String(process.env.TIKTOK_ACCOUNT_TOTP_SECRET || '').trim();
+  return email && password && totpSecret ? { email, password, totpSecret } : undefined;
 }
 
 const ALERTS_SHEET_NAME = 'Alerts';
@@ -1075,64 +1039,6 @@ function isLegacyAlertDemoRows(rows: any[][]): boolean {
   });
 }
 
-export async function ensureAlertsSheetTemplate(): Promise<{
-  created: boolean;
-  clearedLegacyDemo: boolean;
-}> {
-  const sheetsClient = createSheetsClient(['https://www.googleapis.com/auth/spreadsheets']);
-  const spreadsheetId = getConfigSheetId();
-  const spreadsheet = await sheetsClient.spreadsheets.get({ spreadsheetId });
-  const existingSheet = spreadsheet.data.sheets?.find(
-    sheet => sheet.properties?.title === ALERTS_SHEET_NAME
-  );
-
-  let created = false;
-
-  if (!existingSheet) {
-    await sheetsClient.spreadsheets.batchUpdate({
-      spreadsheetId,
-      requestBody: {
-        requests: [
-          {
-            addSheet: {
-              properties: {
-                title: ALERTS_SHEET_NAME,
-              },
-            },
-          },
-        ],
-      },
-    });
-    created = true;
-  }
-
-  await sheetsClient.spreadsheets.values.update({
-    spreadsheetId,
-    range: `${ALERTS_SHEET_NAME}!A1:O1`,
-    valueInputOption: 'RAW',
-    requestBody: {
-      values: ALERTS_SHEET_HEADERS,
-    },
-  });
-
-  const currentRows = await sheetsClient.spreadsheets.values.get({
-    spreadsheetId,
-    range: `${ALERTS_SHEET_NAME}!A2:O`,
-  });
-
-  const dataRows = currentRows.data.values || [];
-  const clearedLegacyDemo = isLegacyAlertDemoRows(dataRows);
-
-  if (clearedLegacyDemo) {
-    await sheetsClient.spreadsheets.values.clear({
-      spreadsheetId,
-      range: `${ALERTS_SHEET_NAME}!A2:O`,
-    });
-  }
-
-  return { created, clearedLegacyDemo };
-}
-
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -1162,12 +1068,11 @@ async function mapWithConcurrency<T, R>(
  * Get sales data from configured Google Sheets
  */
 export async function getSalesData(options: MktScopeOptions = {}): Promise<SalesData[]> {
-  const configSheetId = getConfigSheetId();
   const sheetsClient = createSheetsClient(['https://www.googleapis.com/auth/spreadsheets.readonly']);
   const targetMktCode = normalizeKey(options.targetMktCode || getTargetMktCode());
 
   // Get configuration data first
-  const configData = await getConfigData(configSheetId, sheetsClient, options);
+  const configData = await getConfigData(options);
 
   // Read team sheets in parallel (bounded) — concurrency from /settings.
   const sheetsConcurrency = await getRuntimeSettingNumber(
@@ -1279,20 +1184,13 @@ export async function getSalesData(options: MktScopeOptions = {}): Promise<Sales
 }
 
 export async function getConfigSnapshot(options: MktScopeOptions = {}): Promise<ConfigData> {
-  const configSheetId = getConfigSheetId();
-  const sheetsClient = createSheetsClient(['https://www.googleapis.com/auth/spreadsheets.readonly']);
-
-  return getConfigData(configSheetId, sheetsClient, options);
+  return getConfigData(options);
 }
 
 /**
  * Get configuration data from the configuration sheet
  */
-async function getConfigData(
-  configSheetId: string,
-  sheetsClient: SheetsClient,
-  options: MktScopeOptions = {}
-): Promise<ConfigData> {
+async function getConfigData(options: MktScopeOptions = {}): Promise<ConfigData> {
   const readAdminRows = async (section: string): Promise<Record<string, any>[]> => {
     const rows = await db.all<{ data_json: string }>(
       'SELECT data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id',
@@ -1300,153 +1198,28 @@ async function getConfigData(
     ).catch(() => []);
     return rows.map(row => JSON.parse(row.data_json));
   };
-  const [adminSources, adminPages, adminProducts, adminSettings] = await Promise.all([
-    readAdminRows('sources'), readAdminRows('pages'), readAdminRows('products'), readAdminRows('settings')
+  const [adminSources, adminPages, adminProducts] = await Promise.all([
+    readAdminRows('sources'), readAdminRows('pages'), readAdminRows('products')
   ]);
 
-  // Get sources from local admin database first, then legacy Sources tab
-  let sources = adminSources
+  // Chỉ danh sách Sheet doanh số còn được cấu hình trong SQLite.
+  const sources = adminSources
     .filter(row => parseEnabled(row.enabled))
     .map(row => extractGoogleSpreadsheetId(row.sheet_id))
     .filter((value): value is string => Boolean(value));
-  if (sources.length === 0) {
-    const sourcesResponse = await sheetsClient.spreadsheets.values.get({
-      spreadsheetId: configSheetId,
-      range: 'Sources!A:E',
-    });
-    sources = getSourceSpreadsheetIds(sourcesResponse.data.values || []);
-  }
-  
-  // Get exchange rate from "Settings" tab
-  let exchangeRate = Number(adminSettings.find(row => row.key === 'exchange_rate')?.value) || DEFAULT_EXCHANGE_RATE;
-  
-  if (!adminSettings.some(row => row.key === 'exchange_rate')) try {
-    const settingsResponse = await sheetsClient.spreadsheets.values.get({
-      spreadsheetId: configSheetId,
-      range: 'Settings!A:B', // Assuming settings are in columns A (key) and B (value)
-    });
-    
-    const settingsRows = settingsResponse.data.values || [];
-    for (const row of settingsRows) {
-      if (row[0]?.toLowerCase().includes('vnd') && row[0]?.toLowerCase().includes('usd')) {
-        const parsedExchangeRate = parseNumber(row[1]);
-        if (Number.isFinite(parsedExchangeRate) && parsedExchangeRate > 0) {
-          exchangeRate = parsedExchangeRate;
-        }
-        break;
-      }
-    }
-  } catch (error) {
-    console.warn('Could not fetch exchange rate from Settings tab, using default value');
-  }
-  exchangeRate = await getRuntimeSettingNumber(
+  const exchangeRate = await getRuntimeSettingNumber(
     'exchange_rate',
-    exchangeRate || RUNTIME_SETTING_DEFAULTS.exchangeRate
+    RUNTIME_SETTING_DEFAULTS.exchangeRate
   );
-  
-  // Get permissions from "Permissions" tab
-  let permissions: AdvertiserPermission[] = [];
-  
-  try {
-    const permissionsResponse = await sheetsClient.spreadsheets.values.get({
-      spreadsheetId: configSheetId,
-      range: 'Permissions!A:E',
-    });
-    
-    permissions = parseAdvertiserPermissionRows(permissionsResponse.data.values || [], options);
-  } catch (error) {
-    console.warn('Could not fetch permissions from Permissions tab');
-  }
+  const permissions = await getAdvertiserPermissions(options);
   
   // Get page mapping from "PageMap" tab
-  let pageMap: PageMapping[] = adminPages.filter(row => parseEnabled(row.enabled)).map(row => ({ pageHandle: String(row.page_handle || ''), marketCode: String(row.market_code || ''), pageName: String(row.page_name || ''), pageUrl: String(row.page_url || '') }));
-  
-  if (pageMap.length === 0) try {
-    const pageMapResponse = await sheetsClient.spreadsheets.values.get({
-      spreadsheetId: configSheetId,
-      range: 'PageMap!A:D', // Assuming PageMap has columns: page_handle, market_code, page_name, page_url
-    });
-    
-    const pageMapRows = (pageMapResponse.data.values || []).slice(1);
-    for (const row of pageMapRows) {
-      if (row.length >= 2) {
-        pageMap.push({
-          pageHandle: String(row[0] || '').trim(),
-          marketCode: String(row[1] || '').trim(),
-          pageName: String(row[2] || '').trim(),
-          pageUrl: String(row[3] || '').trim()
-        });
-      }
-    }
-  } catch (error) {
-    console.warn('Could not fetch page mapping from PageMap tab');
-  }
+  const pageMap: PageMapping[] = adminPages.filter(row => parseEnabled(row.enabled)).map(row => ({ pageHandle: String(row.page_handle || ''), marketCode: String(row.market_code || ''), pageName: String(row.page_name || ''), pageUrl: String(row.page_url || '') }));
 
   // Get SpMap from "SpMap" tab
   // Layout thực tế: A=STT | B=Tên vật tư | C=DANH MỤC | D=? | E=KEY MAP
   // Sales sheet cột F map với DANH MỤC (C); campaign name map với KEY MAP (E).
-  let spMap: SpMapping[] = adminProducts.filter(row => parseEnabled(row.enabled)).map(row => ({ variantName: String(row.variant_name || row.material_name || ''), shortName: String(row.campaign_key || row.variant_name || ''), materialName: String(row.material_name || '') || undefined })).filter(row => row.variantName && row.shortName);
-  if (spMap.length === 0) try {
-    const spMapResponse = await sheetsClient.spreadsheets.values.get({
-      spreadsheetId: configSheetId,
-      range: 'SpMap!A:E',
-    });
-
-    const spMapHeaderPattern =
-      /^(stt|no\.?|#|tên vật tư|ten vat tu|danh mục|danh muc|key\s*map|keymap)$/i;
-
-    for (const row of spMapResponse.data.values || []) {
-      const materialName = String(row[1] || '').trim();
-      const categoryName = String(row[2] || '').trim();
-      const keyMap = String(row[4] || '').trim();
-
-      const variantName = categoryName || materialName;
-      if (!variantName || spMapHeaderPattern.test(variantName)) {
-        continue;
-      }
-
-      // Prefer KEY MAP for campaign join; fall back to DANH MỤC (not SKU col B)
-      // so one category is not forced onto the first SKU name (e.g. 500G).
-      const shortName = keyMap || categoryName || materialName;
-      if (!shortName || spMapHeaderPattern.test(shortName)) {
-        continue;
-      }
-
-      spMap.push({
-        variantName,
-        shortName,
-        materialName: materialName || undefined,
-      });
-    }
-  } catch (error) {
-    console.warn('Could not fetch spMap from SpMap tab');
-  }
-  
-  // Nhập cấu hình cũ vào SQLite một lần để dashboard trở thành nguồn chính.
-  if (adminSources.length === 0 && sources.length > 0) {
-    for (const sheetId of sources) {
-      await db.run('INSERT INTO admin_config_rows(section,data_json,position) VALUES(?,?,?)', [
-        'sources', JSON.stringify({ name: sheetId, sheet_id: sheetId, enabled: 1, note: 'Nhập từ Google Sheets' }), 0
-      ]).catch(() => undefined);
-    }
-  }
-  if (adminPages.length === 0 && pageMap.length > 0) {
-    for (const [position, row] of pageMap.entries()) {
-      await db.run('INSERT INTO admin_config_rows(section,data_json,position) VALUES(?,?,?)', [
-        'pages', JSON.stringify({ page_handle: row.pageHandle, market_code: row.marketCode, page_name: row.pageName, page_url: row.pageUrl, enabled: 1 }), position
-      ]).catch(() => undefined);
-    }
-  }
-  if (adminProducts.length === 0 && spMap.length > 0) {
-    for (const [position, row] of spMap.entries()) {
-      await db.run('INSERT INTO admin_config_rows(section,data_json,position) VALUES(?,?,?)', [
-        'products', JSON.stringify({ material_name: row.materialName || '', variant_name: row.variantName, campaign_key: row.shortName, enabled: 1 }), position
-      ]).catch(() => undefined);
-    }
-  }
-  if (!adminSettings.some(row => row.key === 'exchange_rate')) {
-    await db.run('INSERT OR IGNORE INTO bot_settings(key,value) VALUES(?,?)', ['exchange_rate', String(exchangeRate)]).catch(() => undefined);
-  }
+  const spMap: SpMapping[] = adminProducts.filter(row => parseEnabled(row.enabled)).map(row => ({ variantName: String(row.variant_name || row.material_name || ''), shortName: String(row.campaign_key || row.variant_name || ''), materialName: String(row.material_name || '') || undefined })).filter(row => row.variantName && row.shortName);
 
   return {
     sources,
@@ -1498,14 +1271,8 @@ export async function addSalesData(
     rowData[6] = salesData.channelLink || ''; // Column G (channel link)
     
     // Convert USD amount back to VND before saving
-    const configSheetId = process.env.CONFIG_GOOGLE_SHEET_ID || process.env.GOOGLE_SHEET_ID;
-    if (configSheetId) {
-      const configData = await getConfigData(configSheetId, sheetsClient);
-      rowData[14] = salesData.amountVnd || salesData.amount * configData.exchangeRate; // Column O (sales amount VND)
-    } else {
-      // If we can't get exchange rate, save as is
-      rowData[14] = salesData.amount;
-    }
+    const configData = await getConfigData();
+    rowData[14] = salesData.amountVnd || salesData.amount * configData.exchangeRate; // Column O (sales amount VND)
 
     // Append the new sales data to the specified sheet
     await sheetsClient.spreadsheets.values.append({

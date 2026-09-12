@@ -13,7 +13,7 @@
  *   GET  /tokens              - Lấy token snapshot (msToken, X-Bogus, etc.)
  *   GET  /tokens/refresh      - Refresh tokens bằng cách reload page
  *   GET  /restart             - Restart browser
- *   GET  /auto-login          - Tự động login từ ACCOUNT_BOT Google Sheet
+ *   GET  /auto-login          - Tự động login từ cấu hình SQLite/dashboard
  *   GET  /debug/exchanges     - Xem request/response gần đây mà signer bắt được
  *   POST /debug/exchanges/clear - Xóa exchange log để trace lượt mới
  *   POST /import-cookies      - Import cookies
@@ -134,7 +134,7 @@ API Endpoints:
   GET  /tokens              Lay token snapshot
   GET  /tokens/refresh      Refresh tokens
   GET  /restart             Restart browser
-  GET  /auto-login          Tu dong login tu ACCOUNT_BOT (Google Sheet)
+  GET  /auto-login          Tu dong login tu SQLite/dashboard
   GET  /debug/exchanges     Xem request/response gan day
   POST /debug/exchanges/clear Xoa exchange log
   POST /import-cookies      Import cookies

@@ -12,7 +12,6 @@ import { setupCampaignAlertUiCompatibility } from './bot/campaign-alert-ui-compa
 import { setupMaterialAutoActionFeedback } from './bot/material-auto-action-feedback.js';
 import { setupCampaignDetailHandlers } from './bot/campaign-detail.js';
 import { initializeAlertRules } from './alerts/index.js';
-import { ensureMaterialRulerSheetTemplate } from './materials/daily-ruler.js';
 import { startScheduler } from './scheduler/index.js';
 import { startServer, type SignerServerRuntime } from './playwright-signer/server.js';
 import { configureHttpResilience } from './runtime/http-resilience.js';
@@ -58,25 +57,15 @@ async function main() {
   // Configure a finite timeout for all Axios requests before any scheduled work starts.
   configureHttpResilience();
 
+  // SQLite là nguồn cấu hình duy nhất; phải kết nối trước khi signer đọc tài khoản TikTok.
+  await connectDB();
+
   if (isEmbeddedSignerEnabled()) {
     signerRuntime = await startServer({ installSignalHandlers: false });
     console.log(`Embedded Playwright signer started at ${signerRuntime.baseUrl}`);
   }
 
-  // Connect to database
-  await connectDB();
   await initializeAlertRules();
-
-  try {
-    const materialRulerSheet = await ensureMaterialRulerSheetTemplate();
-    console.log(
-      materialRulerSheet.created
-        ? 'Created Google Sheet tab MaterialRuler'
-        : 'Google Sheet tab MaterialRuler is ready'
-    );
-  } catch (error) {
-    console.error('[MaterialRuler] Cannot initialize Google Sheet tab at startup:', error);
-  }
 
   // Initialize Telegram bot
   bot = new Telegraf(botToken);

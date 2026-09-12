@@ -1,16 +1,11 @@
-import * as googleSheets from '@googleapis/sheets';
 import type { Telegraf } from 'telegraf';
 import { db } from '../db/index.js';
 import { getRuntimeSettingText, RUNTIME_SETTING_DEFAULTS } from '../settings/runtime.js';
 import { getCampaigns, type TikTokCampaign } from '../tiktok/api.js';
 import { getCampaignMaterialSnapshot, setMaterialOperationStatusBatch, type CampaignMaterialItem } from './service.js';
 
-const SHEET='MaterialRuler', TZ='Asia/Ho_Chi_Minh';
-const DEFAULT_SHEET='1f7bH43w8kv_iiqoy9X5TzSugDuWtsKrB3-Iq8IrxvAI';
+const TZ='Asia/Ho_Chi_Minh';
 const HEADERS=[['campaign_match','spend_operator','spend_threshold','cpa_operator','cpa_threshold','conversions_operator','conversions_threshold','enabled','note']];
-const DEMO=[
- ['Mặt nạ mắt - ID','>=','1','<=','0.7','>=','3','false','Điền điều kiện cần dùng; để trống cặp operator/threshold không áp dụng'],
-];
 type Operator='>'|'>='|'<'|'<='|'=';
 interface Condition { operator:Operator; threshold:number; }
 interface Rule { id:string; campaignMatch?:string; spend?:Condition; cpa?:Condition; conversions?:Condition; }
@@ -18,11 +13,6 @@ export interface MaterialRulerRunSummary {
  manual:boolean; ruleCount:number; matchedCampaigns:number; matchedMaterials:number;
  enabledMaterials:number; failedGroups:number; periodLabels:string[];
 }
-function sheetId(){return process.env.CONFIG_GOOGLE_SHEET_ID||process.env.GOOGLE_SHEET_ID||DEFAULT_SHEET;}
-function client(scopes:string[]){const auth=new googleSheets.auth.GoogleAuth({credentials:{
- client_email:process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
- private_key:process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g,'\n')},scopes});
- return googleSheets.sheets({version:'v4',auth});}
 function t(v:unknown){return String(v??'').trim();}
 function isEnabled(v:unknown){return ['true','1','yes','on','enabled','bat','bật'].includes(t(v).toLocaleLowerCase('vi-VN'));}
 function operator(v:unknown):Operator|undefined{const x=t(v);return ['>','>=','<','<=','='].includes(x)?x as Operator:undefined;}
@@ -63,26 +53,10 @@ async function mark(d:string,time:string,s:MaterialRulerRunSummary){await db.run
  (rule_id,date_key,timezone,run_time,matched_campaigns,changed_materials) VALUES(?,?,?,?,?,?)
  ON CONFLICT(rule_id,date_key) DO UPDATE SET matched_campaigns=excluded.matched_campaigns,changed_materials=excluded.changed_materials,completed_at=CURRENT_TIMESTAMP`,
  ['__day__',d,TZ,time,s.matchedCampaigns,s.enabledMaterials]);}
-export async function ensureMaterialRulerSheetTemplate(){const c=client(['https://www.googleapis.com/auth/spreadsheets']),id=sheetId();
- const book=await c.spreadsheets.get({spreadsheetId:id});const exists=book.data.sheets?.some(s=>s.properties?.title===SHEET);
- if(!exists)await c.spreadsheets.batchUpdate({spreadsheetId:id,requestBody:{requests:[{addSheet:{properties:{title:SHEET}}}]}});
- const current=exists?await c.spreadsheets.values.get({spreadsheetId:id,range:`${SHEET}!A1:J`}):undefined;
- const values=current?.data.values||[],hasLegacyId=t(values[0]?.[0])==='rule_id';
- if(hasLegacyId){
-  const legacyDemoIds=new Set(['daily-enable-all','enable-good-cpa','enable-converting','enable-good-material']);
-  const migrated=values.slice(1).map(r=>legacyDemoIds.has(t(r[0]))?DEMO[0]:r.slice(1,10));
-  await c.spreadsheets.values.clear({spreadsheetId:id,range:`${SHEET}!A:J`});
-  await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A1:I`,valueInputOption:'RAW',requestBody:{values:[HEADERS[0],...(migrated.length?migrated:DEMO)]}});
- }else{
-  await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A1:I1`,valueInputOption:'RAW',requestBody:{values:HEADERS}});
-  if(!exists||values.length<2)await c.spreadsheets.values.update({spreadsheetId:id,range:`${SHEET}!A2:I2`,valueInputOption:'RAW',requestBody:{values:DEMO}});
- }
- return {created:!exists};}
 async function rules(){
  const local=await db.all<{data_json:string}>('SELECT data_json FROM admin_config_rows WHERE section=? ORDER BY position,id',['material_ruler']).catch(()=>[]);
- if(local.length){const rows=local.map(x=>{const r=JSON.parse(x.data_json);return [r.campaign_match,r.spend_operator,r.spend_threshold,r.cpa_operator,r.cpa_threshold,r.conversions_operator,r.conversions_threshold,r.enabled,r.note];});return parseRules([HEADERS[0],...rows]);}
- await ensureMaterialRulerSheetTemplate();const c=client(['https://www.googleapis.com/auth/spreadsheets.readonly']);
- const r=await c.spreadsheets.values.get({spreadsheetId:sheetId(),range:`${SHEET}!A:I`});return parseRules(r.data.values||[]);}
+ const rows=local.map(x=>{const r=JSON.parse(x.data_json);return [r.campaign_match,r.spend_operator,r.spend_threshold,r.cpa_operator,r.cpa_threshold,r.conversions_operator,r.conversions_threshold,r.enabled,r.note];});
+ return parseRules([HEADERS[0],...rows]);}
 async function enable(items:CampaignMaterialItem[]){const groups=new Map<string,CampaignMaterialItem[]>();
  items.filter(x=>x.status==='DISABLE').forEach(x=>groups.set(x.smartPlusAdId,[...(groups.get(x.smartPlusAdId)||[]),x]));
  let enabled=0,failed=0;for(const g of groups.values()){const x=g[0];try{const r=await setMaterialOperationStatusBatch(x.advertiserId,x.smartPlusAdId,g.map(y=>y.adMaterialId),'ENABLE');
