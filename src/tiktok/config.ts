@@ -105,7 +105,9 @@ function getAdvertiserIdsFromEnv(required: boolean): string[] {
 }
 
 async function getConfiguredAdvertiserAccounts(required: boolean): Promise<AdvertiserPermission[]> {
-  const advertiserAccounts = await getAdvertiserPermissions();
+  // TikTok monitoring is controlled by the enabled advertiser allowlist.
+  // Market code is only report metadata and must not exclude an account.
+  const advertiserAccounts = await getAdvertiserPermissions({ includeAllMkt: true });
 
   if (advertiserAccounts.length > 0) {
     return advertiserAccounts;

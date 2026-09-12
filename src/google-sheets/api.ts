@@ -911,9 +911,7 @@ export async function getBusinessCenterId(): Promise<string | undefined> {
   return undefined;
 }
 
-/**
- * Get enabled TikTok advertisers from the "Permissions" tab.
- */
+/** Get enabled TikTok advertisers from the local admin dashboard. */
 export async function getAdvertiserPermissions(options: MktScopeOptions = {}): Promise<AdvertiserPermission[]> {
   const rows = await db.all<{ data_json: string }>(
     'SELECT data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id',
@@ -1213,10 +1211,10 @@ async function getConfigData(options: MktScopeOptions = {}): Promise<ConfigData>
   );
   const permissions = await getAdvertiserPermissions(options);
   
-  // Get page mapping from "PageMap" tab
+  // Get page mapping from local dashboard storage.
   const pageMap: PageMapping[] = adminPages.filter(row => parseEnabled(row.enabled)).map(row => ({ pageHandle: String(row.page_handle || ''), marketCode: String(row.market_code || ''), pageName: String(row.page_name || ''), pageUrl: String(row.page_url || '') }));
 
-  // Get SpMap from "SpMap" tab
+  // Get product-name mapping from local dashboard storage.
   // Layout thực tế: A=STT | B=Tên vật tư | C=DANH MỤC | D=? | E=KEY MAP
   // Sales sheet cột F map với DANH MỤC (C); campaign name map với KEY MAP (E).
   const spMap: SpMapping[] = adminProducts.filter(row => parseEnabled(row.enabled)).map(row => ({ variantName: String(row.variant_name || row.material_name || ''), shortName: String(row.campaign_key || row.variant_name || ''), materialName: String(row.material_name || '') || undefined })).filter(row => row.variantName && row.shortName);

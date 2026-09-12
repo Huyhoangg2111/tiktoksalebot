@@ -1993,7 +1993,9 @@ async function handleBalanceRequest(ctx: Context): Promise<void> {
     let response = '💰 Số dư tài khoản TikTok:\n\n';
 
     if (balances.length === 0) {
-      await ctx.reply('Không tìm thấy TKQC đang bật trong tab Permissions.');
+      await ctx.reply(
+        'Không lấy được số dư TKQC. Hãy kiểm tra mục Tài khoản quảng cáo trong dashboard: có ít nhất một Advertiser ID và đã bật Đang dùng.'
+      );
       return;
     }
 
