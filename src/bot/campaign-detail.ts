@@ -142,25 +142,24 @@ async function handleCampaignDetail(ctx: Context): Promise<void> {
     const ctr = totals.impressions > 0 ? totals.clicks / totals.impressions * 100 : 0;
     const cpc = totals.clicks > 0 ? totals.spend / totals.clicks : 0;
     const cpa = totals.conversions > 0 ? totals.spend / totals.conversions : 0;
+    const dateLabel = normalizedStart === normalizedEnd
+      ? normalizedStart
+      : `${normalizedStart} → ${normalizedEnd}`;
+    const budgetAndBid = [
+      defaults.budget != null ? `💳 Ngân sách <b>$${defaults.budget.toFixed(2)}</b>` : '',
+      defaults.bid != null ? `🏷 Giá thầu <b>$${defaults.bid.toFixed(2)}</b>` : '',
+    ].filter(Boolean).join(' · ');
 
     const lines = [
-      '<b>📊 CHI TIẾT CHIẾN DỊCH</b>',
+      '<b>📊 Chi tiết chiến dịch</b>',
+      `<b>${escapeHtml(defaults.campaignName || campaign?.campaign_name || 'Không rõ tên')}</b>`,
+      `<code>${escapeHtml(campaignId)}</code>`,
+      `<b>${formatStatus(campaign?.status)}</b>`,
+      budgetAndBid,
       '',
-      `Tên: <b>${escapeHtml(defaults.campaignName || campaign?.campaign_name || 'Không rõ')}</b>`,
-      `Campaign ID: <code>${escapeHtml(campaignId)}</code>`,
-      `Advertiser ID: <code>${escapeHtml(advertiserId || 'Không rõ')}</code>`,
-      `Trạng thái: <b>${formatStatus(campaign?.status)}</b>`,
-      defaults.budget != null ? `Ngân sách: <b>$${defaults.budget.toFixed(2)}</b>` : '',
-      defaults.bid != null ? `Giá thầu: <b>$${defaults.bid.toFixed(2)}</b>` : '',
-      '',
-      `<b>Hiệu suất ${escapeHtml(normalizedStart === normalizedEnd ? normalizedStart : `${normalizedStart} → ${normalizedEnd}`)}</b>`,
-      `Chi tiêu: <b>$${totals.spend.toFixed(2)}</b>`,
-      `Hiển thị: <b>${formatNumber(totals.impressions)}</b>`,
-      `Clicks: <b>${formatNumber(totals.clicks)}</b>`,
-      `CTR: <b>${ctr.toFixed(2)}%</b>`,
-      `CPC: <b>$${cpc.toFixed(2)}</b>`,
-      `Chuyển đổi: <b>${formatNumber(totals.conversions)}</b>`,
-      `CPA: <b>$${cpa.toFixed(2)}</b>`,
+      `📅 <b>${escapeHtml(dateLabel)}</b>`,
+      `💸 <b>$${totals.spend.toFixed(2)}</b> · 👆 <b>${formatNumber(totals.clicks)}/${ctr.toFixed(2)}%</b> · 🎯 <b>${formatNumber(totals.conversions)}</b> · 💰 <b>$${cpa.toFixed(2)}</b>`,
+      `👁 Hiển thị <b>${formatNumber(totals.impressions)}</b> · CPC <b>$${cpc.toFixed(2)}</b>`,
     ].filter(Boolean);
 
     if (advertiserId) {
@@ -177,14 +176,13 @@ async function handleCampaignDetail(ctx: Context): Promise<void> {
           const paused = snapshot.materials.filter(item => item.status === 'DISABLE').length;
           lines.push(
             '',
-            `<b>Material Smart+ ngày ${escapeHtml(materialDate)}</b>`,
-            `Tổng: <b>${snapshot.materials.length}</b> · Active: <b>${active}</b> · Pause: <b>${paused}</b>`
+            `🎬 <b>${snapshot.materials.length}</b> material · 🟢 <b>${active}</b> đang chạy · 🟡 <b>${paused}</b> tạm dừng`
           );
 
           for (const material of snapshot.materials.slice(0, 10)) {
             const icon = material.status === 'ENABLE' ? '🟢' : material.status === 'DISABLE' ? '🟡' : '⚪';
             lines.push(
-              `${icon} #${material.materialNumber} · $${material.spend.toFixed(2)} · 🎯 ${formatNumber(material.conversions)} · CPA $${material.cpa.toFixed(2)}`
+              `${material.materialNumber}. ${icon} 💸 $${material.spend.toFixed(2)} · 🎯 ${formatNumber(material.conversions)} · 💰 $${material.cpa.toFixed(2)}`
             );
           }
           if (snapshot.materials.length > 10) {
