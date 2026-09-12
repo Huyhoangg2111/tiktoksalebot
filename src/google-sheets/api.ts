@@ -372,7 +372,9 @@ function parseAdvertiserPermissionRows(rows: any[][], options: MktScopeOptions =
   return rows
     .slice(1)
     .map(row => ({
-      mktCode: String(row[0] || '').trim(),
+      // Để trống mã thị trường nghĩa là dùng thị trường mặc định của bot.
+      // Nhờ đó TKQC vẫn được ghép chi phí vào báo cáo /bc thay vì bị loại âm thầm.
+      mktCode: String(row[0] || '').trim() || getTargetMktCode(),
       advertiserId: String(row[1] || '').trim(),
       enabled: parseEnabled(row[2]),
       note: String(row[3] || '').trim() || undefined,
