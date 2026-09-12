@@ -244,6 +244,10 @@ async function handlePendingSettingText(ctx: Context): Promise<boolean> {
 
   const message = ctx.message;
   const text = message && 'text' in message ? String(message.text || '') : '';
+  if (text.trim().startsWith('/')) {
+    pendingSettingsByChat.delete(chatId);
+    return false;
+  }
   if (pendingKey === 'material_ruler_run_time' || pendingKey === 'material_ruler_period') {
     try {
       await setRuntimeSettingText(pendingKey, text);

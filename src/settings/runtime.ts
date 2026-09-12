@@ -127,10 +127,10 @@ export async function setRuntimeSettingText(
   value: string
 ): Promise<void> {
   const normalized = String(value || '').trim();
-  if (key === 'material_ruler_run_time' && !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(normalized)) {
+  if (key === 'material_ruler_run_time' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(normalized)) {
     throw new Error('Giờ chạy phải theo định dạng HH:mm, ví dụ 00:05 hoặc 06:30.');
   }
-  if (key === 'material_ruler_period' && !/^(today|yesterday|month_to_date|last_([1-9]|[1-8]\\d|90)_days|\\d{4}-\\d{2}-\\d{2}\\.\\.\\d{4}-\\d{2}-\\d{2})$/i.test(normalized)) {
+  if (key === 'material_ruler_period' && !/^(today|yesterday|month_to_date|last_([1-9]|[1-8]\d|90)_days|\d{4}-\d{2}-\d{2}\.\.\d{4}-\d{2}-\d{2})$/i.test(normalized)) {
     throw new Error('Khoảng kiểm tra hợp lệ: today, yesterday, month_to_date, last_N_days (N=1–90), hoặc YYYY-MM-DD..YYYY-MM-DD.');
   }
   await ensureSettingsTable();

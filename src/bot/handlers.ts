@@ -1957,7 +1957,13 @@ async function handlePendingSettingText(ctx: Context): Promise<boolean> {
     return false;
   }
 
-  const value = Number(getTextMessage(ctx).replace(/,/g, '').trim());
+  const text = getTextMessage(ctx).trim();
+  if (text.startsWith('/')) {
+    pendingSettingsByChat.delete(chatId);
+    return false;
+  }
+
+  const value = Number(text.replace(/,/g, ''));
   if (!Number.isFinite(value) || value <= 0) {
     const hint =
       pendingKey === 'sheets_concurrency' || pendingKey === 'tiktok_concurrency'
