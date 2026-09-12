@@ -2,7 +2,12 @@ import type { Telegraf } from 'telegraf';
 import { getCampaignCloneCountMap } from '../campaigns/clone-tracking.js';
 import { db } from '../db/index.js';
 import { parseMaterialDetailCallbackData } from '../materials/callbacks.js';
-import { getSmartPlusAdsByIds, getSmartPlusAdsForAdvertiser, getVietnamDateKey } from '../materials/service.js';
+import {
+  getCampaignMaterialSnapshot,
+  getSmartPlusAdsByIds,
+  getSmartPlusAdsForAdvertiser,
+  getVietnamDateKey,
+} from '../materials/service.js';
 import { getTodaySpentCampaigns, type TikTokSpentCampaign } from '../tiktok/api.js';
 
 const BATCH_IDLE_MS = 10_000;
@@ -207,6 +212,23 @@ async function getCampaignMaterialDisplaySnapshot(
     );
   const campaignIds = new Set(campaignRows.map(row => String(row.campaign_id || '')).filter(Boolean));
   const advertiserIds = [...new Set(campaignRows.map(row => String(row.advertiser_id || '')).filter(Boolean))];
+  const spentMaterialKeys = new Set<string>();
+  let materialSpendDataAvailable = false;
+
+  // Chỉ đếm Material có chi tiêu trong cùng ngày với danh sách campaign.
+  // Trạng thái của Material không phát sinh chi tiêu không được đưa vào tổng.
+  const materialSnapshots = await Promise.allSettled(campaignRows.map(row =>
+    getCampaignMaterialSnapshot(row.advertiser_id, row.campaign_id, undefined, dateKey, dateKey)
+  ));
+  materialSnapshots.forEach(result => {
+    if (result.status !== 'fulfilled') return;
+    materialSpendDataAvailable = true;
+    result.value.materials
+      .filter(material => Number(material.spend) > 0)
+      .forEach(material => spentMaterialKeys.add(
+        `${material.advertiserId}:${material.campaignId}:${material.smartPlusAdId}:${material.adMaterialId}`
+      ));
+  });
 
   let localRows: LocalMaterialOperationRow[] = [];
   try {
@@ -269,6 +291,8 @@ async function getCampaignMaterialDisplaySnapshot(
               : localStatus;
 
           if (effectiveStatus === 'ENABLE' || effectiveStatus === 'DISABLE') {
+            const materialSpendKey = `${advertiserId}:${campaignId}:${smartPlusAdId}:${adMaterialId}`;
+            if (materialSpendDataAvailable && !spentMaterialKeys.has(materialSpendKey)) continue;
             statuses.add(effectiveStatus);
             const counts = materialCountsByCampaignId.get(campaignId) || {
               active: 0,
