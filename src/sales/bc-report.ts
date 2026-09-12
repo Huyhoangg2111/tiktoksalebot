@@ -577,13 +577,18 @@ function collectSalesDataIssues(
 function addCampaignsToSummary(
   summaryMap: Map<string, ProductMarketSummary>,
   campaigns: TikTokSpentCampaign[],
-  config: ConfigData
+  config: ConfigData,
+  targetMktCode?: string
 ): void {
   const knownMarketCodes = getKnownMarketCodes(config);
+  const normalizedTargetMktCode = normalizeKey(targetMktCode);
 
   for (const campaign of campaigns) {
     const productShortName = extractCampaignProductShortName(campaign.campaign_name, config);
     const marketCode = extractCampaignMarketCode(campaign.campaign_name, knownMarketCodes);
+    if (normalizedTargetMktCode && normalizeKey(marketCode) !== normalizedTargetMktCode) {
+      continue;
+    }
     const summary = ensureSummary(summaryMap, productShortName, marketCode);
 
     summary.campaignIds.add(`${campaign.advertiser_id}:${campaign.campaign_id}`);
@@ -815,9 +820,9 @@ async function getBcTikTokFetchOptions(
 
 export async function buildBcProductMarketSummaries(options: BcReportOptions): Promise<ProductMarketSummary[]> {
   const targetMktCode = options.targetMktCode?.trim() || getTargetMktCode();
-  const config = await getConfigSnapshot({ targetMktCode });
+  const config = await getConfigSnapshot({ includeAllMkt: true });
   const advertiserAccounts = config.permissions
-    .filter(permission => normalizeKey(permission.mktCode) === normalizeKey(targetMktCode) && permission.enabled)
+    .filter(permission => permission.enabled)
     .map(permission => ({
       advertiserId: permission.advertiserId,
       advertiserName: permission.advertiserName,
@@ -835,7 +840,7 @@ export async function buildBcProductMarketSummaries(options: BcReportOptions): P
 
   const summaryMap = new Map<string, ProductMarketSummary>();
   addSalesRowsToSummary(summaryMap, salesRows, config, options, targetMktCode);
-  addCampaignsToSummary(summaryMap, campaigns, config);
+  addCampaignsToSummary(summaryMap, campaigns, config, targetMktCode);
 
   return [...summaryMap.values()];
 }
@@ -843,22 +848,19 @@ export async function buildBcProductMarketSummaries(options: BcReportOptions): P
 function getConfiguredBcallPermissions(config: ConfigData) {
   return config.permissions.filter(permission =>
     permission.enabled &&
-    permission.advertiserId &&
-    permission.mktCode &&
-    !isExcludedBcallMktCode(permission.mktCode)
+    permission.advertiserId
   );
 }
 
 function addAllMktSalesRowsToSummary(
   summaryMap: Map<string, BcAllMktSummary>,
-  configuredMktKeys: Set<string>,
   salesRows: SalesData[],
   period: BcReportPeriod
 ): void {
   for (const salesRow of salesRows) {
     const mktCode = String(salesRow.mktCode || '').trim();
 
-    if (!mktCode || !configuredMktKeys.has(getBcallMktKey(mktCode))) {
+    if (!mktCode || isExcludedBcallMktCode(mktCode)) {
       continue;
     }
 
@@ -876,13 +878,10 @@ function addAllMktCampaignsToSummary(
   campaigns: TikTokSpentCampaign[],
   config: ConfigData
 ): void {
-  const permissionByAdvertiserId = new Map(
-    getConfiguredBcallPermissions(config).map(permission => [permission.advertiserId, permission])
-  );
+  const knownMarketCodes = getKnownMarketCodes(config);
 
   for (const campaign of campaigns) {
-    const permission = permissionByAdvertiserId.get(campaign.advertiser_id);
-    const mktCode = permission?.mktCode || campaign.mkt_code;
+    const mktCode = extractCampaignMarketCode(campaign.campaign_name, knownMarketCodes);
 
     if (!mktCode || isExcludedBcallMktCode(mktCode)) {
       continue;
@@ -976,13 +975,7 @@ function renderBcallProductReport(
 export async function buildBcAllSalesReport(period: BcReportPeriod): Promise<BcAllSalesReportResult> {
   const config = await getConfigSnapshot({ includeAllMkt: true });
   const permissions = getConfiguredBcallPermissions(config);
-  const configuredMktKeys = new Set(permissions.map(permission => getBcallMktKey(permission.mktCode)));
   const summaryMap = new Map<string, BcAllMktSummary>();
-
-  permissions
-    .map(permission => permission.mktCode)
-    .filter((mktCode, index, mktCodes) => mktCodes.findIndex(item => getBcallMktKey(item) === getBcallMktKey(mktCode)) === index)
-    .forEach(mktCode => ensureBcallMktSummary(summaryMap, mktCode));
 
   const advertiserAccounts = permissions.map(permission => ({
     advertiserId: permission.advertiserId,
@@ -999,7 +992,7 @@ export async function buildBcAllSalesReport(period: BcReportPeriod): Promise<BcA
       : Promise.resolve([] as Awaited<ReturnType<typeof getTodaySpentCampaigns>>),
   ]);
 
-  addAllMktSalesRowsToSummary(summaryMap, configuredMktKeys, salesRows, period);
+  addAllMktSalesRowsToSummary(summaryMap, salesRows, period);
   addAllMktCampaignsToSummary(summaryMap, campaigns, config);
 
   return renderBcallReport([...summaryMap.values()], period);
@@ -1046,9 +1039,9 @@ export async function buildBcAllMktProductReport(
 export async function buildBcSalesReport(options: BcReportOptions): Promise<BcSalesReportResult> {
   const targetMktCode = options.targetMktCode?.trim() || getTargetMktCode();
   const startedAt = Date.now();
-  const config = await getConfigSnapshot({ targetMktCode });
+  const config = await getConfigSnapshot({ includeAllMkt: true });
   const advertiserAccounts = config.permissions
-    .filter(permission => normalizeKey(permission.mktCode) === normalizeKey(targetMktCode) && permission.enabled)
+    .filter(permission => permission.enabled)
     .map(permission => ({
       advertiserId: permission.advertiserId,
       advertiserName: permission.advertiserName,
@@ -1067,7 +1060,7 @@ export async function buildBcSalesReport(options: BcReportOptions): Promise<BcSa
 
   const summaryMap = new Map<string, ProductMarketSummary>();
   addSalesRowsToSummary(summaryMap, salesRows, config, options, targetMktCode);
-  addCampaignsToSummary(summaryMap, campaigns, config);
+  addCampaignsToSummary(summaryMap, campaigns, config, targetMktCode);
 
   const issues = collectSalesDataIssues(salesRows, config, options, targetMktCode);
   let message = renderReport(

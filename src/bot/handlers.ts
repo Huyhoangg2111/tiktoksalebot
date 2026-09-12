@@ -2135,7 +2135,7 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
     try {
       advertiserPermissions = await getAdvertiserPermissions({ includeAllMkt: true });
     } catch (permissionError) {
-      console.error('Không đọc được Permissions để hiển thị TKQC clone:', permissionError);
+      console.error('Không đọc được danh sách TKQC trong dashboard để hiển thị TKQC clone:', permissionError);
     }
     const permissionByAdvertiserId = buildAdvertiserPermissionMap(advertiserPermissions);
 
@@ -2211,7 +2211,7 @@ async function sendCampaignMktSelector(
   const groups = await getCampaignMktGroups();
 
   if (groups.length === 0) {
-    await ctx.reply('Không tìm thấy MKT nào đang bật trong tab Permissions.');
+    await ctx.reply('Không xác định được MKT từ Page Mapping hoặc tên chiến dịch.');
     return;
   }
 
@@ -2232,7 +2232,7 @@ async function editCampaignMktSelector(
   const groups = await getCampaignMktGroups();
 
   if (groups.length === 0) {
-    await ctx.editMessageText('Không tìm thấy MKT nào đang bật trong tab Permissions.');
+    await ctx.editMessageText('Không xác định được MKT từ Page Mapping hoặc tên chiến dịch.');
     return;
   }
 
@@ -2288,7 +2288,7 @@ async function sendCampaignMktReport(
   const group = groups.find(item => item.mktCode === mktCode);
 
   if (!group) {
-    await ctx.editMessageText(`Không tìm thấy MKT ${escapeHtml(mktCode)} trong Permissions.`, {
+    await ctx.editMessageText(`Không tìm thấy MKT ${escapeHtml(mktCode)} trong dữ liệu chiến dịch.`, {
       parse_mode: 'HTML',
     });
     return;
@@ -2351,7 +2351,7 @@ async function sendCampaignAccountSelector(
   const accounts = await getCampaignReportAdvertiserAccounts();
 
   if (accounts.length === 0) {
-    await ctx.reply('Không tìm thấy TKQC đang bật trong tab Permissions.');
+    await ctx.reply('Không tìm thấy TKQC đang bật trong mục Tài khoản quảng cáo.');
     return;
   }
 
@@ -2372,7 +2372,7 @@ async function editCampaignAccountSelector(
   const accounts = await getCampaignReportAdvertiserAccounts();
 
   if (accounts.length === 0) {
-    await ctx.editMessageText('Không tìm thấy TKQC đang bật trong tab Permissions.');
+    await ctx.editMessageText('Không tìm thấy TKQC đang bật trong mục Tài khoản quảng cáo.');
     return;
   }
 
@@ -2630,7 +2630,7 @@ async function handleReloadRequest(ctx: Context): Promise<void> {
     if (configResult.status === 'fulfilled') {
       lines.push(
         `✅ Settings: ${configResult.value.sources.length} sources · rate ${configResult.value.exchangeRate.toLocaleString('en-US')}`,
-        `✅ Permissions: ${configResult.value.permissions.length} TKQC`,
+        `✅ Tài khoản quảng cáo: ${configResult.value.permissions.length} TKQC`,
         `✅ PageMap: ${configResult.value.pageMap.length} mappings`
       );
     } else {
@@ -2681,7 +2681,7 @@ async function handleReloadRequest(ctx: Context): Promise<void> {
       `✅ Tracking sync: ${trackingStates.length} TKQC`,
       canPruneTrackingCache
         ? `✅ Tracking prune: ${trackingSyncResult.prunedCount} TKQC cũ`
-        : '⏭️ Tracking prune: bỏ qua vì chưa đọc được Permissions'
+        : '⏭️ Đồng bộ theo dõi: bỏ qua vì chưa đọc được danh sách TKQC'
     );
 
     if (failedSteps.length > 0) {
