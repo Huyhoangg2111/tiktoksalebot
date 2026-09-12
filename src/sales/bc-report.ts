@@ -577,18 +577,13 @@ function collectSalesDataIssues(
 function addCampaignsToSummary(
   summaryMap: Map<string, ProductMarketSummary>,
   campaigns: TikTokSpentCampaign[],
-  config: ConfigData,
-  targetMktCode?: string
+  config: ConfigData
 ): void {
   const knownMarketCodes = getKnownMarketCodes(config);
-  const normalizedTargetMktCode = normalizeKey(targetMktCode);
 
   for (const campaign of campaigns) {
     const productShortName = extractCampaignProductShortName(campaign.campaign_name, config);
     const marketCode = extractCampaignMarketCode(campaign.campaign_name, knownMarketCodes);
-    if (normalizedTargetMktCode && normalizeKey(marketCode) !== normalizedTargetMktCode) {
-      continue;
-    }
     const summary = ensureSummary(summaryMap, productShortName, marketCode);
 
     summary.campaignIds.add(`${campaign.advertiser_id}:${campaign.campaign_id}`);
@@ -840,7 +835,7 @@ export async function buildBcProductMarketSummaries(options: BcReportOptions): P
 
   const summaryMap = new Map<string, ProductMarketSummary>();
   addSalesRowsToSummary(summaryMap, salesRows, config, options, targetMktCode);
-  addCampaignsToSummary(summaryMap, campaigns, config, targetMktCode);
+  addCampaignsToSummary(summaryMap, campaigns, config);
 
   return [...summaryMap.values()];
 }
@@ -1060,7 +1055,7 @@ export async function buildBcSalesReport(options: BcReportOptions): Promise<BcSa
 
   const summaryMap = new Map<string, ProductMarketSummary>();
   addSalesRowsToSummary(summaryMap, salesRows, config, options, targetMktCode);
-  addCampaignsToSummary(summaryMap, campaigns, config, targetMktCode);
+  addCampaignsToSummary(summaryMap, campaigns, config);
 
   const issues = collectSalesDataIssues(salesRows, config, options, targetMktCode);
   let message = renderReport(
