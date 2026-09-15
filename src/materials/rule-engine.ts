@@ -315,6 +315,20 @@ async function markNotified(subjectKey: string): Promise<void> {
   );
 }
 
+async function sendMaterialPipelineWarning(bot: Telegraf, detail: string): Promise<void> {
+  const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
+  if (!adminChatId) return;
+  const key = 'material-pipeline-warning';
+  if (!(await canNotify(key, 30 * 60 * 1000))) return;
+  await bot.telegram.sendMessage(
+    adminChatId,
+    ['⚠️ <b>Ruler material đang gặp lỗi</b>', escapeHtml(detail), 'Hãy kiểm tra token đọc/ghi TikTok và log container.'].join('\n'),
+    { parse_mode: 'HTML' }
+  );
+  await saveAlertHistory('material_pipeline_warning', detail, 'high');
+  await markNotified(key);
+}
+
 function campaignSubjectKey(campaign: TikTokSpentCampaign, rule: MaterialRule): string {
   return `campaign:${campaign.advertiser_id}:${campaign.campaign_id}:${rule.metric}:${rule.metricOperator}:${rule.metricThreshold}:${rule.conversionsOperator}:${rule.conversionsThreshold}:${rule.action}`;
 }
@@ -539,19 +553,27 @@ async function evaluateMaterialRules(
   campaigns: TikTokSpentCampaign[],
   rules: MaterialRule[]
 ): Promise<void> {
-  if (rules.length === 0) return;
+  if (rules.length === 0) {
+    console.warn('[MaterialRules] No enabled material rules found in SQLite');
+    await sendMaterialPipelineWarning(bot, 'Không tìm thấy rule material đang bật trong Ruler Auto.');
+    return;
+  }
 
   const configuredConcurrency = await getRuntimeSettingNumber(
     'tiktok_concurrency',
     RUNTIME_SETTING_DEFAULTS.tiktokConcurrency
   );
-  // Material reports are request-heavy; cap Level 1 workers to avoid TikTok QPS errors.
   const concurrency = Math.min(6, Math.max(1, Math.trunc(configuredConcurrency)));
   const startedAt = Date.now();
+  const failures: string[] = [];
+  let matchedCampaigns = 0;
+  let materialCount = 0;
+  let unknownStatusCount = 0;
 
   await forEachWithConcurrency(campaigns, concurrency, async campaign => {
     const campaignRules = rules.filter(rule => matchesCampaignName(rule.nameContains, campaign.campaign_name));
     if (campaignRules.length === 0) return;
+    matchedCampaigns += 1;
 
     try {
       const snapshot = await getCampaignMaterialSnapshot(
@@ -559,6 +581,8 @@ async function evaluateMaterialRules(
         campaign.campaign_id,
         campaign.campaign_name
       );
+      materialCount += snapshot.materials.length;
+      unknownStatusCount += snapshot.materials.filter(item => item.status === 'UNKNOWN').length;
       if (snapshot.materials.length === 0) return;
 
       await sendMaterialNotifyRules(bot, campaign, snapshot.materials, campaignRules);
@@ -567,15 +591,28 @@ async function evaluateMaterialRules(
         .filter((decision): decision is MaterialDecision => Boolean(decision));
       await applyMaterialDecisions(bot, campaign, decisions);
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push(`${campaign.campaign_id}: ${message}`);
       console.error(`[MaterialRules] campaign=${campaign.campaign_id} failed:`, error);
     }
   });
 
+  if (failures.length > 0) {
+    await sendMaterialPipelineWarning(
+      bot,
+      `${failures.length}/${matchedCampaigns} campaign material lỗi. Ví dụ: ${failures.slice(0, 2).join(' | ')}`
+    );
+  } else if (materialCount > 0 && unknownStatusCount === materialCount) {
+    await sendMaterialPipelineWarning(
+      bot,
+      `TikTok trả về ${materialCount} material nhưng toàn bộ thiếu trạng thái ENABLE/DISABLE; bot không thể quyết định pause/active.`
+    );
+  }
+
   console.log(
-    `[MaterialRules] scanned ${campaigns.length} campaigns with concurrency=${concurrency} in ${Date.now() - startedAt}ms`
+    `[MaterialRules] scanned ${campaigns.length} campaigns, matched=${matchedCampaigns}, materials=${materialCount}, unknown_status=${unknownStatusCount}, failures=${failures.length}, concurrency=${concurrency} in ${Date.now() - startedAt}ms`
   );
 }
-
 /**
  * Level 1 architecture:
  * - Rule cấp 1 được đọc trực tiếp từ SQLite/dashboard;
