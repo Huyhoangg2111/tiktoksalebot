@@ -84,13 +84,17 @@ function formatPercent(value: number): string {
   return `${Number(value || 0).toFixed(2)}%`;
 }
 
-function shortMaterialName(name: string | undefined, tiktokItemId: string): string {
-  const normalized = sanitizeTelegramText(name).replace(/\s+/g, ' ').trim();
-  if (!normalized) return `Video ${sanitizeTelegramText(tiktokItemId)}`;
+function getCampaignDisplayName(campaignName: string | undefined, campaignId: string): string {
+  const parts = sanitizeTelegramText(campaignName)
+    .split(' - ')
+    .map(part => part.trim())
+    .filter(Boolean);
 
-  // Array.from() cắt theo Unicode code point, không cắt đôi surrogate pair/emoji.
-  const codePoints = Array.from(normalized);
-  return codePoints.length > 72 ? `${codePoints.slice(0, 69).join('')}...` : normalized;
+  if (parts.length >= 3) {
+    return parts.slice(0, 3).join(' - ');
+  }
+
+  return parts.join(' - ') || sanitizeTelegramText(campaignId);
 }
 
 function getMaterialStatusIcon(status: string): string {
@@ -117,12 +121,11 @@ function renderMaterialPage(
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
   const start = page * MATERIALS_PER_PAGE;
   const items = snapshot.materials.slice(start, start + MATERIALS_PER_PAGE);
-  const campaignLabel = snapshot.campaignName || snapshot.campaignId;
+  const campaignLabel = getCampaignDisplayName(snapshot.campaignName, snapshot.campaignId);
 
   const lines = [
-    '<b>🎬 Chi tiết material</b>',
+    `<b>🎬 Chi tiết material - <code>${escapeHtml(snapshot.campaignId)}</code></b>`,
     `<b>${escapeHtml(campaignLabel)}</b>`,
-    `<code>${escapeHtml(snapshot.campaignId)}</code>`,
     `📅 ${escapeHtml(snapshot.dateKey)} · Trang ${page + 1}/${totalPages}`,
     '',
   ];
@@ -133,9 +136,7 @@ function renderMaterialPage(
 
   for (const item of items) {
     lines.push(
-      `${item.materialNumber}. ${getMaterialStatusIcon(item.status)} <b>${escapeHtml(shortMaterialName(item.name, item.tiktokItemId))}</b>`,
-      `💵 ${formatUsd(item.spend)} · 👆 ${item.clicks.toLocaleString()}/${formatPercent(item.ctr)} · 🎯 ${item.conversions.toLocaleString()} · 💰 ${formatUsd(item.cpa)}`,
-      `<code>${escapeHtml(item.tiktokItemId)}</code>`
+      `${getMaterialStatusIcon(item.status)} #${item.materialNumber} · 💵 ${formatUsd(item.spend)} · 👆 ${item.clicks.toLocaleString()}/${formatPercent(item.ctr)} · 🎯 ${item.conversions.toLocaleString()} · 💰 ${formatUsd(item.cpa)}`
     );
   }
 
