@@ -9,9 +9,12 @@ const HEADERS=[['campaign_match','spend_operator','spend_threshold','cpa_operato
 type Operator='>'|'>='|'<'|'<='|'=';
 interface Condition { operator:Operator; threshold:number; }
 interface Rule { id:string; campaignMatch?:string; spend?:Condition; cpa?:Condition; conversions?:Condition; }
+interface MaterialRulerCampaignSummary {
+ campaignId:string; campaignName:string; matchedMaterials:number; enabledMaterials:number; failedGroups:number;
+}
 export interface MaterialRulerRunSummary {
  manual:boolean; ruleCount:number; matchedCampaigns:number; matchedMaterials:number;
- enabledMaterials:number; failedGroups:number; periodLabels:string[];
+ enabledMaterials:number; failedGroups:number; periodLabels:string[]; campaigns:MaterialRulerCampaignSummary[];
 }
 function t(v:unknown){return String(v??'').trim();}
 function isEnabled(v:unknown){return ['true','1','yes','on','enabled','bat','bật'].includes(t(v).toLocaleLowerCase('vi-VN'));}
@@ -64,18 +67,34 @@ async function enable(items:CampaignMaterialItem[]){const groups=new Map<string,
 async function execute(rs:Rule[],manual:boolean):Promise<MaterialRulerRunSummary>{const today=vnNow().dateKey,camps=await getCampaigns();
  const configuredPeriod=await getRuntimeSettingText('material_ruler_period',RUNTIME_SETTING_DEFAULTS.materialRulerPeriod);
  const p=period(configuredPeriod,today);if(!p)throw new Error(`Khoảng kiểm tra Material Ruler không hợp lệ: ${configuredPeriod}`);
- const s:MaterialRulerRunSummary={manual,ruleCount:rs.length,matchedCampaigns:0,matchedMaterials:0,enabledMaterials:0,failedGroups:0,periodLabels:[]};
- s.periodLabels.push(p.label);
+ const s:MaterialRulerRunSummary={manual,ruleCount:rs.length,matchedCampaigns:0,matchedMaterials:0,enabledMaterials:0,failedGroups:0,periodLabels:[],campaigns:[]};
+ const campaignSummaries=new Map<string,MaterialRulerCampaignSummary>();s.periodLabels.push(p.label);
  for(const r of rs){
-  for(const c of camps.filter(x=>campaignMatch(x,r.campaignMatch))){s.matchedCampaigns++;try{const snap=await getCampaignMaterialSnapshot(c.advertiser_id,c.id,c.name,p.start,p.end);
-   const hit=snap.materials.filter(x=>matches(x,r));s.matchedMaterials+=hit.length;const z=await enable(hit);s.enabledMaterials+=z.enabled;s.failedGroups+=z.failed;
-  }catch(e){s.failedGroups++;console.error('[MaterialRuler] campaign failed',c.id,e);}}}return s;}
+  for(const c of camps.filter(x=>campaignMatch(x,r.campaignMatch))){s.matchedCampaigns++;
+   const campaignSummary=campaignSummaries.get(c.id)||{campaignId:c.id,campaignName:c.name,matchedMaterials:0,enabledMaterials:0,failedGroups:0};
+   campaignSummaries.set(c.id,campaignSummary);
+   try{const snap=await getCampaignMaterialSnapshot(c.advertiser_id,c.id,c.name,p.start,p.end);
+    const hit=snap.materials.filter(x=>matches(x,r));s.matchedMaterials+=hit.length;campaignSummary.matchedMaterials+=hit.length;
+    const z=await enable(hit);s.enabledMaterials+=z.enabled;s.failedGroups+=z.failed;campaignSummary.enabledMaterials+=z.enabled;campaignSummary.failedGroups+=z.failed;
+   }catch(e){s.failedGroups++;campaignSummary.failedGroups++;console.error('[MaterialRuler] campaign failed',c.id,e);}}}
+ s.campaigns=[...campaignSummaries.values()].filter(x=>x.matchedMaterials>0||x.failedGroups>0);return s;}
 function esc(v:unknown){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-export function formatMaterialRulerSummary(s:MaterialRulerRunSummary){return [
- `<b>${s.manual?'Chạy thủ công':'Lịch tự động'} Material Ruler</b>`,`Rule hợp lệ: <b>${s.ruleCount}</b>`,
- `Campaign đã xét: <b>${s.matchedCampaigns}</b>`,`Material đạt điều kiện: <b>${s.matchedMaterials}</b>`,
- `Material đã bật: <b>${s.enabledMaterials}</b>`,`Lỗi/thiếu xác nhận: <b>${s.failedGroups}</b>`,
- s.periodLabels.length?`Khoảng dữ liệu: <code>${esc([...new Set(s.periodLabels)].join(', '))}</code>`:''].filter(Boolean).join('\n');}
+function shortCampaignName(name:string){const parts=t(name).split(' - ').map(x=>x.trim()).filter(Boolean);return parts.length>=2?`${parts[0]} - ${parts[1]}`:t(name);}
+export function formatMaterialRulerSummary(s:MaterialRulerRunSummary){
+ const visible=s.campaigns.slice(0,20);
+ const campaignLines=visible.flatMap((c,i)=>[
+  `${i+1}. <b>${esc(shortCampaignName(c.campaignName))}</b> - <code>${esc(c.campaignId)}</code>`,
+  `Đạt: <b>${c.matchedMaterials}</b> · Đã bật: <b>${c.enabledMaterials}</b>${c.failedGroups?` · Lỗi: <b>${c.failedGroups}</b>`:''}`
+ ]);
+ if(s.campaigns.length>visible.length)campaignLines.push(`… +${s.campaigns.length-visible.length} campaign khác`);
+ return [
+  `<b>${s.manual?'Chạy thủ công':'Lịch tự động'} Material Ruler</b>`,`Rule hợp lệ: <b>${s.ruleCount}</b>`,
+  `Campaign đã xét: <b>${s.matchedCampaigns}</b>`,`Material đạt điều kiện: <b>${s.matchedMaterials}</b>`,
+  `Material đã bật: <b>${s.enabledMaterials}</b>`,`Lỗi/thiếu xác nhận: <b>${s.failedGroups}</b>`,
+  s.periodLabels.length?`Khoảng dữ liệu: <code>${esc([...new Set(s.periodLabels)].join(', '))}</code>`:'',
+  campaignLines.length?'<b>Thống kê theo campaign</b>':'',...campaignLines
+ ].filter(Boolean).join('\n');
+}
 export async function runMaterialRulerNow(bot:Telegraf){const s=await execute(await rules(),true);const id=t(process.env.ADMIN_CHAT_ID);
  if(id)await bot.telegram.sendMessage(id,formatMaterialRulerSummary(s),{parse_mode:'HTML'});return s;}
 export async function checkAndRunDailyMaterialRuler(bot:Telegraf){await ensureTable();const now=vnNow();
