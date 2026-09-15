@@ -340,18 +340,25 @@ async function getCampaignSmartPlusAds(
 ): Promise<any[]> {
   const ads = await getSmartPlusAdsForAdvertiser(advertiserId);
   const matched = ads.filter(ad => String(ad?.campaign_id || '') === campaignId);
-  const ready = matched.filter(ad => Array.isArray(ad?.creative_list) && ad.creative_list.length > 0);
-  const missingDetailIds = matched
-    .filter(ad => !Array.isArray(ad?.creative_list) || ad.creative_list.length === 0)
+  const smartPlusAdIds = matched
     .map(ad => String(ad?.smart_plus_ad_id || '').trim())
     .filter(Boolean);
 
-  if (missingDetailIds.length === 0) {
-    return ready;
+  if (smartPlusAdIds.length === 0) {
+    return [];
   }
 
-  const details = await getSmartPlusAdsByIds(advertiserId, missingDetailIds);
-  return [...ready, ...details];
+  // The Smart+ list endpoint can include creative_list without material_operation_status.
+  // Always load ad details so the rule engine does not silently treat every material as UNKNOWN.
+  const details = await getSmartPlusAdsByIds(advertiserId, smartPlusAdIds);
+  const detailsById = new Map(
+    details.map(ad => [String(ad?.smart_plus_ad_id || ''), ad])
+  );
+
+  return matched.map(ad => {
+    const id = String(ad?.smart_plus_ad_id || '');
+    return detailsById.get(id) || ad;
+  });
 }
 
 interface MaterialReportRow {
