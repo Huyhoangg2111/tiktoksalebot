@@ -1,6 +1,6 @@
 import type { Telegraf } from 'telegraf';
 import { db } from '../db/index.js';
-import { getRuntimeSettingText, RUNTIME_SETTING_DEFAULTS } from '../settings/runtime.js';
+import { getRuntimeSettingNumber, getRuntimeSettingText, RUNTIME_SETTING_DEFAULTS } from '../settings/runtime.js';
 import { getCampaigns, type TikTokCampaign } from '../tiktok/api.js';
 import { getCampaignMaterialSnapshot, setMaterialOperationStatusBatch, type CampaignMaterialItem } from './service.js';
 
@@ -64,19 +64,27 @@ async function enable(items:CampaignMaterialItem[]){const groups=new Map<string,
  items.filter(x=>x.status==='DISABLE').forEach(x=>groups.set(x.smartPlusAdId,[...(groups.get(x.smartPlusAdId)||[]),x]));
  let enabled=0,failed=0;for(const g of groups.values()){const x=g[0];try{const r=await setMaterialOperationStatusBatch(x.advertiserId,x.smartPlusAdId,g.map(y=>y.adMaterialId),'ENABLE');
  enabled+=r.verified.length;if(r.failed.length)failed++;}catch(e){failed++;console.error('[MaterialRuler] enable failed',e);}}return {enabled,failed};}
+async function forEachWithConcurrency<T>(items:T[],concurrency:number,task:(item:T)=>Promise<void>){let next=0;
+ await Promise.all(Array.from({length:Math.min(items.length,Math.max(1,concurrency))},async()=>{while(next<items.length){const index=next++;await task(items[index]);}}));}
 async function execute(rs:Rule[],manual:boolean):Promise<MaterialRulerRunSummary>{const today=vnNow().dateKey,camps=await getCampaigns();
  const configuredPeriod=await getRuntimeSettingText('material_ruler_period',RUNTIME_SETTING_DEFAULTS.materialRulerPeriod);
  const p=period(configuredPeriod,today);if(!p)throw new Error(`Khoảng kiểm tra Material Ruler không hợp lệ: ${configuredPeriod}`);
  const s:MaterialRulerRunSummary={manual,ruleCount:rs.length,matchedCampaigns:0,matchedMaterials:0,enabledMaterials:0,failedGroups:0,periodLabels:[],campaigns:[]};
- const campaignSummaries=new Map<string,MaterialRulerCampaignSummary>();s.periodLabels.push(p.label);
- for(const r of rs){
-  for(const c of camps.filter(x=>campaignMatch(x,r.campaignMatch))){s.matchedCampaigns++;
-   const campaignSummary=campaignSummaries.get(c.id)||{campaignId:c.id,campaignName:c.name,matchedMaterials:0,enabledMaterials:0,failedGroups:0};
-   campaignSummaries.set(c.id,campaignSummary);
-   try{const snap=await getCampaignMaterialSnapshot(c.advertiser_id,c.id,c.name,p.start,p.end);
-    const hit=snap.materials.filter(x=>matches(x,r));s.matchedMaterials+=hit.length;campaignSummary.matchedMaterials+=hit.length;
-    const z=await enable(hit);s.enabledMaterials+=z.enabled;s.failedGroups+=z.failed;campaignSummary.enabledMaterials+=z.enabled;campaignSummary.failedGroups+=z.failed;
-   }catch(e){s.failedGroups++;campaignSummary.failedGroups++;console.error('[MaterialRuler] campaign failed',c.id,e);}}}
+ const planned=camps.map(c=>({campaign:c,rules:rs.filter(r=>campaignMatch(c,r.campaignMatch))})).filter(x=>x.rules.length>0);
+ const campaignSummaries=new Map<string,MaterialRulerCampaignSummary>();s.periodLabels.push(p.label);s.matchedCampaigns=planned.length;
+ planned.forEach(({campaign:c})=>campaignSummaries.set(c.id,{campaignId:c.id,campaignName:c.name,matchedMaterials:0,enabledMaterials:0,failedGroups:0}));
+ const configuredConcurrency=await getRuntimeSettingNumber('tiktok_concurrency',RUNTIME_SETTING_DEFAULTS.tiktokConcurrency);
+ const concurrency=Math.min(5,Math.max(1,Math.trunc(configuredConcurrency)));
+ await forEachWithConcurrency(planned,concurrency,async({campaign:c,rules:campaignRules})=>{
+  const campaignSummary=campaignSummaries.get(c.id)!;
+  try{
+   const snap=await getCampaignMaterialSnapshot(c.advertiser_id,c.id,c.name,p.start,p.end);
+   const hit=snap.materials.filter(material=>campaignRules.some(rule=>matches(material,rule)));
+   s.matchedMaterials+=hit.length;campaignSummary.matchedMaterials=hit.length;
+   const z=await enable(hit);s.enabledMaterials+=z.enabled;s.failedGroups+=z.failed;
+   campaignSummary.enabledMaterials=z.enabled;campaignSummary.failedGroups=z.failed;
+  }catch(e){s.failedGroups++;campaignSummary.failedGroups++;console.error('[MaterialRuler] campaign failed',c.id,e);}
+ });
  s.campaigns=[...campaignSummaries.values()].filter(x=>x.matchedMaterials>0||x.failedGroups>0);return s;}
 function esc(v:unknown){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function shortCampaignName(name:string){const parts=t(name).split(' - ').map(x=>x.trim()).filter(Boolean);return parts.length>=2?`${parts[0]} - ${parts[1]}`:t(name);}
