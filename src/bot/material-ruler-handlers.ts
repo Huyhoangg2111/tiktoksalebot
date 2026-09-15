@@ -1,5 +1,5 @@
 import type { Context, Telegraf } from 'telegraf';
-import { runMaterialRulerNow } from '../materials/daily-ruler.js';
+import { isMaterialRulerRunning, runMaterialRulerNow } from '../materials/daily-ruler.js';
 
 let running = false;
 
@@ -14,7 +14,7 @@ export function setupMaterialRulerHandlers(bot: Telegraf): void {
       await ctx.reply('❌ Chỉ admin mới được chạy Material Ruler.');
       return;
     }
-    if (running) {
+    if (running || isMaterialRulerRunning()) {
       await ctx.reply('⏳ Material Ruler đang chạy. Vui lòng chờ lượt hiện tại hoàn tất.');
       return;
     }
