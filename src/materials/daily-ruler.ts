@@ -11,10 +11,12 @@ type Operator='>'|'>='|'<'|'<='|'=';
 interface Condition { operator:Operator; threshold:number; }
 interface Rule { id:string; campaignMatch?:string; spend?:Condition; cpa?:Condition; conversions?:Condition; }
 interface MaterialRulerCampaignSummary {
- campaignId:string; campaignName:string; matchedMaterials:number; enabledMaterials:number; failedGroups:number;
+ campaignId:string; campaignName:string; matchedMaterials:number; alreadyActiveMaterials:number;
+ disabledMaterials:number; unknownStatusMaterials:number; enabledMaterials:number; failedGroups:number;
 }
 export interface MaterialRulerRunSummary {
  manual:boolean; ruleCount:number; matchedCampaigns:number; matchedMaterials:number;
+ alreadyActiveMaterials:number; disabledMaterials:number; unknownStatusMaterials:number;
  enabledMaterials:number; failedGroups:number; periodLabels:string[]; campaigns:MaterialRulerCampaignSummary[];
 }
 function t(v:unknown){return String(v??'').trim();}
@@ -70,10 +72,10 @@ async function forEachWithConcurrency<T>(items:T[],concurrency:number,task:(item
 async function execute(rs:Rule[],manual:boolean):Promise<MaterialRulerRunSummary>{const today=vnNow().dateKey,camps=await getCampaigns();
  const configuredPeriod=await getRuntimeSettingText('material_ruler_period',RUNTIME_SETTING_DEFAULTS.materialRulerPeriod);
  const p=period(configuredPeriod,today);if(!p)throw new Error(`Khoảng kiểm tra Material Ruler không hợp lệ: ${configuredPeriod}`);
- const s:MaterialRulerRunSummary={manual,ruleCount:rs.length,matchedCampaigns:0,matchedMaterials:0,enabledMaterials:0,failedGroups:0,periodLabels:[],campaigns:[]};
+ const s:MaterialRulerRunSummary={manual,ruleCount:rs.length,matchedCampaigns:0,matchedMaterials:0,alreadyActiveMaterials:0,disabledMaterials:0,unknownStatusMaterials:0,enabledMaterials:0,failedGroups:0,periodLabels:[],campaigns:[]};
  const planned=camps.map(c=>({campaign:c,rules:rs.filter(r=>campaignMatch(c,r.campaignMatch))})).filter(x=>x.rules.length>0);
  const campaignSummaries=new Map<string,MaterialRulerCampaignSummary>();s.periodLabels.push(p.label);s.matchedCampaigns=planned.length;
- planned.forEach(({campaign:c})=>campaignSummaries.set(c.id,{campaignId:c.id,campaignName:c.name,matchedMaterials:0,enabledMaterials:0,failedGroups:0}));
+ planned.forEach(({campaign:c})=>campaignSummaries.set(c.id,{campaignId:c.id,campaignName:c.name,matchedMaterials:0,alreadyActiveMaterials:0,disabledMaterials:0,unknownStatusMaterials:0,enabledMaterials:0,failedGroups:0}));
  const configuredConcurrency=await getRuntimeSettingNumber('tiktok_concurrency',RUNTIME_SETTING_DEFAULTS.tiktokConcurrency);
  const concurrency=Math.min(5,Math.max(1,Math.trunc(configuredConcurrency)));
  await forEachWithConcurrency(planned,concurrency,async({campaign:c,rules:campaignRules})=>{
@@ -81,7 +83,11 @@ async function execute(rs:Rule[],manual:boolean):Promise<MaterialRulerRunSummary
   try{
    const snap=await getCampaignMaterialSnapshot(c.advertiser_id,c.id,c.name,p.start,p.end);
    const hit=snap.materials.filter(material=>campaignRules.some(rule=>matches(material,rule)));
-   s.matchedMaterials+=hit.length;campaignSummary.matchedMaterials=hit.length;
+   const alreadyActive=hit.filter(material=>material.status==='ENABLE').length;
+   const disabled=hit.filter(material=>material.status==='DISABLE').length;
+   const unknown=hit.length-alreadyActive-disabled;
+   s.matchedMaterials+=hit.length;s.alreadyActiveMaterials+=alreadyActive;s.disabledMaterials+=disabled;s.unknownStatusMaterials+=unknown;
+   campaignSummary.matchedMaterials=hit.length;campaignSummary.alreadyActiveMaterials=alreadyActive;campaignSummary.disabledMaterials=disabled;campaignSummary.unknownStatusMaterials=unknown;
    const z=await enable(hit);s.enabledMaterials+=z.enabled;s.failedGroups+=z.failed;
    campaignSummary.enabledMaterials=z.enabled;campaignSummary.failedGroups=z.failed;
   }catch(e){s.failedGroups++;campaignSummary.failedGroups++;console.error('[MaterialRuler] campaign failed',c.id,e);}
@@ -93,13 +99,15 @@ export function formatMaterialRulerSummary(s:MaterialRulerRunSummary){
  const visible=s.campaigns.slice(0,20);
  const campaignLines=visible.flatMap((c,i)=>[
   `${i+1}. <b>${esc(shortCampaignName(c.campaignName))}</b> - <code>${esc(c.campaignId)}</code>`,
-  `Đạt: <b>${c.matchedMaterials}</b> · Đã bật: <b>${c.enabledMaterials}</b>${c.failedGroups?` · Lỗi: <b>${c.failedGroups}</b>`:''}`
+  `Đạt: <b>${c.matchedMaterials}</b> · Đã bật sẵn: <b>${c.alreadyActiveMaterials}</b> · Cần bật: <b>${c.disabledMaterials}</b> · Bật thành công: <b>${c.enabledMaterials}</b>${c.unknownStatusMaterials?` · Không rõ trạng thái: <b>${c.unknownStatusMaterials}</b>`:''}${c.failedGroups?` · Lỗi: <b>${c.failedGroups}</b>`:''}`
  ]);
  if(s.campaigns.length>visible.length)campaignLines.push(`… +${s.campaigns.length-visible.length} campaign khác`);
  return [
   `<b>${s.manual?'Chạy thủ công':'Lịch tự động'} Material Ruler</b>`,`Rule hợp lệ: <b>${s.ruleCount}</b>`,
   `Campaign đã xét: <b>${s.matchedCampaigns}</b>`,`Material đạt điều kiện: <b>${s.matchedMaterials}</b>`,
-  `Material đã bật: <b>${s.enabledMaterials}</b>`,`Lỗi/thiếu xác nhận: <b>${s.failedGroups}</b>`,
+  `Đã hoạt động sẵn: <b>${s.alreadyActiveMaterials}</b>`,`Đang tạm dừng cần bật: <b>${s.disabledMaterials}</b>`,
+  `Bật thành công: <b>${s.enabledMaterials}</b>`,`Không rõ trạng thái: <b>${s.unknownStatusMaterials}</b>`,
+  `Lỗi/thiếu xác nhận: <b>${s.failedGroups}</b>`,
   s.periodLabels.length?`Khoảng dữ liệu: <code>${esc([...new Set(s.periodLabels)].join(', '))}</code>`:'',
   campaignLines.length?'<b>Thống kê theo campaign</b>':'',...campaignLines
  ].filter(Boolean).join('\n');
