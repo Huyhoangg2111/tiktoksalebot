@@ -190,7 +190,9 @@ async function handleCampaignDetail(ctx: Context): Promise<void> {
             `🎬 <b>${snapshot.materials.length}</b> material · 🟢 <b>${active}</b> đang chạy · 🟡 <b>${paused}</b> tạm dừng`
           );
 
-          const visibleMaterials = snapshot.materials.slice(0, 10);
+          const materialsPerPage = 15;
+          const totalMaterialPages = Math.max(1, Math.ceil(snapshot.materials.length / materialsPerPage));
+          const visibleMaterials = snapshot.materials.slice(0, materialsPerPage);
           for (const material of visibleMaterials) {
             const icon = material.status === 'ENABLE' ? '🟢' : material.status === 'DISABLE' ? '🟡' : '⚪';
             lines.push(
@@ -216,12 +218,22 @@ async function handleCampaignDetail(ctx: Context): Promise<void> {
             materialKeyboard.push(toggleButtons.slice(index, index + 5));
           }
 
-          materialKeyboard.push([{
-            text: snapshot.materials.length > 10
-              ? `🔎 Xem ${snapshot.materials.length - 10} material còn lại`
-              : '🔎 Xem tất cả material',
-            callback_data: buildMaterialDetailCallbackData(advertiserId, campaignId, 0),
-          }]);
+          if (totalMaterialPages > 1) {
+            materialKeyboard.push([
+              {
+                text: '⏪',
+                callback_data: buildMaterialDetailCallbackData(advertiserId, campaignId, 0),
+              },
+              {
+                text: `1/${totalMaterialPages}`,
+                callback_data: buildMaterialDetailCallbackData(advertiserId, campaignId, 0),
+              },
+              {
+                text: '⏩',
+                callback_data: buildMaterialDetailCallbackData(advertiserId, campaignId, 1),
+              },
+            ]);
+          }
         }
       } catch (error) {
         console.warn(`[campid] Cannot load Smart+ materials for ${campaignId}:`, error);
