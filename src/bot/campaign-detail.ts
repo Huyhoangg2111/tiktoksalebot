@@ -1,6 +1,10 @@
 import type { Context, Telegraf } from 'telegraf';
 import { getCampaignCloneDefaults, getTodaySpentCampaigns } from '../tiktok/api.js';
 import { getCampaignMaterialSnapshot } from '../materials/service.js';
+import {
+  buildMaterialDetailCallbackData,
+  buildMaterialToggleCallbackData,
+} from '../materials/callbacks.js';
 
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
@@ -84,7 +88,7 @@ function formatStatus(status: string | undefined): string {
   if (status === 'active') return '🟢 Đang chạy';
   if (status === 'paused') return '🟡 Tạm dừng';
   if (status === 'deleted') return '⚪ Đã xóa';
-  return escapeHtml(status || 'Không xác định');
+  return status ? escapeHtml(status) : '';
 }
 
 function formatNumber(value: number): string {
@@ -95,7 +99,7 @@ function formatCampaignDisplayName(value: string | undefined): string {
   const fullName = String(value || '').replace(/\s+/g, ' ').trim();
   if (!fullName) return 'Không rõ tên';
   const parts = fullName.split(/\s+-\s+/).map(part => part.trim()).filter(Boolean);
-  return parts.length >= 2 ? `${parts[0]} - ${parts[1]}` : fullName;
+  return parts.length >= 3 ? parts.slice(0, 3).join(' - ') : fullName;
 }
 
 async function handleCampaignDetail(ctx: Context): Promise<void> {
@@ -159,15 +163,15 @@ async function handleCampaignDetail(ctx: Context): Promise<void> {
 
     const lines = [
       '<b>📊 Chi tiết chiến dịch</b>',
-      `<b>${escapeHtml(formatCampaignDisplayName(defaults.campaignName || campaign?.campaign_name))}</b>`,
-      `<code>${escapeHtml(campaignId)}</code>`,
-      `<b>${formatStatus(campaign?.status)}</b>`,
+      `<b>${escapeHtml(formatCampaignDisplayName(defaults.campaignName || campaign?.campaign_name))}</b> - <code>${escapeHtml(campaignId)}</code>`,
+      `<b>${formatStatus(campaign?.status || defaults.status)}</b>`,
       budgetAndBid,
       '',
       `📅 <b>${escapeHtml(dateLabel)}</b>`,
       `💸 <b>$${totals.spend.toFixed(2)}</b> · 👆 <b>${formatNumber(totals.clicks)}/${ctr.toFixed(2)}%</b> · 🎯 <b>${formatNumber(totals.conversions)}</b> · 💰 <b>$${cpa.toFixed(2)}</b>`,
       `👁 Hiển thị <b>${formatNumber(totals.impressions)}</b> · CPC <b>$${cpc.toFixed(2)}</b>`,
     ].filter(Boolean);
+    const materialKeyboard: Array<Array<{ text: string; callback_data: string }>> = [];
 
     if (advertiserId) {
       try {
@@ -186,32 +190,59 @@ async function handleCampaignDetail(ctx: Context): Promise<void> {
             `🎬 <b>${snapshot.materials.length}</b> material · 🟢 <b>${active}</b> đang chạy · 🟡 <b>${paused}</b> tạm dừng`
           );
 
-          for (const material of snapshot.materials.slice(0, 10)) {
+          const visibleMaterials = snapshot.materials.slice(0, 10);
+          for (const material of visibleMaterials) {
             const icon = material.status === 'ENABLE' ? '🟢' : material.status === 'DISABLE' ? '🟡' : '⚪';
             lines.push(
               `${material.materialNumber}. ${icon} 💸 ${material.spend.toFixed(2)} · 👆 ${formatNumber(material.clicks)}/${material.ctr.toFixed(2)}% · 🎯 ${formatNumber(material.conversions)} · 💰 ${material.cpa.toFixed(2)}`
             );
           }
-          if (snapshot.materials.length > 10) {
-            lines.push(`… còn ${snapshot.materials.length - 10} material khác.`);
+
+          const toggleButtons = visibleMaterials
+            .filter(material => material.status !== 'UNKNOWN')
+            .map(material => ({
+              text: `${material.status === 'ENABLE' ? '🟢' : '🟡'} ${material.materialNumber}`,
+              callback_data: buildMaterialToggleCallbackData({
+                advertiserId: material.advertiserId,
+                smartPlusAdId: material.smartPlusAdId,
+                adMaterialId: material.adMaterialId,
+                campaignId: material.campaignId,
+                operationStatus: material.status === 'ENABLE' ? 'DISABLE' : 'ENABLE',
+                page: 0,
+              }),
+            }));
+
+          for (let index = 0; index < toggleButtons.length; index += 5) {
+            materialKeyboard.push(toggleButtons.slice(index, index + 5));
           }
+
+          materialKeyboard.push([{
+            text: snapshot.materials.length > 10
+              ? `🔎 Xem ${snapshot.materials.length - 10} material còn lại`
+              : '🔎 Xem tất cả material',
+            callback_data: buildMaterialDetailCallbackData(advertiserId, campaignId, 0),
+          }]);
         }
       } catch (error) {
         console.warn(`[campid] Cannot load Smart+ materials for ${campaignId}:`, error);
       }
     }
 
-    if (rows.length === 0) {
-      lines.push('', '<i>Campaign không có dữ liệu chi tiêu trong khoảng thời gian đã chọn.</i>');
-    }
-
     const chatId = ctx.chat?.id;
     if (chatId) {
       await ctx.telegram.editMessageText(chatId, waitMessage.message_id, undefined, lines.join('\n'), {
         parse_mode: 'HTML',
+        ...(materialKeyboard.length > 0
+          ? { reply_markup: { inline_keyboard: materialKeyboard } }
+          : {}),
       });
     } else {
-      await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
+      await ctx.reply(lines.join('\n'), {
+        parse_mode: 'HTML',
+        ...(materialKeyboard.length > 0
+          ? { reply_markup: { inline_keyboard: materialKeyboard } }
+          : {}),
+      });
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
