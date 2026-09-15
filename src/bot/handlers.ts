@@ -161,6 +161,9 @@ type ActiveCampaignProductSummary = {
   productName: string;
   marketCode: string;
   campaignCount: number;
+  spentCampaignCount: number;
+  activeMaterialCount: number;
+  spentMaterialCount: number;
   accountCounts: Map<string, number>;
 };
 
@@ -1144,13 +1147,30 @@ function summarizeActiveCampaignsByProduct(
       productName,
       marketCode,
       campaignCount: 0,
+      spentCampaignCount: 0,
+      activeMaterialCount: 0,
+      spentMaterialCount: 0,
       accountCounts: new Map<string, number>(),
     };
     const accountLabel = getAccountNumberLabel(campaign) ||
       getAccountShortBalanceLabel(campaign) ||
       campaign.advertiser_id;
 
+    const materialCounts = campaign as TikTokSpentCampaign & {
+      material_active_count?: number;
+      material_paused_count?: number;
+      material_total_active_count?: number;
+      material_total_paused_count?: number;
+    };
+
     summary.campaignCount += 1;
+    summary.activeMaterialCount += Number(materialCounts.material_total_active_count || 0);
+    if (Number(campaign.spend || 0) > 0) {
+      summary.spentCampaignCount += 1;
+      summary.spentMaterialCount +=
+        Number(materialCounts.material_active_count || 0) +
+        Number(materialCounts.material_paused_count || 0);
+    }
     summary.accountCounts.set(accountLabel, (summary.accountCounts.get(accountLabel) || 0) + 1);
     summariesByProduct.set(summaryKey, summary);
   }
@@ -1166,27 +1186,36 @@ function formatActiveCampaignProductSummaryLine(summary: ActiveCampaignProductSu
   const accountSummary = [...summary.accountCounts.entries()]
     .sort(([accountLabelA], [accountLabelB]) => compareAccountNames(accountLabelA, accountLabelB))
     .map(([accountLabel, campaignCount]) =>
-      `${campaignCount.toLocaleString('vi-VN')} \u00b7 ${escapeHtml(accountLabel)}`
+      `${campaignCount.toLocaleString('vi-VN')} · ${escapeHtml(accountLabel)}`
     )
     .join(' - ');
 
-  return `${escapeHtml(summary.productName)} (${escapeHtml(summary.marketCode)}) - \u{1F7E2} ${summary.campaignCount.toLocaleString('vi-VN')} camp - ${accountSummary}`;
+  return [
+    `<b>${escapeHtml(summary.productName)} (${escapeHtml(summary.marketCode)})</b>`,
+    `🟢 Đang hoạt động: ${summary.campaignCount.toLocaleString('vi-VN')} camp · ${summary.activeMaterialCount.toLocaleString('vi-VN')} material`,
+    `💸 Có chi tiêu: ${summary.spentCampaignCount.toLocaleString('vi-VN')} camp · ${summary.spentMaterialCount.toLocaleString('vi-VN')} material`,
+    `TKQC: ${accountSummary}`,
+  ].join('\n');
 }
 
 function buildActiveCampaignProductsMessage(campaigns: TikTokSpentCampaign[]): string {
   const summaries = summarizeActiveCampaignsByProduct(campaigns);
   const totalActiveCampaigns = summaries.reduce((sum, summary) => sum + summary.campaignCount, 0);
+  const totalSpentCampaigns = summaries.reduce((sum, summary) => sum + summary.spentCampaignCount, 0);
+  const totalActiveMaterials = summaries.reduce((sum, summary) => sum + summary.activeMaterialCount, 0);
+  const totalSpentMaterials = summaries.reduce((sum, summary) => sum + summary.spentMaterialCount, 0);
 
   if (summaries.length === 0) {
-    return 'Kh\u00f4ng c\u00f3 campaign active \u0111\u1ec3 th\u1ed1ng k\u00ea theo s\u1ea3n ph\u1ea9m.';
+    return 'Không có campaign active để thống kê theo sản phẩm.';
   }
 
   return [
-    '<b>Campaign active theo s\u1ea3n ph\u1ea9m</b>',
-    `T\u1ed5ng: \u{1F7E2} ${totalActiveCampaigns.toLocaleString('vi-VN')} camp`,
+    '<b>Campaign active theo sản phẩm</b>',
+    `🟢 Đang hoạt động: ${totalActiveCampaigns.toLocaleString('vi-VN')} camp · ${totalActiveMaterials.toLocaleString('vi-VN')} material`,
+    `💸 Có chi tiêu: ${totalSpentCampaigns.toLocaleString('vi-VN')} camp · ${totalSpentMaterials.toLocaleString('vi-VN')} material`,
     '',
-    ...summaries.map(formatActiveCampaignProductSummaryLine),
-  ].join('\n');
+    ...summaries.flatMap(summary => [formatActiveCampaignProductSummaryLine(summary), '']),
+  ].join('\n').trim();
 }
 
 function normalizeCampaignPage(page: number, totalPages: number): number {
