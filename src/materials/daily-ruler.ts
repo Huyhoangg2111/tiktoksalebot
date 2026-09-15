@@ -99,5 +99,22 @@ export async function runMaterialRulerNow(bot:Telegraf){const s=await execute(aw
  if(id)await bot.telegram.sendMessage(id,formatMaterialRulerSummary(s),{parse_mode:'HTML'});return s;}
 export async function checkAndRunDailyMaterialRuler(bot:Telegraf){await ensureTable();const now=vnNow();
  const runTime=await getRuntimeSettingText('material_ruler_run_time',RUNTIME_SETTING_DEFAULTS.materialRulerRunTime);
- if(now.timeKey<runTime||await completed(now.dateKey,runTime))return;const s=await execute(await rules(),false);const id=t(process.env.ADMIN_CHAT_ID);
- if(id)await bot.telegram.sendMessage(id,formatMaterialRulerSummary(s),{parse_mode:'HTML'});if(!s.failedGroups)await mark(now.dateKey,runTime,s);}
+ if(now.timeKey<runTime||await completed(now.dateKey,runTime))return;
+ const id=t(process.env.ADMIN_CHAT_ID);
+ const configuredPeriod=await getRuntimeSettingText('material_ruler_period',RUNTIME_SETTING_DEFAULTS.materialRulerPeriod);
+ if(id)await bot.telegram.sendMessage(id,[
+  '<b>⏳ Bắt đầu Material Ruler theo lịch</b>',
+  `Giờ cài đặt: <code>${esc(runTime)}</code>`,
+  `Khoảng dữ liệu: <code>${esc(configuredPeriod)}</code>`
+ ].join('\n'),{parse_mode:'HTML'});
+ try{
+  const s=await execute(await rules(),false);
+  if(id)await bot.telegram.sendMessage(id,formatMaterialRulerSummary(s),{parse_mode:'HTML'});
+  if(!s.failedGroups)await mark(now.dateKey,runTime,s);
+ }catch(error){
+  const message=error instanceof Error?error.message:String(error);
+  console.error('[MaterialRuler] scheduled run failed',error);
+  if(id)await bot.telegram.sendMessage(id,`❌ <b>Material Ruler theo lịch thất bại</b>\n<code>${esc(message.slice(0,1000))}</code>`,{parse_mode:'HTML'});
+  throw error;
+ }
+}
