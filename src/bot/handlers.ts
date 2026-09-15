@@ -1192,8 +1192,8 @@ function formatActiveCampaignProductSummaryLine(summary: ActiveCampaignProductSu
 
   return [
     `<b>${escapeHtml(summary.productName)} (${escapeHtml(summary.marketCode)})</b>`,
-    `🟢 Đang hoạt động: ${summary.campaignCount.toLocaleString('vi-VN')} camp · ${summary.activeMaterialCount.toLocaleString('vi-VN')} material`,
-    `💸 Có chi tiêu: ${summary.spentCampaignCount.toLocaleString('vi-VN')} camp · ${summary.spentMaterialCount.toLocaleString('vi-VN')} material`,
+    `🟢 Đang hoạt động: 📢 ${summary.campaignCount.toLocaleString('vi-VN')} · 🎬 ${summary.activeMaterialCount.toLocaleString('vi-VN')}`,
+    `💸 Có chi tiêu: 📢 ${summary.spentCampaignCount.toLocaleString('vi-VN')} · 🎬 ${summary.spentMaterialCount.toLocaleString('vi-VN')}`,
     `TKQC: ${accountSummary}`,
   ].join('\n');
 }
@@ -1211,8 +1211,8 @@ function buildActiveCampaignProductsMessage(campaigns: TikTokSpentCampaign[]): s
 
   return [
     '<b>Campaign active theo sản phẩm</b>',
-    `🟢 Đang hoạt động: ${totalActiveCampaigns.toLocaleString('vi-VN')} camp · ${totalActiveMaterials.toLocaleString('vi-VN')} material`,
-    `💸 Có chi tiêu: ${totalSpentCampaigns.toLocaleString('vi-VN')} camp · ${totalSpentMaterials.toLocaleString('vi-VN')} material`,
+    `🟢 Đang hoạt động: 📢 ${totalActiveCampaigns.toLocaleString('vi-VN')} · 🎬 ${totalActiveMaterials.toLocaleString('vi-VN')}`,
+    `💸 Có chi tiêu: 📢 ${totalSpentCampaigns.toLocaleString('vi-VN')} · 🎬 ${totalSpentMaterials.toLocaleString('vi-VN')}`,
     '',
     ...summaries.flatMap(summary => [formatActiveCampaignProductSummaryLine(summary), '']),
   ].join('\n').trim();
