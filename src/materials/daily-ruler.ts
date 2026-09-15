@@ -5,6 +5,7 @@ import { getCampaigns, type TikTokCampaign } from '../tiktok/api.js';
 import { getCampaignMaterialSnapshot, setMaterialOperationStatusBatch, type CampaignMaterialItem } from './service.js';
 
 const TZ='Asia/Ho_Chi_Minh';
+let materialRulerRunning=false;
 const HEADERS=[['campaign_match','spend_operator','spend_threshold','cpa_operator','cpa_threshold','conversions_operator','conversions_threshold','enabled','note']];
 type Operator='>'|'>='|'<'|'<='|'=';
 interface Condition { operator:Operator; threshold:number; }
@@ -103,11 +104,15 @@ export function formatMaterialRulerSummary(s:MaterialRulerRunSummary){
   campaignLines.length?'<b>Thống kê theo campaign</b>':'',...campaignLines
  ].filter(Boolean).join('\n');
 }
-export async function runMaterialRulerNow(bot:Telegraf){const s=await execute(await rules(),true);const id=t(process.env.ADMIN_CHAT_ID);
+export function isMaterialRulerRunning(){return materialRulerRunning;}
+async function executeExclusive(manual:boolean){if(materialRulerRunning)throw new Error('Material Ruler đang có một lượt khác chạy.');
+ materialRulerRunning=true;try{return await execute(await rules(),manual);}finally{materialRulerRunning=false;}}
+export async function runMaterialRulerNow(bot:Telegraf){const s=await executeExclusive(true);const id=t(process.env.ADMIN_CHAT_ID);
  if(id)await bot.telegram.sendMessage(id,formatMaterialRulerSummary(s),{parse_mode:'HTML'});return s;}
 export async function checkAndRunDailyMaterialRuler(bot:Telegraf){await ensureTable();const now=vnNow();
  const runTime=await getRuntimeSettingText('material_ruler_run_time',RUNTIME_SETTING_DEFAULTS.materialRulerRunTime);
  if(now.timeKey<runTime||await completed(now.dateKey,runTime))return;
+ if(materialRulerRunning){console.log('[MaterialRuler] scheduled run skipped because another material ruler run is in progress');return;}
  const id=t(process.env.ADMIN_CHAT_ID);
  const configuredPeriod=await getRuntimeSettingText('material_ruler_period',RUNTIME_SETTING_DEFAULTS.materialRulerPeriod);
  if(id)await bot.telegram.sendMessage(id,[
@@ -116,7 +121,7 @@ export async function checkAndRunDailyMaterialRuler(bot:Telegraf){await ensureTa
   `Khoảng dữ liệu: <code>${esc(configuredPeriod)}</code>`
  ].join('\n'),{parse_mode:'HTML'});
  try{
-  const s=await execute(await rules(),false);
+  const s=await executeExclusive(false);
   if(id)await bot.telegram.sendMessage(id,formatMaterialRulerSummary(s),{parse_mode:'HTML'});
   if(!s.failedGroups)await mark(now.dateKey,runTime,s);
  }catch(error){
