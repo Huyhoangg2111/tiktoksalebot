@@ -220,6 +220,7 @@ export interface TikTokCampaignCloneDefaults {
   campaignName?: string;
   budget?: number;
   bid?: number;
+  status?: TikTokSpentCampaign['status'];
 }
 
 interface TikTokCampaignRecord {
@@ -1798,6 +1799,9 @@ export async function getCampaignCloneDefaults(campaignId: string): Promise<TikT
     campaignName: campaign.campaign_name,
     budget: getCampaignBudgetSetting(campaign) ?? getAdGroupBudgetSetting(adgroups),
     bid: getAdGroupBidSetting(adgroups),
+    status: normalizeCampaignStatus(
+      `${campaign.operation_status || ''} ${campaign.secondary_status || ''}`
+    ),
   };
 }
 
