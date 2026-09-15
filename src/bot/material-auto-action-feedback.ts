@@ -61,6 +61,7 @@ interface LocalMaterialOperationRow {
 interface CampaignMaterialDisplaySnapshot {
   byCampaignId: Map<string, CampaignMaterialDisplayStatus>;
   materialCountsByCampaignId: Map<string, { active: number; paused: number }>;
+  allMaterialCountsByCampaignId: Map<string, { active: number; paused: number }>;
   campaignRows: SpentCampaignStatusRow[];
 }
 
@@ -248,6 +249,7 @@ async function getCampaignMaterialDisplaySnapshot(
   );
   const operationStatusesByCampaignId = new Map<string, Set<MaterialOperationStatus>>();
   const materialCountsByCampaignId = new Map<string, { active: number; paused: number; seen: Set<string> }>();
+  const allMaterialCountsByCampaignId = new Map<string, { active: number; paused: number; seen: Set<string> }>();
 
   await Promise.all(advertiserIds.map(async advertiserId => {
     try {
@@ -291,6 +293,19 @@ async function getCampaignMaterialDisplaySnapshot(
               : localStatus;
 
           if (effectiveStatus === 'ENABLE' || effectiveStatus === 'DISABLE') {
+            const materialKey = `${smartPlusAdId}:${adMaterialId}`;
+            const allCounts = allMaterialCountsByCampaignId.get(campaignId) || {
+              active: 0,
+              paused: 0,
+              seen: new Set<string>(),
+            };
+            if (!allCounts.seen.has(materialKey)) {
+              allCounts.seen.add(materialKey);
+              if (effectiveStatus === 'ENABLE') allCounts.active += 1;
+              if (effectiveStatus === 'DISABLE') allCounts.paused += 1;
+            }
+            allMaterialCountsByCampaignId.set(campaignId, allCounts);
+
             const materialSpendKey = `${advertiserId}:${campaignId}:${smartPlusAdId}:${adMaterialId}`;
             if (materialSpendDataAvailable && !spentMaterialKeys.has(materialSpendKey)) continue;
             statuses.add(effectiveStatus);
@@ -299,7 +314,6 @@ async function getCampaignMaterialDisplaySnapshot(
               paused: 0,
               seen: new Set<string>(),
             };
-            const materialKey = `${smartPlusAdId}:${adMaterialId}`;
             if (!counts.seen.has(materialKey)) {
               counts.seen.add(materialKey);
               if (effectiveStatus === 'ENABLE') counts.active += 1;
@@ -335,9 +349,16 @@ async function getCampaignMaterialDisplaySnapshot(
       { active: counts.active, paused: counts.paused },
     ])
   );
+  const normalizedAllMaterialCounts = new Map(
+    [...allMaterialCountsByCampaignId.entries()].map(([campaignId, counts]) => [
+      campaignId,
+      { active: counts.active, paused: counts.paused },
+    ])
+  );
   const snapshot = {
     byCampaignId,
     materialCountsByCampaignId: normalizedMaterialCounts,
+    allMaterialCountsByCampaignId: normalizedAllMaterialCounts,
     campaignRows,
   };
   if (!sourceCampaigns) {
@@ -357,6 +378,7 @@ export async function applyMaterialDisplayStatusesToCampaigns(
   const snapshot = await getCampaignMaterialDisplaySnapshot(true, campaigns);
   return campaigns.map(campaign => {
     const materialCounts = snapshot.materialCountsByCampaignId.get(campaign.campaign_id);
+    const allMaterialCounts = snapshot.allMaterialCountsByCampaignId.get(campaign.campaign_id);
     return {
       ...campaign,
       ad_status: campaign.status === 'deleted'
@@ -365,6 +387,8 @@ export async function applyMaterialDisplayStatusesToCampaigns(
       raw_ad_status: undefined,
       material_active_count: materialCounts?.active || 0,
       material_paused_count: materialCounts?.paused || 0,
+      material_total_active_count: allMaterialCounts?.active || 0,
+      material_total_paused_count: allMaterialCounts?.paused || 0,
     };
   });
 }
