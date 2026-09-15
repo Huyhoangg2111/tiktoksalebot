@@ -51,7 +51,7 @@ async function ensureTable(){await db.exec(`CREATE TABLE IF NOT EXISTS material_
  rule_id TEXT NOT NULL,date_key TEXT NOT NULL,timezone TEXT NOT NULL,run_time TEXT NOT NULL,
  matched_campaigns INTEGER DEFAULT 0,changed_materials INTEGER DEFAULT 0,completed_at TEXT DEFAULT CURRENT_TIMESTAMP,
  PRIMARY KEY(rule_id,date_key))`);}
-async function completed(d:string){return !!(await db.get('SELECT 1 FROM material_daily_ruler_runs WHERE rule_id=? AND date_key=?',['__day__',d]));}
+async function completed(d:string,time:string){return !!(await db.get('SELECT 1 FROM material_daily_ruler_runs WHERE rule_id=? AND date_key=? AND run_time=?',['__day__',d,time]));}
 async function mark(d:string,time:string,s:MaterialRulerRunSummary){await db.run(`INSERT INTO material_daily_ruler_runs
  (rule_id,date_key,timezone,run_time,matched_campaigns,changed_materials) VALUES(?,?,?,?,?,?)
  ON CONFLICT(rule_id,date_key) DO UPDATE SET matched_campaigns=excluded.matched_campaigns,changed_materials=excluded.changed_materials,completed_at=CURRENT_TIMESTAMP`,
@@ -99,5 +99,5 @@ export async function runMaterialRulerNow(bot:Telegraf){const s=await execute(aw
  if(id)await bot.telegram.sendMessage(id,formatMaterialRulerSummary(s),{parse_mode:'HTML'});return s;}
 export async function checkAndRunDailyMaterialRuler(bot:Telegraf){await ensureTable();const now=vnNow();
  const runTime=await getRuntimeSettingText('material_ruler_run_time',RUNTIME_SETTING_DEFAULTS.materialRulerRunTime);
- if(now.timeKey<runTime||await completed(now.dateKey))return;const s=await execute(await rules(),false);const id=t(process.env.ADMIN_CHAT_ID);
+ if(now.timeKey<runTime||await completed(now.dateKey,runTime))return;const s=await execute(await rules(),false);const id=t(process.env.ADMIN_CHAT_ID);
  if(id)await bot.telegram.sendMessage(id,formatMaterialRulerSummary(s),{parse_mode:'HTML'});if(!s.failedGroups)await mark(now.dateKey,runTime,s);}
