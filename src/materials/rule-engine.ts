@@ -322,7 +322,7 @@ async function sendMaterialPipelineWarning(bot: Telegraf, detail: string): Promi
   if (!(await canNotify(key, 30 * 60 * 1000))) return;
   await bot.telegram.sendMessage(
     adminChatId,
-    ['⚠️ <b>Ruler material đang gặp lỗi</b>', escapeHtml(detail), 'Hãy kiểm tra token đọc/ghi TikTok và log container.'].join('\n'),
+    ['⚠️ <b>Ruler material đang gặp lỗi</b>', escapeHtml(detail), 'Bot sẽ tự thử lại ở lượt kế tiếp. Nếu lỗi lặp lại liên tục, hãy kiểm tra log container và token TikTok.'].join('\n'),
     { parse_mode: 'HTML' }
   );
   await saveAlertHistory('material_pipeline_warning', detail, 'high');
@@ -563,7 +563,8 @@ async function evaluateMaterialRules(
     'tiktok_concurrency',
     RUNTIME_SETTING_DEFAULTS.tiktokConcurrency
   );
-  const concurrency = Math.min(6, Math.max(1, Math.trunc(configuredConcurrency)));
+  // Endpoint chi tiết Smart+ thường trả POOL_FAILURE/RPC_FAILED khi quét quá nhiều campaign đồng thời.
+  const concurrency = Math.min(3, Math.max(1, Math.trunc(configuredConcurrency)));
   const startedAt = Date.now();
   const failures: string[] = [];
   let matchedCampaigns = 0;
