@@ -563,8 +563,7 @@ async function evaluateMaterialRules(
     'tiktok_concurrency',
     RUNTIME_SETTING_DEFAULTS.tiktokConcurrency
   );
-  // Endpoint chi tiết Smart+ thường trả POOL_FAILURE/RPC_FAILED khi quét quá nhiều campaign đồng thời.
-  const concurrency = Math.min(3, Math.max(1, Math.trunc(configuredConcurrency)));
+  const concurrency = Math.min(6, Math.max(1, Math.trunc(configuredConcurrency)));
   const startedAt = Date.now();
   const failures: string[] = [];
   let matchedCampaigns = 0;
