@@ -96,6 +96,7 @@ interface MaterialOperationStateRow {
 }
 
 const smartPlusAdsCache = new Map<string, CachedSmartPlusAds>();
+const smartPlusAdsInFlight = new Map<string, Promise<any[]>>();
 
 function getApiErrorMessage(payload: any): string {
   return String(payload?.message || payload?.msg || payload?.code || 'Unknown TikTok API error');
@@ -253,20 +254,40 @@ async function getReadToken(): Promise<string> {
   return getTikTokReadAccessToken();
 }
 
-async function getSmartPlusAdsPage(advertiserId: string, page: number): Promise<any[]> {
-  const accessToken = await getReadToken();
-  const response = await axios.get(`${TIKTOK_API_BASE}/smart_plus/ad/get/`, {
-    params: {
-      advertiser_id: advertiserId,
-      page,
-      page_size: SMART_PLUS_PAGE_SIZE,
-    },
-    headers: { 'Access-Token': accessToken },
-    timeout: 30_000,
-  });
+function isRetryableSmartPlusReadError(error:unknown):boolean {
+  const message=error instanceof Error?error.message:String(error);
+  return /POOL_FAILURE|RPC_FAILED|Internal error|Creative_data not valid|Couldn't load|Something went wrong|try again|remote or network error|connection failed|THRIFT_INGRESS|ECONN|ETIMEDOUT|timeout/i.test(message);
+}
 
-  assertTikTokSuccess(response.data, `Smart+ ad list advertiser=${advertiserId}`);
-  return Array.isArray(response.data?.data?.list) ? response.data.data.list : [];
+async function withSmartPlusReadRetry<T>(context:string,task:()=>Promise<T>):Promise<T> {
+  let lastError:unknown;
+  for(let attempt=0;attempt<3;attempt+=1) {
+    try{return await task();}catch(error){
+      lastError=error;
+      if(!isRetryableSmartPlusReadError(error)||attempt===2)break;
+      const delayMs=1_000*(2**attempt)+Math.floor(Math.random()*500);
+      console.warn(`[MaterialService] retryable Smart+ read error context=${context} attempt=${attempt+1}/3; retrying in ${delayMs}ms`);
+      await sleep(delayMs);
+    }
+  }
+  throw lastError;
+}
+
+async function getSmartPlusAdsPage(advertiserId: string, page: number): Promise<any[]> {
+  return withSmartPlusReadRetry(`list advertiser=${advertiserId} page=${page}`,async()=>{
+    const accessToken = await getReadToken();
+    const response = await axios.get(`${TIKTOK_API_BASE}/smart_plus/ad/get/`, {
+      params: {
+        advertiser_id: advertiserId,
+        page,
+        page_size: SMART_PLUS_PAGE_SIZE,
+      },
+      headers: { 'Access-Token': accessToken },
+      timeout: 30_000,
+    });
+    assertTikTokSuccess(response.data, `Smart+ ad list advertiser=${advertiserId}`);
+    return Array.isArray(response.data?.data?.list) ? response.data.data.list : [];
+  });
 }
 
 export async function getSmartPlusAdsForAdvertiser(
@@ -278,24 +299,31 @@ export async function getSmartPlusAdsForAdvertiser(
   if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
     return cached.ads;
   }
-
-  const ads: any[] = [];
-  for (let page = 1; page <= 20; page += 1) {
-    const list = await getSmartPlusAdsPage(advertiserId, page);
-    ads.push(...list);
-    if (list.length < SMART_PLUS_PAGE_SIZE) break;
+  if(!forceRefresh){
+    const pending=smartPlusAdsInFlight.get(advertiserId);
+    if(pending)return pending;
   }
 
-  smartPlusAdsCache.set(advertiserId, {
-    expiresAt: Date.now() + SMART_PLUS_CACHE_TTL_MS,
-    ads,
-  });
-  return ads;
-}
+  const load=async()=>{
+    const ads: any[] = [];
+    for (let page = 1; page <= 20; page += 1) {
+      const list = await getSmartPlusAdsPage(advertiserId, page);
+      ads.push(...list);
+      if (list.length < SMART_PLUS_PAGE_SIZE) break;
+    }
+    smartPlusAdsCache.set(advertiserId, {
+      expiresAt: Date.now() + SMART_PLUS_CACHE_TTL_MS,
+      ads,
+    });
+    return ads;
+  };
 
-function isTransientSmartPlusDetailError(error:unknown):boolean {
- const message=error instanceof Error?error.message:String(error);
- return /POOL_FAILURE|RPC_FAILED|Internal error|Couldn't load|Something went wrong|try again|remote or network error|connection failed|THRIFT_INGRESS|ECONN|ETIMEDOUT|timeout/i.test(message);
+  if(forceRefresh)return load();
+  const pending=load();
+  smartPlusAdsInFlight.set(advertiserId,pending);
+  try{return await pending;}finally{
+    if(smartPlusAdsInFlight.get(advertiserId)===pending)smartPlusAdsInFlight.delete(advertiserId);
+  }
 }
 
 export async function getSmartPlusAdsByIds(
@@ -306,42 +334,26 @@ export async function getSmartPlusAdsByIds(
   const uniqueIds = [...new Set(smartPlusAdIds.map(id => String(id || '').trim()).filter(Boolean))];
   if (uniqueIds.length === 0) return [];
 
-  const accessToken = await getReadToken();
   const results: any[] = [];
-
   for (let offset = 0; offset < uniqueIds.length; offset += SMART_PLUS_PAGE_SIZE) {
     const batchIds = uniqueIds.slice(offset, offset + SMART_PLUS_PAGE_SIZE);
-    let batchResults:any[]|undefined;
-    let lastError:unknown;
-
-    for (let attempt=0;attempt<3;attempt+=1) {
-      try {
-        const response = await axios.get(`${TIKTOK_API_BASE}/smart_plus/ad/get/`, {
-          params: {
-            advertiser_id: advertiserId,
-            smart_plus_ad_ids: JSON.stringify(batchIds),
-            page: 1,
-            page_size: SMART_PLUS_PAGE_SIZE,
-          },
-          headers: { 'Access-Token': accessToken },
-          timeout: 30_000,
-        });
-        assertTikTokSuccess(response.data, `Smart+ ad detail batch advertiser=${advertiserId}`);
-        batchResults=Array.isArray(response.data?.data?.list)?response.data.data.list:[];
-        break;
-      } catch(error) {
-        lastError=error;
-        if(!isTransientSmartPlusDetailError(error)||attempt===2)break;
-        const delayMs=1_000*(2**attempt)+Math.floor(Math.random()*500);
-        console.warn(`[MaterialService] transient Smart+ detail error advertiser=${advertiserId} attempt=${attempt+1}/3; retrying in ${delayMs}ms`);
-        await sleep(delayMs);
-      }
-    }
-
-    if(!batchResults)throw lastError;
+    const batchResults=await withSmartPlusReadRetry(`detail advertiser=${advertiserId}`,async()=>{
+      const accessToken=await getReadToken();
+      const response = await axios.get(`${TIKTOK_API_BASE}/smart_plus/ad/get/`, {
+        params: {
+          advertiser_id: advertiserId,
+          smart_plus_ad_ids: JSON.stringify(batchIds),
+          page: 1,
+          page_size: SMART_PLUS_PAGE_SIZE,
+        },
+        headers: { 'Access-Token': accessToken },
+        timeout: 30_000,
+      });
+      assertTikTokSuccess(response.data, `Smart+ ad detail batch advertiser=${advertiserId}`);
+      return Array.isArray(response.data?.data?.list)?response.data.data.list:[];
+    });
     results.push(...batchResults);
   }
-
   return results;
 }
 
@@ -371,17 +383,7 @@ async function getCampaignSmartPlusAds(
 
   // The Smart+ list endpoint can include creative_list without material_operation_status.
   // Always load ad details so the rule engine does not silently treat every material as UNKNOWN.
-  let details:any[];
-  try {
-    details=await getSmartPlusAdsByIds(advertiserId,smartPlusAdIds);
-  } catch(error) {
-    const message=error instanceof Error?error.message:String(error);
-    if(/Creative_data not valid/i.test(message)) {
-      console.warn(`[MaterialService] invalid creative detail advertiser=${advertiserId} campaign=${campaignId}; using list payload with UNKNOWN status where needed`);
-      return matched;
-    }
-    throw error;
-  }
+  const details=await getSmartPlusAdsByIds(advertiserId,smartPlusAdIds);
   const detailsById = new Map(
     details.map(ad => [String(ad?.smart_plus_ad_id || ''), ad])
   );
