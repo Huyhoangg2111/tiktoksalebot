@@ -21,6 +21,32 @@ import {
 const CAMPAIGN_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
 const MATERIAL_NOTIFY_COOLDOWN_MS = 30 * 60 * 1000;
 
+/** Advertiser bị TikTok từ chối quyền ghi — tạm ngừng thử lại để không spam API/log/Telegram. */
+const NO_PERMISSION_RETRY_MS = 6 * 60 * 60 * 1000;
+const noPermissionAdvertisers = new Map<string, number>();
+
+function markNoPermissionAdvertiser(message: string): void {
+  const match = String(message || '').match(/No permission to operate advertiser:\s*(\d+)/);
+  if (!match) return;
+  const advertiserId = match[1];
+  if (!noPermissionAdvertisers.has(advertiserId)) {
+    console.warn(
+      `[MaterialRules] advertiser ${advertiserId} bị TikTok từ chối quyền ghi ("No permission to operate advertiser"). Tạm bỏ qua ${NO_PERMISSION_RETRY_MS / 3_600_000} giờ — hãy cấp quyền cho token TikTok với tk này.`
+    );
+  }
+  noPermissionAdvertisers.set(advertiserId, Date.now() + NO_PERMISSION_RETRY_MS);
+}
+
+function isNoPermissionBlocked(advertiserId: string): boolean {
+  const expiresAt = noPermissionAdvertisers.get(advertiserId);
+  if (!expiresAt) return false;
+  if (expiresAt <= Date.now()) {
+    noPermissionAdvertisers.delete(advertiserId);
+    return false;
+  }
+  return true;
+}
+
 interface MaterialRule {
   rowNumber: number;
   nameContains?: string;
@@ -548,6 +574,7 @@ async function collectMaterialDecisionLines(
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        markNoPermissionAdvertiser(message);
         console.error(
           `[MaterialRules] write failed campaign=${campaign.campaign_id} ad=${first.material.smartPlusAdId} status=${first.operationStatus}:`,
           error
@@ -623,6 +650,7 @@ async function applyCampaignDecisions(
       success = true;
     } catch (error) {
       failureReason = error instanceof Error ? error.message : String(error);
+      markNoPermissionAdvertiser(failureReason);
       console.error(
         `[CampaignRules] write failed campaign=${campaign.campaign_id} status=${operationStatus}:`,
         error
@@ -688,6 +716,7 @@ async function evaluateCampaignActions(
   if (rules.length === 0) return;
 
   const decisions = campaigns
+    .filter(campaign => !isNoPermissionBlocked(campaign.advertiser_id))
     .map(campaign => getCampaignDecision(campaign, rules))
     .filter((decision): decision is CampaignDecision => Boolean(decision));
   await applyCampaignDecisions(bot, decisions);
@@ -759,6 +788,7 @@ async function evaluateMaterialRules(
   const mktGroups = new Map<string, MaterialMktGroup>();
 
   await forEachWithConcurrency(campaigns, concurrency, async campaign => {
+    if (isNoPermissionBlocked(campaign.advertiser_id)) return;
     const campaignRules = rules.filter(rule => matchesCampaignName(rule.nameContains, campaign.campaign_name));
     if (campaignRules.length === 0) return;
     matchedCampaigns += 1;
