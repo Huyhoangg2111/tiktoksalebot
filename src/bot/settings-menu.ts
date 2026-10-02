@@ -2,7 +2,9 @@ import { Markup, type Context, type Telegraf } from 'telegraf';
 import { initializeAlertRules } from '../alerts/index.js';
 import { getSchedulerHealthSnapshot, restartScheduler } from '../scheduler/index.js';
 import {
+  getAutoActionMode,
   getRuntimeSettingsSnapshot,
+  setAutoActionMode,
   setRuntimeSettingNumber,
   setRuntimeSettingText,
   type RuntimeSettingKey,
@@ -13,8 +15,9 @@ type AnySettingKey = RuntimeSettingKey | RuntimeTextSettingKey;
 const pendingSettingsByChat = new Map<number, AnySettingKey>();
 
 const SETTING_LABELS: Record<AnySettingKey, string> = {
-  material_ruler_run_time: 'Giờ chạy Material Ruler',
-  material_ruler_period: 'Khoảng kiểm tra Material Ruler',
+  material_ruler_run_time: 'Giờ chạy Ruler theo lịch',
+  material_ruler_period: 'Khoảng kiểm tra Ruler theo lịch',
+  auto_action_mode: 'Chế độ auto tắt/bật',
   level1_interval_minutes: 'Lịch cảnh báo cấp 1',
   level2_interval_minutes: 'Lịch cảnh báo cấp 2',
   level3_interval_minutes: 'Lịch cảnh báo cấp 3 (tháng)',
@@ -83,6 +86,10 @@ function formatSchedulerStatus(state: {
   return '⚪ ĐANG CHỜ';
 }
 
+function autoActionModeLabel(mode: string): string {
+  return mode === 'campaign' ? 'Campaign (bản đầu)' : 'Material (hiện tại)';
+}
+
 async function buildSettingsMessage(): Promise<string> {
   const settings = await getRuntimeSettingsSnapshot();
 
@@ -95,7 +102,8 @@ async function buildSettingsMessage(): Promise<string> {
     `• Cấp 3 (tháng): mỗi <b>${formatSettingNumber(settings.level3IntervalMinutes)}</b> phút · %CP &gt; <b>${formatSettingNumber(settings.level3CpAdsThreshold)}%</b>`,
     `• Số dư: dưới <b>$${formatSettingNumber(settings.balanceThresholdUsd)}</b>`,
     '',
-    '<b>🎬 Material Ruler</b>',
+    '<b>🎬 Ruler theo lịch</b>',
+    `• Chế độ auto: <b>${escapeHtml(autoActionModeLabel(settings.autoActionMode))}</b>`,
     `• Giờ chạy: <b>${escapeHtml(settings.materialRulerRunTime)}</b> · múi giờ Việt Nam`,
     `• Khoảng kiểm tra: <b>${escapeHtml(settings.materialRulerPeriod)}</b>`,
     '• Chạy ngay: <code>/materialruler</code>',
@@ -111,8 +119,12 @@ async function buildSettingsMessage(): Promise<string> {
   ].join('\n');
 }
 
-function buildSettingsKeyboard() {
+async function buildSettingsKeyboard() {
+  const mode = await getAutoActionMode();
   return Markup.inlineKeyboard([
+    [
+      Markup.button.callback(`🔁 Chế độ auto: ${mode === 'campaign' ? 'Campaign' : 'Material'}`, 'settings:mode'),
+    ],
     [
       Markup.button.callback('⏱ Cấp 1', 'settings:set:level1_interval_minutes'),
       Markup.button.callback('⏱ Cấp 2', 'settings:set:level2_interval_minutes'),
@@ -186,10 +198,10 @@ function buildHealthMessage(): string {
 }
 
 async function showSettings(ctx: Context, edit = false): Promise<void> {
-  const text = await buildSettingsMessage();
+  const [text, keyboard] = await Promise.all([buildSettingsMessage(), buildSettingsKeyboard()]);
   const options = {
     parse_mode: 'HTML' as const,
-    ...buildSettingsKeyboard(),
+    ...keyboard,
   };
 
   if (edit && ctx.callbackQuery?.message) {
@@ -248,7 +260,7 @@ async function handlePendingSettingText(ctx: Context): Promise<boolean> {
     pendingSettingsByChat.delete(chatId);
     return false;
   }
-  if (pendingKey === 'material_ruler_run_time' || pendingKey === 'material_ruler_period') {
+  if (pendingKey === 'material_ruler_run_time' || pendingKey === 'material_ruler_period' || pendingKey === 'auto_action_mode') {
     try {
       await setRuntimeSettingText(pendingKey, text);
       pendingSettingsByChat.delete(chatId);
@@ -336,6 +348,24 @@ export function setupSettingsMenuHandlers(bot: Telegraf): void {
       `Nhập giá trị mới cho <b>${escapeHtml(SETTING_LABELS[key])}</b>.${rangeHint}`,
       { parse_mode: 'HTML' }
     );
+  });
+
+  bot.action(/^settings:mode$/, async ctx => {
+    if (!isAdmin(ctx)) {
+      await ctx.answerCbQuery('Không có quyền thực hiện.');
+      return;
+    }
+
+    try {
+      const current = await getAutoActionMode();
+      const next = current === 'campaign' ? 'material' : 'campaign';
+      await setAutoActionMode(next);
+      await ctx.answerCbQuery(`Đã chuyển chế độ auto sang: ${next === 'campaign' ? 'Campaign' : 'Material'}`);
+      await showSettings(ctx, true);
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : String(error);
+      await ctx.answerCbQuery(`❌ Không chuyển được chế độ: ${messageText}`.slice(0, 190));
+    }
   });
 
   bot.action(/^settings:health$/, async ctx => {

@@ -6,8 +6,8 @@ import {
   type AlertComparisonOperator,
   type AlertMetric,
 } from '../google-sheets/api.js';
-import { getTodaySpentCampaigns, type TikTokSpentCampaign } from '../tiktok/api.js';
-import { getRuntimeSettingNumber, RUNTIME_SETTING_DEFAULTS } from '../settings/runtime.js';
+import { getTodaySpentCampaigns, setCampaignStatus, type TikTokCampaignOperationStatus, type TikTokSpentCampaign } from '../tiktok/api.js';
+import { getAutoActionMode, getRuntimeSettingNumber, RUNTIME_SETTING_DEFAULTS } from '../settings/runtime.js';
 import { saveAlertHistory } from './alert-store.js';
 import { checkAndSendLowBalanceAlert } from './balance-alert.js';
 import { buildMaterialDetailCallbackData } from './callbacks.js';
@@ -396,6 +396,12 @@ interface MaterialDecision {
   operationStatus: MaterialOperationStatus;
 }
 
+interface CampaignDecision {
+  campaign: TikTokSpentCampaign;
+  operationStatus: TikTokCampaignOperationStatus;
+  rule: MaterialRule;
+}
+
 function getMaterialDecision(material: CampaignMaterialItem, rules: MaterialRule[]): MaterialDecision | undefined {
   const matchingActions = rules
     .filter(rule => rule.action === 'pause' || rule.action === 'enable')
@@ -531,6 +537,120 @@ async function applyMaterialDecisions(
   await saveAlertHistory('material_auto_action', plainMessage, 'low');
 }
 
+/** Thang mức như bản cũ: so khoảng cách giá trị với ngưỡng để xếp severity. */
+function calculateCampaignActionSeverity(currentValue: number, threshold: number): 'low' | 'medium' | 'high' | 'critical' {
+  if (threshold === 0) return currentValue === 0 ? 'low' : 'critical';
+  const ratio = Math.abs(currentValue - threshold) / Math.abs(threshold);
+  if (ratio >= 0.5) return 'critical';
+  if (ratio >= 0.25) return 'high';
+  if (ratio >= 0.1) return 'medium';
+  return 'low';
+}
+
+async function applyCampaignDecisions(
+  bot: Telegraf,
+  decisions: CampaignDecision[]
+): Promise<void> {
+  const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
+  if (!adminChatId || decisions.length === 0) return;
+
+  for (const decision of decisions) {
+    const { campaign, operationStatus, rule } = decision;
+    const actionLabel = operationStatus === 'DISABLE' ? 'Pause' : 'Active';
+    const metricValue = rule.metric === 'spend' ? campaign.spend : campaign.cpa;
+    const severity = calculateCampaignActionSeverity(metricValue, rule.metricThreshold);
+    let success = false;
+    let failureReason: string | undefined;
+
+    try {
+      await setCampaignStatus(campaign.advertiser_id, campaign.campaign_id, operationStatus);
+      success = true;
+    } catch (error) {
+      failureReason = error instanceof Error ? error.message : String(error);
+      console.error(
+        `[CampaignRules] write failed campaign=${campaign.campaign_id} status=${operationStatus}:`,
+        error
+      );
+    }
+
+    const conditionLabel = rule.metricOperator === 'gt' || rule.metricOperator === 'gte'
+      ? 'vượt giới hạn'
+      : 'đạt điều kiện';
+    const resultLine = `${actionLabel} ${success ? 'thành công' : `thất bại${failureReason ? `: ${failureReason}` : ''}`}`;
+    const plainMessage = [
+      `Campaign ${conditionLabel}`,
+      `${campaign.campaign_name} - ${campaign.campaign_id}`,
+      `$${campaign.spend.toFixed(2)} · click ${campaign.clicks.toLocaleString()}/${campaign.ctr.toFixed(2)}% · conversion ${campaign.conversions.toLocaleString()} · CPA $${campaign.cpa.toFixed(2)}`,
+      formatRuleCondition(rule),
+      resultLine,
+    ].join('\n');
+
+    // Nút đảo chiều dùng lại handler campaign_action còn hoạt động ở bản hiện tại.
+    const inverseStatus: TikTokCampaignOperationStatus = operationStatus === 'DISABLE' ? 'ENABLE' : 'DISABLE';
+    await bot.telegram.sendMessage(adminChatId, [
+      `🤖 <b>${escapeHtml(actionLabel)} campaign · chế độ Campaign</b>`,
+      `<b>${escapeHtml(campaign.campaign_name)}</b> - <code>${escapeHtml(campaign.campaign_id)}</code>`,
+      `💵 $${campaign.spend.toFixed(2)} · 👆 ${campaign.clicks.toLocaleString()}/${campaign.ctr.toFixed(2)}% · 🎯 ${campaign.conversions.toLocaleString()} · 💰 $${campaign.cpa.toFixed(2)}`,
+      `📏 ${escapeHtml(formatRuleCondition(rule))}`,
+      `${success ? '✅' : '⚠️'} <b>${escapeHtml(resultLine)}</b>`,
+    ].join('\n'), {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [[{
+          text: inverseStatus === 'DISABLE' ? '⏸ Pause' : '✅ Active',
+          callback_data: `campaign_action:${inverseStatus}:${campaign.campaign_id}`,
+        }]],
+      },
+    });
+    await saveAlertHistory(
+      operationStatus === 'DISABLE'
+        ? (success ? 'campaign_paused' : 'campaign_pause_failed')
+        : (success ? 'campaign_enabled' : 'campaign_enable_failed'),
+      plainMessage,
+      severity
+    );
+  }
+}
+
+async function evaluateCampaignActions(
+  bot: Telegraf,
+  campaigns: TikTokSpentCampaign[],
+  sourceRules: MaterialRule[]
+): Promise<void> {
+  const rules = sourceRules.filter(rule => rule.action === 'pause' || rule.action === 'enable');
+  if (rules.length === 0) return;
+
+  const decisions = campaigns
+    .map(campaign => getCampaignDecision(campaign, rules))
+    .filter((decision): decision is CampaignDecision => Boolean(decision));
+  await applyCampaignDecisions(bot, decisions);
+}
+
+function getCampaignDecision(campaign: TikTokSpentCampaign, rules: MaterialRule[]): CampaignDecision | undefined {
+  const matchingActionRules = rules
+    .filter(rule => rule.action === 'pause' || rule.action === 'enable')
+    .filter(rule => campaignMatchesRule(campaign, rule));
+  if (matchingActionRules.length === 0) return undefined;
+
+  const desiredStatuses = new Set<TikTokCampaignOperationStatus>(
+    matchingActionRules.map(rule => rule.action === 'pause' ? 'DISABLE' : 'ENABLE')
+  );
+
+  if (desiredStatuses.size !== 1) {
+    console.warn(`[CampaignRules] conflicting rules for campaign=${campaign.campaign_id}; skipping write`);
+    return undefined;
+  }
+
+  const operationStatus = [...desiredStatuses][0];
+  const currentStatus = campaign.status === 'active'
+    ? 'ENABLE'
+    : campaign.status === 'paused'
+      ? 'DISABLE'
+      : undefined;
+  if (!currentStatus || currentStatus === operationStatus) return undefined;
+  return { campaign, operationStatus, rule: matchingActionRules[0] };
+}
+
 async function forEachWithConcurrency<T>(
   items: T[],
   concurrency: number,
@@ -617,10 +737,10 @@ async function evaluateMaterialRules(
  * Level 1 architecture:
  * - Rule cấp 1 được đọc trực tiếp từ SQLite/dashboard;
  * - if that read fails, the last-known-good in-memory snapshot is used;
- * - campaign rules: qualified notify only; no campaign status writes;
- * - ad rules: deliberately ignored;
- * - material rules: evaluate today's metrics and control ad_material_id only;
- * - low-balance monitoring remains active.
+ * - chế độ 'material' (mặc định): campaign rules chỉ notify; ad rules bị bỏ qua;
+ *   material rules được đánh giá theo chỉ số hôm nay và điều khiển ad_material_id;
+ * - chế độ 'campaign' (bản đầu): campaign rules pause/enable tự tắt/bật campaign,
+ *   material rules không chạy; low-balance monitoring remains active.
  */
 export async function checkAndSendCampaignMaterialAlerts(bot: Telegraf): Promise<void> {
   try {
@@ -642,5 +762,12 @@ export async function checkAndSendCampaignMaterialAlerts(bot: Telegraf): Promise
   );
 
   await evaluateCampaignNotifications(bot, filteredCampaigns, ruleSnapshot.campaignRules);
+
+  const mode = await getAutoActionMode();
+  if (mode === 'campaign') {
+    await evaluateCampaignActions(bot, filteredCampaigns, ruleSnapshot.campaignRules);
+    return;
+  }
+
   await evaluateMaterialRules(bot, filteredCampaigns, ruleSnapshot.materialRules);
 }

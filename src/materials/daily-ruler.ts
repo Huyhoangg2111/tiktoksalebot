@@ -1,7 +1,7 @@
 import type { Telegraf } from 'telegraf';
 import { db } from '../db/index.js';
-import { getRuntimeSettingNumber, getRuntimeSettingText, RUNTIME_SETTING_DEFAULTS } from '../settings/runtime.js';
-import { getCampaigns, type TikTokCampaign } from '../tiktok/api.js';
+import { getAutoActionMode, getRuntimeSettingNumber, getRuntimeSettingText, RUNTIME_SETTING_DEFAULTS } from '../settings/runtime.js';
+import { getCampaigns, getTodaySpentCampaigns, setCampaignStatus, type TikTokSpentCampaign } from '../tiktok/api.js';
 import { getCampaignMaterialSnapshot, setMaterialOperationStatusBatch, type CampaignMaterialItem } from './service.js';
 
 const TZ='Asia/Ho_Chi_Minh';
@@ -19,6 +19,15 @@ export interface MaterialRulerRunSummary {
  alreadyActiveMaterials:number; disabledMaterials:number; unknownStatusMaterials:number;
  enabledMaterials:number; failedGroups:number; periodLabels:string[]; campaigns:MaterialRulerCampaignSummary[];
 }
+export interface CampaignRulerItemSummary {
+ campaignId:string; campaignName:string; status:string; result:'already_active'|'enabled'|'failed';
+}
+export interface CampaignRulerRunSummary {
+ manual:boolean; mode:'campaign'; ruleCount:number; evaluatedCampaigns:number; matchedCampaigns:number;
+ alreadyActiveCampaigns:number; pausedCampaigns:number; enabledCampaigns:number; failedCount:number;
+ periodLabels:string[]; items:CampaignRulerItemSummary[];
+}
+export type RulerRunSummary = MaterialRulerRunSummary | CampaignRulerRunSummary;
 function t(v:unknown){return String(v??'').trim();}
 function isEnabled(v:unknown){return ['true','1','yes','on','enabled','bat','bật'].includes(t(v).toLocaleLowerCase('vi-VN'));}
 function operator(v:unknown):Operator|undefined{const x=t(v);return ['>','>=','<','<=','='].includes(x)?x as Operator:undefined;}
@@ -49,16 +58,21 @@ function matches(m:CampaignMaterialItem,r:Rule){
   (!r.cpa||compare(m.cpa,r.cpa.operator,r.cpa.threshold))&&
   (!r.conversions||compare(m.conversions,r.conversions.operator,r.conversions.threshold));
 }
-function campaignMatch(c:TikTokCampaign,q?:string){return !q||String(c.name||'').toLocaleUpperCase('vi-VN').includes(q.toLocaleUpperCase('vi-VN'));}
+function matchesCampaign(c:TikTokSpentCampaign,r:Rule){
+ return (!r.spend||compare(c.spend,r.spend.operator,r.spend.threshold))&&
+  (!r.cpa||compare(c.cpa,r.cpa.operator,r.cpa.threshold))&&
+  (!r.conversions||compare(c.conversions,r.conversions.operator,r.conversions.threshold));
+}
+function campaignNameMatch(name:string,q?:string){const value=String(name||'');return !q||value.toLocaleUpperCase('vi-VN').includes(q.toLocaleUpperCase('vi-VN'));}
 async function ensureTable(){await db.exec(`CREATE TABLE IF NOT EXISTS material_daily_ruler_runs(
  rule_id TEXT NOT NULL,date_key TEXT NOT NULL,timezone TEXT NOT NULL,run_time TEXT NOT NULL,
  matched_campaigns INTEGER DEFAULT 0,changed_materials INTEGER DEFAULT 0,completed_at TEXT DEFAULT CURRENT_TIMESTAMP,
  PRIMARY KEY(rule_id,date_key))`);}
 async function completed(d:string,time:string){return !!(await db.get('SELECT 1 FROM material_daily_ruler_runs WHERE rule_id=? AND date_key=? AND run_time=?',['__day__',d,time]));}
-async function mark(d:string,time:string,s:MaterialRulerRunSummary){await db.run(`INSERT INTO material_daily_ruler_runs
+async function mark(d:string,time:string,matchedCampaigns:number,changed:number){await db.run(`INSERT INTO material_daily_ruler_runs
  (rule_id,date_key,timezone,run_time,matched_campaigns,changed_materials) VALUES(?,?,?,?,?,?)
  ON CONFLICT(rule_id,date_key) DO UPDATE SET matched_campaigns=excluded.matched_campaigns,changed_materials=excluded.changed_materials,completed_at=CURRENT_TIMESTAMP`,
- ['__day__',d,TZ,time,s.matchedCampaigns,s.enabledMaterials]);}
+ ['__day__',d,TZ,time,matchedCampaigns,changed]);}
 async function rules(){
  const local=await db.all<{data_json:string}>('SELECT data_json FROM admin_config_rows WHERE section=? ORDER BY position,id',['material_ruler']).catch(()=>[]);
  const rows=local.map(x=>{const r=JSON.parse(x.data_json);return [r.campaign_match,r.spend_operator,r.spend_threshold,r.cpa_operator,r.cpa_threshold,r.conversions_operator,r.conversions_threshold,r.enabled,r.note];});
@@ -69,11 +83,15 @@ async function enable(items:CampaignMaterialItem[]){const groups=new Map<string,
  enabled+=r.verified.length;if(r.failed.length)failed++;}catch(e){failed++;console.error('[MaterialRuler] enable failed',e);}}return {enabled,failed};}
 async function forEachWithConcurrency<T>(items:T[],concurrency:number,task:(item:T)=>Promise<void>){let next=0;
  await Promise.all(Array.from({length:Math.min(items.length,Math.max(1,concurrency))},async()=>{while(next<items.length){const index=next++;await task(items[index]);}}));}
-async function execute(rs:Rule[],manual:boolean):Promise<MaterialRulerRunSummary>{const today=vnNow().dateKey,camps=await getCampaigns();
+async function execute(rs:Rule[],manual:boolean):Promise<RulerRunSummary>{
+ const mode=await getAutoActionMode();
+ const today=vnNow().dateKey;
  const configuredPeriod=await getRuntimeSettingText('material_ruler_period',RUNTIME_SETTING_DEFAULTS.materialRulerPeriod);
- const p=period(configuredPeriod,today);if(!p)throw new Error(`Khoảng kiểm tra Material Ruler không hợp lệ: ${configuredPeriod}`);
+ const p=period(configuredPeriod,today);if(!p)throw new Error(`Khoảng kiểm tra Ruler không hợp lệ: ${configuredPeriod}`);
+ if(mode==='campaign')return executeCampaignRules(rs,manual,p);
+ const camps=await getCampaigns();
  const s:MaterialRulerRunSummary={manual,ruleCount:rs.length,matchedCampaigns:0,matchedMaterials:0,alreadyActiveMaterials:0,disabledMaterials:0,unknownStatusMaterials:0,enabledMaterials:0,failedGroups:0,periodLabels:[],campaigns:[]};
- const planned=camps.map(c=>({campaign:c,rules:rs.filter(r=>campaignMatch(c,r.campaignMatch))})).filter(x=>x.rules.length>0);
+ const planned=camps.map(c=>({campaign:c,rules:rs.filter(r=>campaignNameMatch(c.name,r.campaignMatch))})).filter(x=>x.rules.length>0);
  const campaignSummaries=new Map<string,MaterialRulerCampaignSummary>();s.periodLabels.push(p.label);s.matchedCampaigns=planned.length;
  planned.forEach(({campaign:c})=>campaignSummaries.set(c.id,{campaignId:c.id,campaignName:c.name,matchedMaterials:0,alreadyActiveMaterials:0,disabledMaterials:0,unknownStatusMaterials:0,enabledMaterials:0,failedGroups:0}));
  const configuredConcurrency=await getRuntimeSettingNumber('tiktok_concurrency',RUNTIME_SETTING_DEFAULTS.tiktokConcurrency);
@@ -93,6 +111,21 @@ async function execute(rs:Rule[],manual:boolean):Promise<MaterialRulerRunSummary
   }catch(e){s.failedGroups++;campaignSummary.failedGroups++;console.error('[MaterialRuler] campaign failed',c.id,e);}
  });
  s.campaigns=[...campaignSummaries.values()].filter(x=>x.matchedMaterials>0||x.failedGroups>0);return s;}
+/** Chế độ 'campaign' (bản đầu): cùng bộ rule nhưng xét chỉ số ở mức campaign và tự bật lại campaign đang tạm dừng. */
+async function executeCampaignRules(rs:Rule[],manual:boolean,p:{start:string;end:string;label:string}):Promise<CampaignRulerRunSummary>{
+ const configuredConcurrency=await getRuntimeSettingNumber('tiktok_concurrency',RUNTIME_SETTING_DEFAULTS.tiktokConcurrency);
+ const concurrency=Math.min(5,Math.max(1,Math.trunc(configuredConcurrency)));
+ const campaigns=await getTodaySpentCampaigns(p.start,p.end,{concurrency});
+ const s:CampaignRulerRunSummary={manual,mode:'campaign',ruleCount:rs.length,evaluatedCampaigns:campaigns.length,matchedCampaigns:0,alreadyActiveCampaigns:0,pausedCampaigns:0,enabledCampaigns:0,failedCount:0,periodLabels:[p.label],items:[]};
+ const matched=campaigns.filter(c=>c.status!=='deleted'&&rs.some(r=>campaignNameMatch(c.campaign_name,r.campaignMatch)&&matchesCampaign(c,r)));
+ s.matchedCampaigns=matched.length;
+ for(const c of matched){
+  if(c.status==='active'){s.alreadyActiveCampaigns++;s.items.push({campaignId:c.campaign_id,campaignName:c.campaign_name,status:c.status,result:'already_active'});continue;}
+  s.pausedCampaigns++;
+  try{await setCampaignStatus(c.advertiser_id,c.campaign_id,'ENABLE');s.enabledCampaigns++;s.items.push({campaignId:c.campaign_id,campaignName:c.campaign_name,status:c.status,result:'enabled'});}
+  catch(error){s.failedCount++;console.error('[CampaignRuler] enable failed',c.campaign_id,error);s.items.push({campaignId:c.campaign_id,campaignName:c.campaign_name,status:c.status,result:'failed'});}
+ }
+ return s;}
 function esc(v:unknown){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function shortCampaignName(name:string){const parts=t(name).split(' - ').map(x=>x.trim()).filter(Boolean);return parts.length>=2?`${parts[0]} - ${parts[1]}`:t(name);}
 export function formatMaterialRulerSummary(s:MaterialRulerRunSummary){
@@ -113,29 +146,56 @@ export function formatMaterialRulerSummary(s:MaterialRulerRunSummary){
  ].filter(Boolean).join('\n');
 }
 export function isMaterialRulerRunning(){return materialRulerRunning;}
+export function formatCampaignRulerSummary(s:CampaignRulerRunSummary){
+ const visible=s.items.slice(0,20);
+ const lines=visible.map((x,i)=>`${i+1}. <b>${esc(shortCampaignName(x.campaignName))}</b> - <code>${esc(x.campaignId)}</code> · ${x.result==='enabled'?'✅ Đã bật lại':x.result==='already_active'?'⚪ Đang bật sẵn':'⚠️ Lỗi bật lại'}`);
+ if(s.items.length>visible.length)lines.push(`… +${s.items.length-visible.length} campaign khác`);
+ return [
+  `<b>${s.manual?'Chạy thủ công':'Lịch tự động'} Campaign Ruler</b>`,
+  `Chế độ: <b>Campaign</b> (bản đầu)`,
+  `Rule hợp lệ: <b>${s.ruleCount}</b>`,
+  `Campaign đã xét: <b>${s.evaluatedCampaigns}</b>`,
+  `Đạt điều kiện: <b>${s.matchedCampaigns}</b>`,
+  `Đang bật sẵn: <b>${s.alreadyActiveCampaigns}</b>`,
+  `Đang tạm dừng cần bật: <b>${s.pausedCampaigns}</b>`,
+  `Bật thành công: <b>${s.enabledCampaigns}</b>`,
+  `Lỗi: <b>${s.failedCount}</b>`,
+  `Khoảng dữ liệu: <code>${esc(s.periodLabels.join(', '))}</code>`,
+  lines.length?'<b>Chi tiết</b>':'',...lines
+ ].filter(Boolean).join('\n');
+}
+export function formatRulerSummary(s:RulerRunSummary){
+ if(!('mode' in s))return formatMaterialRulerSummary(s);
+ return formatCampaignRulerSummary(s);
+}
 async function executeExclusive(manual:boolean){if(materialRulerRunning)throw new Error('Material Ruler đang có một lượt khác chạy.');
  materialRulerRunning=true;try{return await execute(await rules(),manual);}finally{materialRulerRunning=false;}}
 export async function runMaterialRulerNow(bot:Telegraf){const s=await executeExclusive(true);const id=t(process.env.ADMIN_CHAT_ID);
- if(id)await bot.telegram.sendMessage(id,formatMaterialRulerSummary(s),{parse_mode:'HTML'});return s;}
+ if(id)await bot.telegram.sendMessage(id,formatRulerSummary(s),{parse_mode:'HTML'});return s;}
 export async function checkAndRunDailyMaterialRuler(bot:Telegraf){await ensureTable();const now=vnNow();
  const runTime=await getRuntimeSettingText('material_ruler_run_time',RUNTIME_SETTING_DEFAULTS.materialRulerRunTime);
  if(now.timeKey<runTime||await completed(now.dateKey,runTime))return;
  if(materialRulerRunning){console.log('[MaterialRuler] scheduled run skipped because another material ruler run is in progress');return;}
  const id=t(process.env.ADMIN_CHAT_ID);
  const configuredPeriod=await getRuntimeSettingText('material_ruler_period',RUNTIME_SETTING_DEFAULTS.materialRulerPeriod);
+ const mode=await getAutoActionMode();
+ const rulerLabel=mode==='campaign'?'Campaign Ruler':'Material Ruler';
  if(id)await bot.telegram.sendMessage(id,[
-  '<b>⏳ Bắt đầu Material Ruler theo lịch</b>',
+  `<b>⏳ Bắt đầu ${rulerLabel} theo lịch</b>`,
+  `Chế độ: <b>${mode==='campaign'?'Campaign':'Material'}</b>`,
   `Giờ cài đặt: <code>${esc(runTime)}</code>`,
   `Khoảng dữ liệu: <code>${esc(configuredPeriod)}</code>`
  ].join('\n'),{parse_mode:'HTML'});
  try{
   const s=await executeExclusive(false);
-  if(id)await bot.telegram.sendMessage(id,formatMaterialRulerSummary(s),{parse_mode:'HTML'});
-  if(!s.failedGroups)await mark(now.dateKey,runTime,s);
+  if(id)await bot.telegram.sendMessage(id,formatRulerSummary(s),{parse_mode:'HTML'});
+  const failed='failedGroups' in s?s.failedGroups:s.failedCount;
+  const changed='enabledMaterials' in s?s.enabledMaterials:s.enabledCampaigns;
+  if(!failed)await mark(now.dateKey,runTime,s.matchedCampaigns,changed);
  }catch(error){
   const message=error instanceof Error?error.message:String(error);
   console.error('[MaterialRuler] scheduled run failed',error);
-  if(id)await bot.telegram.sendMessage(id,`❌ <b>Material Ruler theo lịch thất bại</b>\n<code>${esc(message.slice(0,1000))}</code>`,{parse_mode:'HTML'});
+  if(id)await bot.telegram.sendMessage(id,`❌ <b>${rulerLabel} theo lịch thất bại</b>\n<code>${esc(message.slice(0,1000))}</code>`,{parse_mode:'HTML'});
   throw error;
  }
 }
