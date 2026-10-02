@@ -333,39 +333,83 @@ function campaignSubjectKey(campaign: TikTokSpentCampaign, rule: MaterialRule): 
   return `campaign:${campaign.advertiser_id}:${campaign.campaign_id}:${rule.metric}:${rule.metricOperator}:${rule.metricThreshold}:${rule.conversionsOperator}:${rule.conversionsThreshold}:${rule.action}`;
 }
 
-async function sendCampaignNotification(
+function getMktGroupKey(mktCode: string | undefined | null): string {
+  const value = String(mktCode || '').trim();
+  return value || 'CHUA_GAN_MKT';
+}
+
+function getMktSectionLabel(mkt: string): string {
+  return mkt === 'CHUA_GAN_MKT' ? 'Chưa gắn MKT' : mkt;
+}
+
+function shortCampaignLabel(name: string | undefined): string {
+  const parts = String(name || '').split(/\s*-\s*/).map(part => part.trim()).filter(Boolean);
+  const label = parts.length >= 2 ? `${parts[0]} - ${parts[1]}` : String(name || '');
+  return label.length > 24 ? `${label.slice(0, 23)}…` : label;
+}
+
+function chunkInlineButtons(
+  buttons: Array<{ text: string; callback_data: string }>,
+  perRow: number
+): Array<Array<{ text: string; callback_data: string }>> {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let index = 0; index < buttons.length; index += perRow) {
+    rows.push(buttons.slice(index, index + perRow));
+  }
+  return rows;
+}
+
+async function sendGroupedCampaignNotification(
   bot: Telegraf,
-  campaign: TikTokSpentCampaign,
-  rule: MaterialRule
+  rule: MaterialRule,
+  campaigns: TikTokSpentCampaign[]
 ): Promise<void> {
   const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
   if (!adminChatId) return;
   const condition = rule.metricOperator === 'gt' || rule.metricOperator === 'gte'
     ? 'vượt giới hạn'
     : 'đạt điều kiện';
-  const plainLines = [
-    `Campaign ${condition}`,
-    `${campaign.campaign_name} - ${campaign.campaign_id}`,
-    `$${campaign.spend.toFixed(2)} · click ${campaign.clicks}/${campaign.ctr.toFixed(2)}% · conversion ${campaign.conversions} · CPA $${campaign.cpa.toFixed(2)}`,
-    formatRuleCondition(rule),
-    'Campaign chỉ cảnh báo, không tự tắt/bật.',
-  ];
-  const htmlLines = [
-    `🔔 <b>Campaign ${escapeHtml(condition)}</b>`,
-    `<b>${escapeHtml(campaign.campaign_name)}</b> - <code>${escapeHtml(campaign.campaign_id)}</code>`,
-    `💵 $${campaign.spend.toFixed(2)} · 👆 ${campaign.clicks.toLocaleString()}/${campaign.ctr.toFixed(2)}% · 🎯 ${campaign.conversions.toLocaleString()} · 💰 $${campaign.cpa.toFixed(2)}`,
-    `📏 ${escapeHtml(formatRuleCondition(rule))}`,
-    'ℹ️ Campaign chỉ cảnh báo, không tự tắt/bật.',
-  ];
 
-  await bot.telegram.sendMessage(adminChatId, htmlLines.join('\n'), {
-    parse_mode: 'HTML',
-    reply_markup: {
-      inline_keyboard: [[{
-        text: '🔎 Xem chi tiết material',
+  const groups = new Map<string, TikTokSpentCampaign[]>();
+  for (const campaign of campaigns) {
+    const mkt = getMktGroupKey(campaign.mkt_code);
+    const list = groups.get(mkt) || [];
+    list.push(campaign);
+    groups.set(mkt, list);
+  }
+
+  const lines: string[] = [
+    `🔔 <b>Campaign ${escapeHtml(condition)}</b>`,
+    `📏 ${escapeHtml(formatRuleCondition(rule))}`,
+  ];
+  const plainLines: string[] = [`Campaign ${condition}`, formatRuleCondition(rule)];
+  const buttons: Array<{ text: string; callback_data: string }> = [];
+
+  for (const [mkt, list] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0], 'vi'))) {
+    lines.push(`— <b>${escapeHtml(getMktSectionLabel(mkt))}</b> —`);
+    plainLines.push(`— ${getMktSectionLabel(mkt)} —`);
+    for (const campaign of list) {
+      lines.push(
+        `<b>${escapeHtml(campaign.campaign_name)}</b> - <code>${escapeHtml(campaign.campaign_id)}</code>`,
+        `💵 $${campaign.spend.toFixed(2)} · 👆 ${campaign.clicks.toLocaleString()}/${campaign.ctr.toFixed(2)}% · 🎯 ${campaign.conversions.toLocaleString()} · 💰 $${campaign.cpa.toFixed(2)}`
+      );
+      plainLines.push(
+        `${campaign.campaign_name} - ${campaign.campaign_id}`,
+        `$${campaign.spend.toFixed(2)} · click ${campaign.clicks}/${campaign.ctr.toFixed(2)}% · conversion ${campaign.conversions} · CPA $${campaign.cpa.toFixed(2)}`
+      );
+      buttons.push({
+        text: `🔎 ${escapeHtml(shortCampaignLabel(campaign.campaign_name))}`,
         callback_data: buildMaterialDetailCallbackData(campaign.advertiser_id, campaign.campaign_id, 0),
-      }]],
-    },
+      });
+    }
+  }
+
+  lines.push('ℹ️ Campaign chỉ cảnh báo, không tự tắt/bật.');
+  plainLines.push('Campaign chỉ cảnh báo, không tự tắt/bật.');
+
+  await bot.telegram.sendMessage(adminChatId, lines.join('\n'), {
+    parse_mode: 'HTML',
+    ...(buttons.length > 0 ? { reply_markup: { inline_keyboard: chunkInlineButtons(buttons, 3) } } : {}),
   });
   await saveAlertHistory('campaign_notify', plainLines.join('\n'), 'low');
 }
@@ -380,13 +424,18 @@ async function evaluateCampaignNotifications(
     (rule.metricOperator === 'lt' || rule.metricOperator === 'lte')
   );
 
-  for (const campaign of campaigns) {
-    for (const rule of rules) {
+  for (const rule of rules) {
+    const sendable: TikTokSpentCampaign[] = [];
+    for (const campaign of campaigns) {
       if (!campaignMatchesRule(campaign, rule)) continue;
       const key = campaignSubjectKey(campaign, rule);
       if (!(await canNotify(key, CAMPAIGN_ALERT_COOLDOWN_MS))) continue;
-      await sendCampaignNotification(bot, campaign, rule);
-      await markNotified(key);
+      sendable.push(campaign);
+    }
+    if (sendable.length === 0) continue;
+    await sendGroupedCampaignNotification(bot, rule, sendable);
+    for (const campaign of sendable) {
+      await markNotified(campaignSubjectKey(campaign, rule));
     }
   }
 }
@@ -467,11 +516,11 @@ async function sendMaterialNotifyRules(
   }
 }
 
-async function applyMaterialDecisions(
-  bot: Telegraf,
+/** Thực hiện ghi trạng thái material và trả về các dòng kết quả (chưa gửi Telegram). */
+async function collectMaterialDecisionLines(
   campaign: TikTokSpentCampaign,
   decisions: MaterialDecision[]
-): Promise<void> {
+): Promise<string[]> {
   const groups = new Map<string, MaterialDecision[]>();
   for (const decision of decisions) {
     // TikTok accepts one smart_plus_ad_id + one operation_status + a list of material IDs.
@@ -510,31 +559,31 @@ async function applyMaterialDecisions(
     })
   );
 
-  const resultLines = groupResults.flat();
-  if (resultLines.length === 0) return;
+  return groupResults.flat();
+}
 
+interface MaterialMktGroup {
+  lines: string[];
+  plainLines: string[];
+}
+
+async function sendGroupedMaterialActions(
+  bot: Telegraf,
+  groups: Map<string, MaterialMktGroup>
+): Promise<void> {
+  if (groups.size === 0) return;
   const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
   if (!adminChatId) return;
-  const plainMessage = [
-    'Material Rule Auto',
-    `${campaign.campaign_name} - ${campaign.campaign_id}`,
-    ...resultLines,
-  ].join('\n');
 
-  await bot.telegram.sendMessage(adminChatId, [
-    '🤖 <b>Material Rule Auto</b>',
-    `<b>${escapeHtml(campaign.campaign_name)}</b> - <code>${escapeHtml(campaign.campaign_id)}</code>`,
-    ...resultLines.map(line => escapeHtml(line)),
-  ].join('\n'), {
-    parse_mode: 'HTML',
-    reply_markup: {
-      inline_keyboard: [[{
-        text: '🔎 Xem chi tiết material',
-        callback_data: buildMaterialDetailCallbackData(campaign.advertiser_id, campaign.campaign_id, 0),
-      }]],
-    },
-  });
-  await saveAlertHistory('material_auto_action', plainMessage, 'low');
+  const lines: string[] = ['🤖 <b>Material Rule Auto</b>'];
+  const plainLines: string[] = ['Material Rule Auto'];
+  for (const [mkt, group] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0], 'vi'))) {
+    lines.push(`— <b>${escapeHtml(getMktSectionLabel(mkt))}</b> —`, ...group.lines);
+    plainLines.push(`— ${getMktSectionLabel(mkt)} —`, ...group.plainLines);
+  }
+
+  await bot.telegram.sendMessage(adminChatId, lines.join('\n'), { parse_mode: 'HTML' });
+  await saveAlertHistory('material_auto_action', plainLines.join('\n'), 'low');
 }
 
 /** Thang mức như bản cũ: so khoảng cách giá trị với ngưỡng để xếp severity. */
@@ -553,6 +602,13 @@ async function applyCampaignDecisions(
 ): Promise<void> {
   const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
   if (!adminChatId || decisions.length === 0) return;
+
+  interface CampaignActionGroup {
+    lines: string[];
+    plainLines: string[];
+    buttons: Array<{ text: string; callback_data: string }>;
+  }
+  const groups = new Map<string, CampaignActionGroup>();
 
   for (const decision of decisions) {
     const { campaign, operationStatus, rule } = decision;
@@ -577,39 +633,50 @@ async function applyCampaignDecisions(
       ? 'vượt giới hạn'
       : 'đạt điều kiện';
     const resultLine = `${actionLabel} ${success ? 'thành công' : `thất bại${failureReason ? `: ${failureReason}` : ''}`}`;
-    const plainMessage = [
+    const campaignPlainLines = [
       `Campaign ${conditionLabel}`,
       `${campaign.campaign_name} - ${campaign.campaign_id}`,
       `$${campaign.spend.toFixed(2)} · click ${campaign.clicks.toLocaleString()}/${campaign.ctr.toFixed(2)}% · conversion ${campaign.conversions.toLocaleString()} · CPA $${campaign.cpa.toFixed(2)}`,
       formatRuleCondition(rule),
       resultLine,
-    ].join('\n');
-
-    // Nút đảo chiều dùng lại handler campaign_action còn hoạt động ở bản hiện tại.
-    const inverseStatus: TikTokCampaignOperationStatus = operationStatus === 'DISABLE' ? 'ENABLE' : 'DISABLE';
-    await bot.telegram.sendMessage(adminChatId, [
-      `🤖 <b>${escapeHtml(actionLabel)} campaign · chế độ Campaign</b>`,
-      `<b>${escapeHtml(campaign.campaign_name)}</b> - <code>${escapeHtml(campaign.campaign_id)}</code>`,
-      `💵 $${campaign.spend.toFixed(2)} · 👆 ${campaign.clicks.toLocaleString()}/${campaign.ctr.toFixed(2)}% · 🎯 ${campaign.conversions.toLocaleString()} · 💰 $${campaign.cpa.toFixed(2)}`,
-      `📏 ${escapeHtml(formatRuleCondition(rule))}`,
-      `${success ? '✅' : '⚠️'} <b>${escapeHtml(resultLine)}</b>`,
-    ].join('\n'), {
-      parse_mode: 'HTML',
-      reply_markup: {
-        inline_keyboard: [[{
-          text: inverseStatus === 'DISABLE' ? '⏸ Pause' : '✅ Active',
-          callback_data: `campaign_action:${inverseStatus}:${campaign.campaign_id}`,
-        }]],
-      },
-    });
+    ];
     await saveAlertHistory(
       operationStatus === 'DISABLE'
         ? (success ? 'campaign_paused' : 'campaign_pause_failed')
         : (success ? 'campaign_enabled' : 'campaign_enable_failed'),
-      plainMessage,
+      campaignPlainLines.join('\n'),
       severity
     );
+
+    const mkt = getMktGroupKey(campaign.mkt_code);
+    const group = groups.get(mkt) || { lines: [], plainLines: [], buttons: [] };
+    group.lines.push(
+      `<b>${escapeHtml(campaign.campaign_name)}</b> - <code>${escapeHtml(campaign.campaign_id)}</code>`,
+      `💵 $${campaign.spend.toFixed(2)} · 👆 ${campaign.clicks.toLocaleString()}/${campaign.ctr.toFixed(2)}% · 🎯 ${campaign.conversions.toLocaleString()} · 💰 $${campaign.cpa.toFixed(2)}`,
+      `📏 ${escapeHtml(formatRuleCondition(rule))}`,
+      `${success ? '✅' : '⚠️'} <b>${escapeHtml(resultLine)}</b>`
+    );
+    group.plainLines.push(...campaignPlainLines);
+    // Nút đảo chiều dùng lại handler campaign_action còn hoạt động ở bản hiện tại.
+    const inverseStatus: TikTokCampaignOperationStatus = operationStatus === 'DISABLE' ? 'ENABLE' : 'DISABLE';
+    group.buttons.push({
+      text: `${inverseStatus === 'DISABLE' ? '⏸' : '✅'} ${escapeHtml(shortCampaignLabel(campaign.campaign_name))}`,
+      callback_data: `campaign_action:${inverseStatus}:${campaign.campaign_id}`,
+    });
+    groups.set(mkt, group);
   }
+
+  const lines: string[] = ['🤖 <b>Campaign Rule Auto · chế độ Campaign</b>'];
+  const buttons: Array<{ text: string; callback_data: string }> = [];
+  for (const [mkt, group] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0], 'vi'))) {
+    lines.push(`— <b>${escapeHtml(getMktSectionLabel(mkt))}</b> —`, ...group.lines);
+    buttons.push(...group.buttons);
+  }
+
+  await bot.telegram.sendMessage(adminChatId, lines.join('\n'), {
+    parse_mode: 'HTML',
+    ...(buttons.length > 0 ? { reply_markup: { inline_keyboard: chunkInlineButtons(buttons, 3) } } : {}),
+  });
 }
 
 async function evaluateCampaignActions(
@@ -689,6 +756,7 @@ async function evaluateMaterialRules(
   let matchedCampaigns = 0;
   let materialCount = 0;
   let unknownStatusCount = 0;
+  const mktGroups = new Map<string, MaterialMktGroup>();
 
   await forEachWithConcurrency(campaigns, concurrency, async campaign => {
     const campaignRules = rules.filter(rule => matchesCampaignName(rule.nameContains, campaign.campaign_name));
@@ -709,13 +777,24 @@ async function evaluateMaterialRules(
       const decisions = snapshot.materials
         .map(material => getMaterialDecision(material, campaignRules))
         .filter((decision): decision is MaterialDecision => Boolean(decision));
-      await applyMaterialDecisions(bot, campaign, decisions);
+      const decisionLines = await collectMaterialDecisionLines(campaign, decisions);
+      if (decisionLines.length === 0) return;
+      const mkt = getMktGroupKey(campaign.mkt_code);
+      const group = mktGroups.get(mkt) || { lines: [], plainLines: [] };
+      group.lines.push(
+        `<b>${escapeHtml(campaign.campaign_name)}</b> - <code>${escapeHtml(campaign.campaign_id)}</code>`,
+        ...decisionLines.map(line => escapeHtml(line))
+      );
+      group.plainLines.push(`${campaign.campaign_name} - ${campaign.campaign_id}`, ...decisionLines);
+      mktGroups.set(mkt, group);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       failures.push(`${campaign.campaign_id}: ${message}`);
       console.error(`[MaterialRules] campaign=${campaign.campaign_id} failed:`, error);
     }
   });
+
+  await sendGroupedMaterialActions(bot, mktGroups);
 
   if (failures.length > 0) {
     await sendMaterialPipelineWarning(

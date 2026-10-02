@@ -922,7 +922,7 @@ function getProductSummarySubjectKey(
   summary: ProductMarketSummary,
   level: 'level2' | 'level3' = 'level2'
 ): string {
-  return `${level}:product_cp_ads:${normalizeSearchValue(summary.productShortName)}:${normalizeSearchValue(summary.marketCode)}`;
+  return `${level}:product_cp_ads:${normalizeSearchValue(summary.mktCode || 'ALL')}:${normalizeSearchValue(summary.productShortName)}:${normalizeSearchValue(summary.marketCode)}`;
 }
 
 function getProductSummaryCpAds(summary: ProductMarketSummary): number {
@@ -1271,10 +1271,27 @@ async function createProductCpAdsAlertContent(
   const displaySummaries = summaries
     .filter(summary => summary.spendVnd > 0 || summary.grossSalesVnd > 0);
 
-  displaySummaries.forEach((summary, index) => {
+  // Tách phần theo mã MKT (gộp chung trong một tin); không có mã nào thì render phẳng như cũ.
+  const mktGroups = new Map<string, ProductMarketSummary[]>();
+  for (const summary of displaySummaries) {
+    const mkt = summary.mktCode || 'ALL';
+    const list = mktGroups.get(mkt) || [];
+    list.push(summary);
+    mktGroups.set(mkt, list);
+  }
+
+  let itemCount = 0;
+  for (const [mkt, groupSummaries] of [...mktGroups.entries()].sort((a, b) => a[0].localeCompare(b[0], 'vi'))) {
+    if (mkt !== 'ALL') {
+      const sectionHeader = `— ${mkt} —`;
+      plainLines.push(sectionHeader);
+      htmlLines.push(`— <b>${escapeHtml(mkt)}</b> —`);
+    }
+
+    groupSummaries.forEach(summary => {
     const cpaVnd = getProductSummaryCpaVnd(summary);
     const cpAdsText = formatProductSummaryCpAds(summary);
-    const itemNumber = index + 1;
+    const itemNumber = ++itemCount;
     const statusIcon = getProductAlertStatusIcon(summary);
     const productTitle =
       `${itemNumber}. ${statusIcon} ${summary.productShortName} (${summary.marketCode}) · ${formatProductCampaignSuffix(summary)}`;
@@ -1311,7 +1328,8 @@ async function createProductCpAdsAlertContent(
       `${itemNumber}. ${statusIcon} <b>${escapeHtml(summary.productShortName)} (${escapeHtml(summary.marketCode)})</b> · ${escapeHtml(formatProductCampaignSuffix(summary))}`,
       escapeHtml(metricsLine)
     );
-  });
+    });
+  }
 
   return {
     plainText: plainLines.join('\n'),
@@ -1926,7 +1944,6 @@ async function checkProductCpAdsAlertsForPeriod(
   const threshold = options.threshold;
   const summaries = await buildBcProductMarketSummaries({
     ...options.period,
-    targetMktCode: process.env.TARGET_MKT_CODE,
   });
   const matchedSummaries = summaries
     .filter(summary => summary.spendVnd > 0)

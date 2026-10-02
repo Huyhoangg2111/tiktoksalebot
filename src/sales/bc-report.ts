@@ -45,6 +45,7 @@ export interface BcSalesReportResult {
 export interface ProductMarketSummary {
   productShortName: string;
   marketCode: string;
+  mktCode: string;
   orders: number;
   campaignIds: Set<string>;
   advertiserLabels: Set<string>;
@@ -426,8 +427,32 @@ function extractCampaignProductShortName(campaignName: string, config: ConfigDat
   return firstPart || 'Unknown';
 }
 
-function getSummaryKey(productShortName: string, marketCode: string): string {
-  return `${normalizeKey(productShortName)}|${normalizeKey(marketCode)}`;
+function getSummaryKey(productShortName: string, marketCode: string, mktCode: string): string {
+  return `${normalizeKey(mktCode)}|${normalizeKey(productShortName)}|${normalizeKey(marketCode)}`;
+}
+
+/**
+ * Gom mã MKT thô (cột E sheet doanh số / mkt_code campaign) về đúng mã đã gắn
+ * trên dashboard: khớp CHÍNH XÁC (không phân biệt hoa/thường) để MKT.CT và
+ * MKT.CT1 là hai nhóm riêng biệt. Không cấu hình mã nào thì gom chung ALL
+ * (hành vi cũ); mã không khớp bất kỳ mã đã gắn nào thì rơi vào CHUA_GAN_MKT.
+ */
+function buildMktResolver(
+  configuredCodes: string[],
+  hasTargetFilter: boolean
+): (raw: unknown) => string {
+  if (hasTargetFilter || configuredCodes.length === 0) return () => 'ALL';
+  const byKey = new Map<string, string>();
+  for (const code of configuredCodes) {
+    const trimmed = code.trim();
+    const key = normalizeKey(trimmed);
+    if (key && !byKey.has(key)) byKey.set(key, trimmed);
+  }
+  return (raw: unknown) => {
+    const value = String(raw || '').trim();
+    if (!value) return 'CHUA_GAN_MKT';
+    return byKey.get(normalizeKey(value)) || 'CHUA_GAN_MKT';
+  };
 }
 
 function getBcallMktKey(mktCode: string): string {
@@ -460,10 +485,12 @@ function ensureBcallMktSummary(
 function ensureSummary(
   summaryMap: Map<string, ProductMarketSummary>,
   productShortName: string,
-  marketCode: string
+  marketCode: string,
+  mktCode: string
 ): ProductMarketSummary {
   const normalizedMarketCode = normalizeKey(marketCode) || 'UNKNOWN';
-  const key = getSummaryKey(productShortName, normalizedMarketCode);
+  const normalizedMktCode = mktCode || 'ALL';
+  const key = getSummaryKey(productShortName, normalizedMarketCode, normalizedMktCode);
   const existingSummary = summaryMap.get(key);
 
   if (existingSummary) {
@@ -473,6 +500,7 @@ function ensureSummary(
   const summary: ProductMarketSummary = {
     productShortName,
     marketCode: normalizedMarketCode,
+    mktCode: normalizedMktCode,
     orders: 0,
     campaignIds: new Set<string>(),
     advertiserLabels: new Set<string>(),
@@ -494,12 +522,13 @@ function addSalesRowsToSummary(
   salesRows: SalesData[],
   config: ConfigData,
   period: BcReportPeriod,
-  targetMktCode: string
+  targetMktCode: string,
+  mktResolver: (raw: unknown) => string
 ): void {
   const normalizedTargetMktCode = normalizeKey(targetMktCode);
 
   for (const salesRow of salesRows) {
-    if (normalizeKey(salesRow.mktCode) !== normalizedTargetMktCode) {
+    if (normalizedTargetMktCode && normalizeKey(salesRow.mktCode) !== normalizedTargetMktCode) {
       continue;
     }
 
@@ -510,7 +539,7 @@ function addSalesRowsToSummary(
 
     const productShortName = getSalesProductShortName(salesRow.productName, config);
     const marketCode = salesRow.marketCode || 'UNKNOWN';
-    const summary = ensureSummary(summaryMap, productShortName, marketCode);
+    const summary = ensureSummary(summaryMap, productShortName, marketCode, mktResolver(salesRow.mktCode));
 
     summary.orders += 1;
     summary.grossSalesVnd += salesRow.amountVnd;
@@ -577,14 +606,15 @@ function collectSalesDataIssues(
 function addCampaignsToSummary(
   summaryMap: Map<string, ProductMarketSummary>,
   campaigns: TikTokSpentCampaign[],
-  config: ConfigData
+  config: ConfigData,
+  mktResolver: (raw: unknown) => string
 ): void {
   const knownMarketCodes = getKnownMarketCodes(config);
 
   for (const campaign of campaigns) {
     const productShortName = extractCampaignProductShortName(campaign.campaign_name, config);
     const marketCode = extractCampaignMarketCode(campaign.campaign_name, knownMarketCodes);
-    const summary = ensureSummary(summaryMap, productShortName, marketCode);
+    const summary = ensureSummary(summaryMap, productShortName, marketCode, mktResolver(campaign.mkt_code));
 
     summary.campaignIds.add(`${campaign.advertiser_id}:${campaign.campaign_id}`);
     summary.advertiserLabels.add(getAdvertiserShortLabel(campaign));
@@ -600,6 +630,7 @@ function summarizeTotals(summaries: ProductMarketSummary[]): ProductMarketSummar
   const total: ProductMarketSummary = {
     productShortName: 'Tổng',
     marketCode: 'ALL',
+    mktCode: 'ALL',
     orders: 0,
     campaignIds: new Set<string>(),
     advertiserLabels: new Set<string>(),
@@ -814,7 +845,7 @@ async function getBcTikTokFetchOptions(
 }
 
 export async function buildBcProductMarketSummaries(options: BcReportOptions): Promise<ProductMarketSummary[]> {
-  const targetMktCode = options.targetMktCode?.trim() || getTargetMktCode();
+  const targetMktCode = options.targetMktCode?.trim() || '';
   const config = await getConfigSnapshot({ includeAllMkt: true });
   const advertiserAccounts = config.permissions
     .filter(permission => permission.enabled)
@@ -825,17 +856,22 @@ export async function buildBcProductMarketSummaries(options: BcReportOptions): P
     }));
   const advertiserIds = advertiserAccounts.map(account => account.advertiserId);
 
+  const configuredMktCodes = [...new Set(
+    advertiserAccounts.map(account => account.mktCode).filter(code => String(code || '').trim())
+  )];
+  const mktResolver = buildMktResolver(configuredMktCodes, Boolean(targetMktCode));
+
   const tiktokOptions = await getBcTikTokFetchOptions(advertiserIds, advertiserAccounts);
   const [salesRows, campaigns] = await Promise.all([
-    getSalesData({ targetMktCode }),
+    getSalesData(targetMktCode ? { targetMktCode } : { includeAllMkt: true }),
     advertiserIds.length > 0
       ? getTodaySpentCampaigns(options.startDate, options.endDate, tiktokOptions)
       : Promise.resolve([] as Awaited<ReturnType<typeof getTodaySpentCampaigns>>),
   ]);
 
   const summaryMap = new Map<string, ProductMarketSummary>();
-  addSalesRowsToSummary(summaryMap, salesRows, config, options, targetMktCode);
-  addCampaignsToSummary(summaryMap, campaigns, config);
+  addSalesRowsToSummary(summaryMap, salesRows, config, options, targetMktCode, mktResolver);
+  addCampaignsToSummary(summaryMap, campaigns, config, mktResolver);
 
   return [...summaryMap.values()];
 }
@@ -1054,8 +1090,8 @@ export async function buildBcSalesReport(options: BcReportOptions): Promise<BcSa
   ]);
 
   const summaryMap = new Map<string, ProductMarketSummary>();
-  addSalesRowsToSummary(summaryMap, salesRows, config, options, targetMktCode);
-  addCampaignsToSummary(summaryMap, campaigns, config);
+  addSalesRowsToSummary(summaryMap, salesRows, config, options, targetMktCode, () => 'ALL');
+  addCampaignsToSummary(summaryMap, campaigns, config, () => 'ALL');
 
   const issues = collectSalesDataIssues(salesRows, config, options, targetMktCode);
   let message = renderReport(

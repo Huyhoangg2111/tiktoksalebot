@@ -1,6 +1,7 @@
 import type { Telegraf } from 'telegraf';
 import { getTrackedAdvertiserIdSet } from '../accounts/tracking.js';
 import { db } from '../db/index.js';
+import { getAdvertiserPermissions } from '../google-sheets/api.js';
 import { getRuntimeSettingNumber, RUNTIME_SETTING_DEFAULTS } from '../settings/runtime.js';
 import { getTikTokAccountBalance, type TikTokAccountBalance } from '../tiktok/api.js';
 import { saveAlertHistory, type StoredAlertSeverity } from './alert-store.js';
@@ -77,6 +78,33 @@ function getAccountLabel(account: TikTokAccountBalance): string {
   return String(account.advertiser_name || account.advertiser_id).trim();
 }
 
+function getMktGroupKey(mktCode: string | undefined | null): string {
+  const value = String(mktCode || '').trim();
+  return value || 'CHUA_GAN_MKT';
+}
+
+function getMktSectionLabel(mkt: string): string {
+  return mkt === 'CHUA_GAN_MKT' ? 'Chưa gắn MKT' : mkt;
+}
+
+/** Gom các tài khoản sắp hết tiền theo mã MKT để gửi chung một tin, mỗi mã một phần. */
+async function groupLowBalancesByMkt(
+  lowBalances: TikTokAccountBalance[]
+): Promise<Array<{ mkt: string; accounts: TikTokAccountBalance[] }>> {
+  const permissions = await getAdvertiserPermissions({ includeAllMkt: true }).catch(() => []);
+  const mktByAdvertiser = new Map(permissions.map(permission => [permission.advertiserId, permission.mktCode]));
+  const groups = new Map<string, TikTokAccountBalance[]>();
+  for (const account of lowBalances) {
+    const mkt = getMktGroupKey(mktByAdvertiser.get(account.advertiser_id));
+    const list = groups.get(mkt) || [];
+    list.push(account);
+    groups.set(mkt, list);
+  }
+  return [...groups.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0], 'vi'))
+    .map(([mkt, accounts]) => ({ mkt, accounts }));
+}
+
 export async function checkAndSendLowBalanceAlert(bot: Telegraf): Promise<void> {
   const threshold = await getRuntimeSettingNumber(
     'balance_threshold_usd',
@@ -103,18 +131,29 @@ export async function checkAndSendLowBalanceAlert(bot: Telegraf): Promise<void> 
   const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
   if (!adminChatId) return;
 
-  // Format bản cũ: không hiện count/ngưỡng, mỗi tài khoản một dòng "- tên: $số dư".
-  const message = lowBalances
-    .map(account =>
-      `- ${getAccountLabel(account)}: ${formatUsd(Number(account.balance || 0), account.currency)}`
-    )
-    .join('\n');
+  // Format bản cũ: mỗi tài khoản một dòng "- tên: $số dư"; khi có nhiều mã MKT
+  // thì tách phần theo mã nhưng vẫn gửi chung một tin.
+  const mktGroups = await groupLowBalancesByMkt(lowBalances);
+  const useMktSections = !(mktGroups.length === 1 && mktGroups[0].mkt === 'CHUA_GAN_MKT');
+  const htmlLines: string[] = [];
+  const plainLines: string[] = [];
+  for (const group of mktGroups) {
+    if (useMktSections) {
+      htmlLines.push(`— <b>${escapeHtml(getMktSectionLabel(group.mkt))}</b> —`);
+      plainLines.push(`— ${getMktSectionLabel(group.mkt)} —`);
+    }
+    for (const account of group.accounts) {
+      const line = `- ${getAccountLabel(account)}: ${formatUsd(Number(account.balance || 0), account.currency)}`;
+      htmlLines.push(escapeHtml(line));
+      plainLines.push(line);
+    }
+  }
 
   const lowest = Math.min(...lowBalances.map(account => Number(account.balance || 0)));
   const severity = severityForBalance(lowest, threshold);
-  const telegramText = `🔔 <b>Balance</b> - ${severity.toUpperCase()}\n${escapeHtml(message)}`;
+  const telegramText = `🔔 <b>Balance</b> - ${severity.toUpperCase()}\n${htmlLines.join('\n')}`;
 
   await bot.telegram.sendMessage(adminChatId, telegramText, { parse_mode: 'HTML' });
-  await saveAlertHistory('balance_low', message, severity);
+  await saveAlertHistory('balance_low', plainLines.join('\n'), severity);
   await markSent();
 }

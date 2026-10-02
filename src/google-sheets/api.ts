@@ -372,7 +372,7 @@ function parseAdvertiserPermissionRows(rows: any[][], options: MktScopeOptions =
   return rows
     .slice(1)
     .map(row => ({
-      mktCode: '',
+      mktCode: String(row[0] || '').trim(),
       advertiserId: String(row[1] || '').trim(),
       enabled: parseEnabled(row[2]),
       note: String(row[3] || '').trim() || undefined,
@@ -919,7 +919,7 @@ export async function getAdvertiserPermissions(options: MktScopeOptions = {}): P
   const table = [['market_code', 'advertiser_id', 'enabled', 'note', 'advertiser_name']];
   for (const row of rows) {
     const value = JSON.parse(row.data_json);
-    table.push(['', value.advertiser_id, value.enabled, value.note, value.advertiser_name]);
+    table.push([String(value.market_code || '').trim(), value.advertiser_id, value.enabled, value.note, value.advertiser_name]);
   }
   if (rows.length === 0) {
     for (const advertiserId of String(process.env.TIKTOK_ADVERTISER_IDS || '').split(',').map(value => value.trim()).filter(Boolean)) {
