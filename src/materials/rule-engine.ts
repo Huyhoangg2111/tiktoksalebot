@@ -227,7 +227,7 @@ function parseLevel1RuleRows(rows: any[][]): Level1RuleSnapshot {
 
 async function readDashboardRules(entity: 'campaign' | 'material'): Promise<MaterialRule[]> {
   const rows = await db.all<Record<string, unknown>>(
-    'SELECT id,name_contains,metric,metric_operator,metric_threshold,metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note FROM alert_action_rules WHERE entity=? AND tenant_id=\'default\' ORDER BY id',
+    'SELECT id,name_contains,metric,metric_operator,metric_threshold,metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note FROM alert_action_rules WHERE entity=? ORDER BY id',
     [entity]
   );
   return rows.flatMap(value => {

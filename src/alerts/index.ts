@@ -1491,7 +1491,7 @@ async function ensureAlertActionRuleColumns(): Promise<void> {
 async function replaceActionRules(rules: AlertActionRuleSheetRow[]): Promise<void> {
   await ensureAlertActionRuleColumns();
   await db.run('DELETE FROM alert_action_state');
-  await db.run("DELETE FROM alert_action_rules WHERE tenant_id = 'default'");
+  await db.run('DELETE FROM alert_action_rules');
 
   for (const rule of rules) {
     const campaignStatus =
@@ -1605,7 +1605,7 @@ function matchesAdRule(rule: AlertActionRule, ad: EnrichedSpentAd): boolean {
 export async function initializeAlertRules(): Promise<AlertInitializationResult> {
   await upsertBalanceAlertRule();
 
-  const existing = await db.get<{ count: number }>("SELECT COUNT(*) AS count FROM alert_action_rules WHERE tenant_id = 'default'");
+  const existing = await db.get<{ count: number }>('SELECT COUNT(*) AS count FROM alert_action_rules');
   const actionRuleCount = Number(existing?.count || 0);
   console.log(`Alert rules loaded from SQLite (${actionRuleCount} action rules)`);
 
@@ -2048,7 +2048,7 @@ export async function checkAndSendAlerts(bot: Telegraf): Promise<void> {
       [BALANCE_RULE_METRIC]
     ),
     db.all<AlertActionRule>(
-      "SELECT * FROM alert_action_rules WHERE is_active = 1 AND tenant_id = 'default' ORDER BY id ASC"
+      'SELECT * FROM alert_action_rules WHERE is_active = 1 ORDER BY id ASC'
     ),
   ]);
 

@@ -154,8 +154,7 @@ export async function connectDB() {
       type TEXT,
       message TEXT,
       severity TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      tenant_id TEXT NOT NULL DEFAULT 'default'
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
@@ -184,8 +183,7 @@ export async function connectDB() {
       campaign_status TEXT,
       is_active BOOLEAN DEFAULT 1,
       note TEXT,
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      tenant_id TEXT NOT NULL DEFAULT 'default'
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
@@ -310,48 +308,6 @@ export async function connectDB() {
     CREATE INDEX IF NOT EXISTS idx_smart_plus_appeal_attempts_time
     ON smart_plus_appeal_attempts(attempted_at)
   `);
-
-  // Bảng cấu hình dashboard (dùng chung với webapp độc lập qua cùng file SQLite).
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS admin_config_rows (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      section TEXT NOT NULL,
-      data_json TEXT NOT NULL,
-      position INTEGER NOT NULL DEFAULT 0,
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      tenant_id TEXT NOT NULL DEFAULT 'default'
-    )
-  `);
-
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS admin_config_history (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      section TEXT NOT NULL,
-      data_json TEXT NOT NULL,
-      row_count INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      tenant_id TEXT NOT NULL DEFAULT 'default'
-    )
-  `);
-
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS admin_audit_log (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      section TEXT NOT NULL,
-      action TEXT NOT NULL,
-      detail TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  // Database cũ: bổ sung cột tenant khi chưa có.
-  for (const table of ['admin_config_rows', 'admin_config_history', 'alert_action_rules', 'alerts']) {
-    try {
-      await db.exec(`ALTER TABLE ${table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'`);
-    } catch {
-      // Cột đã tồn tại.
-    }
-  }
 
   console.log('Connected to database and initialized tables');
   return db;
