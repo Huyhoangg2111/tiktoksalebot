@@ -898,7 +898,7 @@ function findPageMapping(pageMap: PageMapping[], channelLink: string, pageName?:
  */
 export async function getBusinessCenterId(): Promise<string | undefined> {
   const local = await db.get<{ data_json: string }>(
-    'SELECT data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id LIMIT 1',
+    "SELECT data_json FROM admin_config_rows WHERE section = ? AND tenant_id = 'default' ORDER BY position, id LIMIT 1",
     ['tiktok']
   ).catch(() => undefined);
   if (local?.data_json) {
@@ -913,7 +913,7 @@ export async function getBusinessCenterId(): Promise<string | undefined> {
 /** Get enabled TikTok advertisers from the local admin dashboard. */
 export async function getAdvertiserPermissions(options: MktScopeOptions = {}): Promise<AdvertiserPermission[]> {
   const rows = await db.all<{ data_json: string }>(
-    'SELECT data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id',
+    "SELECT data_json FROM admin_config_rows WHERE section = ? AND tenant_id = 'default' ORDER BY position, id",
     ['advertisers']
   ).catch(() => []);
   const table = [['market_code', 'advertiser_id', 'enabled', 'note', 'advertiser_name']];
@@ -931,7 +931,7 @@ export async function getAdvertiserPermissions(options: MktScopeOptions = {}): P
 
 export async function getTikTokTokenConfig(): Promise<TikTokTokenConfig> {
   const local = await db.get<{ data_json: string }>(
-    'SELECT data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id LIMIT 1',
+    "SELECT data_json FROM admin_config_rows WHERE section = ? AND tenant_id = 'default' ORDER BY position, id LIMIT 1",
     ['tiktok']
   ).catch(() => undefined);
   if (local?.data_json) {
@@ -953,7 +953,7 @@ export async function getTikTokTokenConfig(): Promise<TikTokTokenConfig> {
  */
 export async function getAccountBotCredentials(): Promise<AccountBotCredentials | undefined> {
   const local = await db.get<{ data_json: string }>(
-    'SELECT data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id LIMIT 1',
+    "SELECT data_json FROM admin_config_rows WHERE section = ? AND tenant_id = 'default' ORDER BY position, id LIMIT 1",
     ['signer']
   ).catch(() => undefined);
   if (local?.data_json) {
@@ -1190,7 +1190,7 @@ export async function getConfigSnapshot(options: MktScopeOptions = {}): Promise<
 async function getConfigData(options: MktScopeOptions = {}): Promise<ConfigData> {
   const readAdminRows = async (section: string): Promise<Record<string, any>[]> => {
     const rows = await db.all<{ data_json: string }>(
-      'SELECT data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id',
+      "SELECT data_json FROM admin_config_rows WHERE section = ? AND tenant_id = 'default' ORDER BY position, id",
       [section]
     ).catch(() => []);
     return rows.map(row => JSON.parse(row.data_json));

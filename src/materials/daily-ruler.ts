@@ -74,7 +74,7 @@ async function mark(d:string,time:string,matchedCampaigns:number,changed:number)
  ON CONFLICT(rule_id,date_key) DO UPDATE SET matched_campaigns=excluded.matched_campaigns,changed_materials=excluded.changed_materials,completed_at=CURRENT_TIMESTAMP`,
  ['__day__',d,TZ,time,matchedCampaigns,changed]);}
 async function rules(){
- const local=await db.all<{data_json:string}>('SELECT data_json FROM admin_config_rows WHERE section=? ORDER BY position,id',['material_ruler']).catch(()=>[]);
+ const local=await db.all<{data_json:string}>('SELECT data_json FROM admin_config_rows WHERE section=? AND tenant_id=\'default\' ORDER BY position,id',['material_ruler']).catch(()=>[]);
  const rows=local.map(x=>{const r=JSON.parse(x.data_json);return [r.campaign_match,r.spend_operator,r.spend_threshold,r.cpa_operator,r.cpa_threshold,r.conversions_operator,r.conversions_threshold,r.enabled,r.note];});
  return parseRules([HEADERS[0],...rows]);}
 async function enable(items:CampaignMaterialItem[]){const groups=new Map<string,CampaignMaterialItem[]>();
