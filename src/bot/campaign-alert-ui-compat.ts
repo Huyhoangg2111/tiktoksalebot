@@ -77,7 +77,7 @@ function findMaterialDetailButtons(replyMarkup: unknown): Record<string, unknown
 
 /**
  * Parse message "🔔 Campaign đạt điều kiện / vượt giới hạn" theo format nhóm MKT mới:
- * heading, dòng điều kiện (📏 …), rồi các khối "🏷️ MKT" + "<b>camp</b> - <code>id</code>" + dòng metrics.
+ * heading, dòng điều kiện (📏 …), rồi các khối "👤 MKT" + "<b>camp</b> - <code>id</code>" + dòng metrics.
  * Trả về danh sách campaign (mỗi camp một item, nút md: gán theo thứ tự).
  */
 function parseCampaignAlertPayload(payload: unknown): ParsedCampaignAlert[] | undefined {
@@ -194,7 +194,7 @@ function buildBufferedResponse(payload: Record<string, unknown>): Record<string,
 
 /**
  * Presentation compatibility cho campaign Level 1:
- * - parse message nhóm MKT mới (heading + 📏 điều kiện + các khối "🏷️ MKT" + camp);
+ * - parse message nhóm MKT mới (heading + 📏 điều kiện + các khối "👤 MKT" + camp);
  * - "đạt điều kiện" hiển thị "✅ ADS Đạt Điều Kiện (N camp)";
  * - "vượt giới hạn" (rule notify gt/gte) hiển thị "⚠️ ADS Vượt Giới Hạn (N camp)";
  * - các camp trong cùng lượt được gom thành một message, dedupe theo campaign id;
