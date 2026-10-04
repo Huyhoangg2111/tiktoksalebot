@@ -210,7 +210,12 @@ export async function sendBcMenu(ctx: Context): Promise<void> {
  * (mã MKT env/target đứng đầu nếu có), fallback về TARGET_MKT_CODE khi dashboard trống.
  */
 async function getBcTargetMktCodes(): Promise<string[]> {
-  const permissions = await getAdvertiserPermissions({ includeAllMkt: true }).catch(() => []);
+  const permissions = await getAdvertiserPermissions({ includeAllMkt: true }).catch(error => {
+    // Không nuốt lỗi im lặng: nếu đọc danh sách TKQC lỗi (DB bận…), log để biết
+    // /bc đang fallback về một mã MKT thay vì báo đủ các mã đã cấu hình.
+    console.error('[bc] không đọc được danh sách TKQC, /bc chỉ báo theo TARGET_MKT_CODE:', error);
+    return [];
+  });
   const codes = [...new Set(
     permissions
       .filter(permission => permission.enabled && permission.mktCode.trim())
@@ -218,6 +223,7 @@ async function getBcTargetMktCodes(): Promise<string[]> {
   )];
 
   if (codes.length === 0) {
+    console.warn('[bc] không có TKQC nào có Mã MKT trong dashboard — /bc chỉ báo', getTargetMktCode());
     return [getTargetMktCode()];
   }
 
