@@ -71,13 +71,6 @@ interface BcAllProductSummary {
   grossSalesVnd: number;
   orders: number;
 }
-
-export interface BcAllSalesReportResult {
-  message: string;
-  mktCodes: string[];
-  period: BcReportPeriod;
-}
-
 function normalizeKey(value: unknown): string {
   return String(value ?? '').trim().toLocaleUpperCase('vi-VN');
 }
@@ -113,12 +106,6 @@ function formatDateKey(date: Date): string {
   const parts = getDateParts(date);
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
-
-function formatDisplayDate(dateKey: string): string {
-  const [year, month, day] = dateKey.split('-');
-  return `${day}/${month}/${year}`;
-}
-
 function formatCompactDisplayDate(dateKey: string): string {
   const [, month, day] = dateKey.split('-');
   return `${day}/${month}`;
@@ -163,11 +150,6 @@ function isValidDatePart(year: number, month: number, day: number): boolean {
 function formatDatePartKey(year: string, month: string, day: number): string {
   return `${year}-${month}-${String(day).padStart(2, '0')}`;
 }
-
-function formatVnd(amount: number): string {
-  return `${Math.round(amount).toLocaleString('vi-VN')}đ`;
-}
-
 function formatCompactVnd(amount: number): string {
   const roundedAmount = Math.round(amount);
   const sign = roundedAmount < 0 ? '-' : '';
@@ -209,18 +191,6 @@ function compareAccountLabels(labelA: string, labelB: string): number {
 
   return labelA.localeCompare(labelB, 'vi');
 }
-
-function compareMktCodes(mktCodeA: string, mktCodeB: string): number {
-  const numberA = Number(mktCodeA.match(/\d+/)?.[0] || Number.MAX_SAFE_INTEGER);
-  const numberB = Number(mktCodeB.match(/\d+/)?.[0] || Number.MAX_SAFE_INTEGER);
-
-  if (numberA !== numberB) {
-    return numberA - numberB;
-  }
-
-  return mktCodeA.localeCompare(mktCodeB, 'vi');
-}
-
 function formatAdvertiserLabels(labels: Set<string>): string {
   const sortedLabels = [...labels].sort(compareAccountLabels);
 
@@ -250,25 +220,9 @@ function formatCpAdsPercent(spendVnd: number, grossSalesVnd: number): string {
 
   return 'N/A';
 }
-
-function formatRangeLabel(period: BcReportPeriod): string {
-  if (period.startDate === period.endDate) {
-    return `${period.label} (${formatDisplayDate(period.startDate)})`;
-  }
-
-  return `${period.label} (${formatDisplayDate(period.startDate)} - ${formatDisplayDate(period.endDate)})`;
-}
-
 function isDateInRange(dateKey: string, period: BcReportPeriod): boolean {
   return dateKey >= period.startDate && dateKey <= period.endDate;
 }
-
-function isExcludedBcallMktCode(mktCode: string): boolean {
-  const compactMktCode = normalizeKey(mktCode).replace(/[^A-Z0-9]/g, '');
-
-  return compactMktCode.startsWith('MKT80');
-}
-
 function splitShortNames(shortName: string): string[] {
   return shortName
     .split(',')
@@ -298,17 +252,6 @@ function findSalesProductMappings(
     sp => normalizeKey(sp.materialName) === normalizedProductName
   );
 }
-
-function findSalesProductMapping(productName: string | undefined, config: ConfigData) {
-  return findSalesProductMappings(productName, config)[0];
-}
-
-/**
- * Canonical product key used to join sheet sales with TikTok campaigns.
- * - 1 KEY MAP for the DANH MỤC → use that KEY MAP (matches campaign prefix)
- * - many KEY MAPs for same DANH MỤC → group by DANH MỤC so sales are not
- *   forced onto the first SKU only (e.g. 500G vs 300G)
- */
 function getSalesProductShortName(productName: string | undefined, config: ConfigData): string {
   const mappings = findSalesProductMappings(productName, config);
   if (mappings.length === 0) {
@@ -454,34 +397,6 @@ function buildMktResolver(
     return byKey.get(normalizeKey(value)) || 'CHUA_GAN_MKT';
   };
 }
-
-function getBcallMktKey(mktCode: string): string {
-  return normalizeKey(mktCode);
-}
-
-function ensureBcallMktSummary(
-  summaryMap: Map<string, BcAllMktSummary>,
-  mktCode: string
-): BcAllMktSummary {
-  const key = getBcallMktKey(mktCode);
-  const existingSummary = summaryMap.get(key);
-
-  if (existingSummary) {
-    return existingSummary;
-  }
-
-  const summary: BcAllMktSummary = {
-    mktCode,
-    spendUsd: 0,
-    spendVnd: 0,
-    grossSalesVnd: 0,
-    campaignIds: new Set<string>(),
-  };
-
-  summaryMap.set(key, summary);
-  return summary;
-}
-
 function ensureSummary(
   summaryMap: Map<string, ProductMarketSummary>,
   productShortName: string,
@@ -658,23 +573,6 @@ function summarizeTotals(summaries: ProductMarketSummary[]): ProductMarketSummar
 
   return total;
 }
-
-function renderSummaryMetrics(summary: ProductMarketSummary): string[] {
-  const cpaUsd = summary.conversions > 0 ? summary.spendUsd / summary.conversions : 0;
-  const cpaVnd = summary.conversions > 0 ? summary.spendVnd / summary.conversions : 0;
-
-  return [
-    `Đơn sheet: <b>${summary.orders.toLocaleString('vi-VN')}</b>`,
-    `Chi tiêu Ads: <b>${formatVnd(summary.spendVnd)}</b> (${formatUsd(summary.spendUsd)})`,
-    `Chuyển đổi Ads: <b>${summary.conversions.toLocaleString('vi-VN')}</b>`,
-    `CPA: <b>${formatVnd(cpaVnd)}</b> (${formatUsd(cpaUsd)})`,
-    `Doanh số chốt: <b>${formatVnd(summary.grossSalesVnd)}</b>`,
-    `Doanh số thành công: <b>${formatVnd(summary.deliveredSalesVnd)}</b>`,
-    `%CP Ads chốt: <b>${formatCpAdsPercent(summary.spendVnd, summary.grossSalesVnd)}</b>`,
-    `%CP Ads thành công: <b>${formatCpAdsPercent(summary.spendVnd, summary.deliveredSalesVnd)}</b>`,
-  ];
-}
-
 function getProductRankIcon(index: number): string {
   if (index === 0) return '🥇';
   if (index === 1) return '🥈';
@@ -820,11 +718,6 @@ function parseCurrentMonthDayPeriod(input: string, now = new Date()): BcReportPe
     label: 'Tùy chỉnh',
   };
 }
-
-function getRawSalesProductName(productName: string | undefined): string {
-  return String(productName || '').trim() || 'Unknown';
-}
-
 async function getBcTikTokFetchOptions(
   advertiserIds: string[],
   advertiserAccounts?: Array<{ advertiserId: string; advertiserName?: string; mktCode?: string }>
@@ -875,198 +768,6 @@ export async function buildBcProductMarketSummaries(options: BcReportOptions): P
 
   return [...summaryMap.values()];
 }
-
-function getConfiguredBcallPermissions(config: ConfigData) {
-  return config.permissions.filter(permission =>
-    permission.enabled &&
-    permission.advertiserId
-  );
-}
-
-function addAllMktSalesRowsToSummary(
-  summaryMap: Map<string, BcAllMktSummary>,
-  salesRows: SalesData[],
-  period: BcReportPeriod
-): void {
-  for (const salesRow of salesRows) {
-    const mktCode = String(salesRow.mktCode || '').trim();
-
-    if (!mktCode || isExcludedBcallMktCode(mktCode)) {
-      continue;
-    }
-
-    const salesDateKey = getSalesDateKey(salesRow.date);
-    if (!salesDateKey || !isDateInRange(salesDateKey, period)) {
-      continue;
-    }
-
-    ensureBcallMktSummary(summaryMap, mktCode).grossSalesVnd += salesRow.amountVnd;
-  }
-}
-
-function addAllMktCampaignsToSummary(
-  summaryMap: Map<string, BcAllMktSummary>,
-  campaigns: TikTokSpentCampaign[],
-  config: ConfigData
-): void {
-  const knownMarketCodes = getKnownMarketCodes(config);
-
-  for (const campaign of campaigns) {
-    const mktCode = extractCampaignMarketCode(campaign.campaign_name, knownMarketCodes);
-
-    if (!mktCode || isExcludedBcallMktCode(mktCode)) {
-      continue;
-    }
-
-    const summary = ensureBcallMktSummary(summaryMap, mktCode);
-    summary.campaignIds.add(`${campaign.advertiser_id}:${campaign.campaign_id}`);
-    summary.spendUsd += campaign.spend;
-    summary.spendVnd += campaign.spend * config.exchangeRate;
-  }
-}
-
-function renderBcallMktLine(summary: BcAllMktSummary, index: number): string {
-  return [
-    `<b>${index + 1}. ${escapeHtml(summary.mktCode)}</b>`,
-    `🧾 ${formatCompactVnd(summary.grossSalesVnd)}`,
-    `💸 ${formatCompactVnd(summary.spendVnd)}`,
-    `📈 ${formatCpAdsPercent(summary.spendVnd, summary.grossSalesVnd)}`,
-    `📊 ${summary.campaignIds.size.toLocaleString('vi-VN')} camp`,
-  ].join(' - ');
-}
-
-function renderBcallReport(
-  summaries: BcAllMktSummary[],
-  period: BcReportPeriod
-): BcAllSalesReportResult {
-  const activeSummaries = summaries
-    .filter(summary => summary.grossSalesVnd > 0 || summary.spendUsd > 0)
-    .sort((summaryA, summaryB) =>
-      summaryB.grossSalesVnd - summaryA.grossSalesVnd ||
-      summaryB.spendVnd - summaryA.spendVnd ||
-      compareMktCodes(summaryA.mktCode, summaryB.mktCode)
-    );
-  const totalGrossSalesVnd = activeSummaries.reduce((sum, summary) => sum + summary.grossSalesVnd, 0);
-  const totalSpendVnd = activeSummaries.reduce((sum, summary) => sum + summary.spendVnd, 0);
-  const totalSpendUsd = activeSummaries.reduce((sum, summary) => sum + summary.spendUsd, 0);
-  const lines: string[] = [
-    `<b>BC ALL MKT ${escapeHtml(formatCompactPeriod(period))} - ${escapeHtml(formatCheckTime(new Date()))}</b>`,
-    `<i>Đã loại trừ MKT80</i>`,
-    `🧾 ${formatCompactVnd(totalGrossSalesVnd)} 💸 ${formatCompactVnd(totalSpendVnd)} (${formatUsd(totalSpendUsd)}) 📈 ${formatCpAdsPercent(totalSpendVnd, totalGrossSalesVnd)}`,
-    '=============================',
-  ];
-
-  if (activeSummaries.length === 0) {
-    lines.push('<i>Không có dữ liệu trong khoảng thời gian này.</i>');
-  } else {
-    lines.push(...activeSummaries.map(renderBcallMktLine));
-  }
-
-  return {
-    message: lines.join('\n'),
-    mktCodes: activeSummaries.map(summary => summary.mktCode),
-    period,
-  };
-}
-
-function renderBcallProductReport(
-  mktCode: string,
-  period: BcReportPeriod,
-  productSummaries: BcAllProductSummary[]
-): string {
-  const activeProducts = productSummaries
-    .filter(product => product.grossSalesVnd > 0)
-    .sort((productA, productB) =>
-      productB.grossSalesVnd - productA.grossSalesVnd ||
-      productB.orders - productA.orders ||
-      productA.productName.localeCompare(productB.productName, 'vi')
-    );
-  const totalGrossSalesVnd = activeProducts.reduce((sum, product) => sum + product.grossSalesVnd, 0);
-  const lines: string[] = [
-    `<b>Doanh số chốt theo sản phẩm</b>`,
-    `MKT: <code>${escapeHtml(mktCode)}</code> ${escapeHtml(formatCompactPeriod(period))} - ${escapeHtml(formatCheckTime(new Date()))}`,
-    `🧾 Tổng chốt: <b>${formatVnd(totalGrossSalesVnd)}</b>`,
-    '=============================',
-  ];
-
-  if (activeProducts.length === 0) {
-    lines.push('<i>Không có doanh số chốt theo sản phẩm trong khoảng thời gian này.</i>');
-    return lines.join('\n');
-  }
-
-  lines.push(
-    ...activeProducts.map((product, index) =>
-      `${index + 1}. <b>${escapeHtml(product.productName)}</b>\n🧾 ${formatVnd(product.grossSalesVnd)} · ${product.orders.toLocaleString('vi-VN')} đơn`
-    )
-  );
-
-  return lines.join('\n');
-}
-
-export async function buildBcAllSalesReport(period: BcReportPeriod): Promise<BcAllSalesReportResult> {
-  const config = await getConfigSnapshot({ includeAllMkt: true });
-  const permissions = getConfiguredBcallPermissions(config);
-  const summaryMap = new Map<string, BcAllMktSummary>();
-
-  const advertiserAccounts = permissions.map(permission => ({
-    advertiserId: permission.advertiserId,
-    advertiserName: permission.advertiserName,
-    mktCode: permission.mktCode,
-  }));
-  const advertiserIds = advertiserAccounts.map(account => account.advertiserId);
-
-  const tiktokOptions = await getBcTikTokFetchOptions(advertiserIds, advertiserAccounts);
-  const [salesRows, campaigns] = await Promise.all([
-    getSalesData({ includeAllMkt: true }),
-    advertiserIds.length > 0
-      ? getTodaySpentCampaigns(period.startDate, period.endDate, tiktokOptions)
-      : Promise.resolve([] as Awaited<ReturnType<typeof getTodaySpentCampaigns>>),
-  ]);
-
-  addAllMktSalesRowsToSummary(summaryMap, salesRows, period);
-  addAllMktCampaignsToSummary(summaryMap, campaigns, config);
-
-  return renderBcallReport([...summaryMap.values()], period);
-}
-
-export async function buildBcAllMktProductReport(
-  period: BcReportPeriod,
-  mktCode: string
-): Promise<string> {
-  const salesRows = await getSalesData({ includeAllMkt: true });
-  const productMap = new Map<string, BcAllProductSummary>();
-  const normalizedMktCode = getBcallMktKey(mktCode);
-
-  for (const salesRow of salesRows) {
-    if (getBcallMktKey(String(salesRow.mktCode || '')) !== normalizedMktCode) {
-      continue;
-    }
-
-    const salesDateKey = getSalesDateKey(salesRow.date);
-    if (!salesDateKey || !isDateInRange(salesDateKey, period)) {
-      continue;
-    }
-
-    const productName = getRawSalesProductName(salesRow.productName);
-    const productKey = normalizeKey(productName);
-    const existingSummary = productMap.get(productKey);
-
-    if (existingSummary) {
-      existingSummary.orders += 1;
-      existingSummary.grossSalesVnd += salesRow.amountVnd;
-      continue;
-    }
-
-    productMap.set(productKey, {
-      productName,
-      grossSalesVnd: salesRow.amountVnd,
-      orders: 1,
-    });
-  }
-
-  return renderBcallProductReport(mktCode, period, [...productMap.values()]);
-}
-
 export async function buildBcSalesReport(options: BcReportOptions): Promise<BcSalesReportResult> {
   const targetMktCode = options.targetMktCode?.trim() || getTargetMktCode();
   const startedAt = Date.now();

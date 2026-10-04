@@ -1,12 +1,9 @@
 import { Markup, Telegraf, type Context } from 'telegraf';
 import {
-  buildBcAllMktProductReport,
-  buildBcAllSalesReport,
   buildBcSalesReport,
   getMonthBcReportPeriod,
   getTodayBcReportPeriod,
   parseCustomBcReportPeriod,
-  type BcAllSalesReportResult,
   type BcReportPeriod,
   type BcSalesDataIssue,
 } from './bc-report.js';
@@ -15,16 +12,12 @@ type ReplyOptions = Parameters<Context['reply']>[1];
 type NextFunction = () => Promise<void>;
 
 const BC_CALLBACK_PREFIX = 'bc_report';
-const BC_ALL_CALLBACK_PREFIX = 'bcall_report';
-const BC_ALL_PRODUCT_CALLBACK_PREFIX = 'bcall_product';
 const BC_ISSUES_CALLBACK_PREFIX = 'bc_issues';
 const CUSTOM_PENDING_TTL_MS = 10 * 60 * 1000;
-const BC_ALL_PRODUCT_TTL_MS = 30 * 60 * 1000;
 const BC_ISSUES_TTL_MS = 30 * 60 * 1000;
 const BC_ISSUES_PAGE_SIZE = 8;
 
-const pendingCustomReports = new Map<string, { createdAt: number; reportType: 'bc' | 'bcall' }>();
-const bcallProductCallbacks = new Map<string, { createdAt: number; period: BcReportPeriod; mktCode: string }>();
+const pendingCustomReports = new Map<string, { createdAt: number }>();
 const bcIssueCallbacks = new Map<string, { createdAt: number; issues: BcSalesDataIssue[] }>();
 
 function getTargetMktCode(): string {
@@ -128,30 +121,6 @@ function createBcIssueCallbackToken(issues: BcSalesDataIssue[]): string {
 
   return token;
 }
-
-function clearExpiredBcallProductCallbacks(): void {
-  const now = Date.now();
-
-  for (const [token, callbackContext] of bcallProductCallbacks.entries()) {
-    if (now - callbackContext.createdAt > BC_ALL_PRODUCT_TTL_MS) {
-      bcallProductCallbacks.delete(token);
-    }
-  }
-}
-
-function createBcallProductCallbackToken(period: BcReportPeriod, mktCode: string): string {
-  clearExpiredBcallProductCallbacks();
-
-  const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-  bcallProductCallbacks.set(token, {
-    createdAt: Date.now(),
-    period,
-    mktCode,
-  });
-
-  return token;
-}
-
 function buildBcMenuKeyboard() {
   return Markup.inlineKeyboard([
     [
@@ -163,34 +132,6 @@ function buildBcMenuKeyboard() {
     ],
   ]);
 }
-
-function buildBcAllMenuKeyboard() {
-  return Markup.inlineKeyboard([
-    [
-      Markup.button.callback('Hôm nay', `${BC_ALL_CALLBACK_PREFIX}:today`),
-      Markup.button.callback('Tháng này', `${BC_ALL_CALLBACK_PREFIX}:month`),
-    ],
-    [
-      Markup.button.callback('Custom', `${BC_ALL_CALLBACK_PREFIX}:custom`),
-    ],
-  ]);
-}
-
-function buildBcAllProductKeyboard(report: BcAllSalesReportResult) {
-  const buttons = report.mktCodes.map(mktCode =>
-    Markup.button.callback(
-      mktCode,
-      `${BC_ALL_PRODUCT_CALLBACK_PREFIX}:${createBcallProductCallbackToken(report.period, mktCode)}`
-    )
-  );
-
-  if (buttons.length === 0) {
-    return undefined;
-  }
-
-  return Markup.inlineKeyboard(chunkArray(buttons, 2));
-}
-
 function buildBcIssueKeyboard(issues: BcSalesDataIssue[]) {
   if (issues.length === 0) {
     return undefined;
@@ -263,22 +204,6 @@ export async function sendBcMenu(ctx: Context): Promise<void> {
     }
   );
 }
-
-export async function sendBcAllMenu(ctx: Context): Promise<void> {
-  await ctx.reply(
-    [
-      '<b>BÁO CÁO DOANH SỐ ALL MKT</b>',
-      '<i>Loại trừ MKT80</i>',
-      '',
-      'Chọn khung thời gian cần xem:',
-    ].join('\n'),
-    {
-      parse_mode: 'HTML',
-      ...buildBcAllMenuKeyboard(),
-    }
-  );
-}
-
 async function sendBcReport(ctx: Context, period: BcReportPeriod): Promise<void> {
   const waitMessage = await ctx.reply('Đang tổng hợp dữ liệu sales và TikTok Ads...');
 
@@ -332,65 +257,6 @@ async function sendBcReport(ctx: Context, period: BcReportPeriod): Promise<void>
     await ctx.reply(`Không thể tạo báo cáo /bc:\n${errorMessage}`);
   }
 }
-
-async function sendBcAllReport(ctx: Context, period: BcReportPeriod): Promise<void> {
-  const waitMessage = await ctx.reply('Đang tổng hợp dữ liệu all MKT...');
-
-  try {
-    const report = await buildBcAllSalesReport(period);
-    const keyboard = buildBcAllProductKeyboard(report);
-    const chunks = splitMessage(report.message);
-    const chatId = ctx.chat?.id;
-
-    if (chatId && chunks[0]) {
-      await ctx.telegram.editMessageText(
-        chatId,
-        waitMessage.message_id,
-        undefined,
-        chunks[0],
-        {
-          parse_mode: 'HTML',
-          ...(chunks.length === 1 && keyboard ? keyboard : {}),
-        }
-      );
-
-      for (let index = 1; index < chunks.length; index++) {
-        const isLastChunk = index === chunks.length - 1;
-
-        await ctx.reply(chunks[index], {
-          parse_mode: 'HTML',
-          ...(isLastChunk && keyboard ? keyboard : {}),
-        });
-      }
-      return;
-    }
-
-    const lastChunkIndex = chunks.length - 1;
-    for (let index = 0; index < chunks.length; index++) {
-      await ctx.reply(chunks[index], {
-        parse_mode: 'HTML',
-        ...(index === lastChunkIndex && keyboard ? keyboard : {}),
-      });
-    }
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const chatId = ctx.chat?.id;
-
-    if (chatId) {
-      await ctx.telegram.editMessageText(
-        chatId,
-        waitMessage.message_id,
-        undefined,
-        `Không thể tạo báo cáo /bcall:\n${escapeHtml(errorMessage)}`,
-        { parse_mode: 'HTML' }
-      );
-      return;
-    }
-
-    await ctx.reply(`Không thể tạo báo cáo /bcall:\n${errorMessage}`);
-  }
-}
-
 function clearExpiredPendingCustomReports(): void {
   const now = Date.now();
 
@@ -430,14 +296,8 @@ async function handleCustomText(ctx: Context, next: NextFunction): Promise<void>
   }
 
   try {
-    const pending = pendingCustomReports.get(pendingKey);
     const period = parseCustomBcReportPeriod(messageText);
     pendingCustomReports.delete(pendingKey);
-
-    if (pending?.reportType === 'bcall') {
-      await sendBcAllReport(ctx, period);
-      return;
-    }
 
     await sendBcReport(ctx, period);
   } catch (error) {
@@ -465,14 +325,6 @@ function parseDirectBcCommandPeriod(ctx: Context): BcReportPeriod | undefined {
 
   return commandArgs ? parseCustomBcReportPeriod(commandArgs) : undefined;
 }
-
-function parseDirectBcAllCommandPeriod(ctx: Context): BcReportPeriod | undefined {
-  const messageText = getMessageText(ctx);
-  const commandArgs = messageText.replace(/^\/bcall(?:@\w+)?/i, '').trim();
-
-  return commandArgs ? parseCustomBcReportPeriod(commandArgs) : undefined;
-}
-
 export function setupBcSalesHandlers(bot: Telegraf): void {
   bot.command('bc', async (ctx) => {
     try {
@@ -505,7 +357,7 @@ export function setupBcSalesHandlers(bot: Telegraf): void {
     const pendingKey = getPendingKey(ctx);
 
     if (pendingKey) {
-      pendingCustomReports.set(pendingKey, { createdAt: Date.now(), reportType: 'bc' });
+      pendingCustomReports.set(pendingKey, { createdAt: Date.now() });
     }
 
     await ctx.answerCbQuery();
