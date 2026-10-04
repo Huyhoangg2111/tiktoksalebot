@@ -87,7 +87,7 @@ function formatSchedulerStatus(state: {
 }
 
 function autoActionModeLabel(mode: string): string {
-  return mode === 'campaign' ? 'Campaign (bản đầu)' : 'Material (hiện tại)';
+  return mode === 'campaign' ? 'Campaign' : 'Material';
 }
 
 async function buildSettingsMessage(): Promise<string> {

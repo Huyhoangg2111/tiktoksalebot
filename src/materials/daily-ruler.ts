@@ -152,7 +152,7 @@ export function formatCampaignRulerSummary(s:CampaignRulerRunSummary){
  if(s.items.length>visible.length)lines.push(`… +${s.items.length-visible.length} campaign khác`);
  return [
   `<b>${s.manual?'Chạy thủ công':'Lịch tự động'} Campaign Ruler</b>`,
-  `Chế độ: <b>Campaign</b> (bản đầu)`,
+  `Chế độ: <b>Campaign</b>`,
   `Rule hợp lệ: <b>${s.ruleCount}</b>`,
   `Campaign đã xét: <b>${s.evaluatedCampaigns}</b>`,
   `Đạt điều kiện: <b>${s.matchedCampaigns}</b>`,
