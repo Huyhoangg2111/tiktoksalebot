@@ -1136,7 +1136,9 @@ export async function getSalesData(options: MktScopeOptions = {}): Promise<Sales
             const date = row[0];
             const shopName = row[3];
             const mktCode = String(row[4] || '').trim();
-            const productName = row[5];
+            // Tên sản phẩm: cột F. Nếu F trống thì dùng cột K (workflow đội sale
+            // điền tên camp/sản phẩm ở cột K sau cột SĐT/shop).
+            const productName = String(row[5] ?? '').trim() || String(row[10] ?? '').trim() || undefined;
             const channelLink = String(row[6] || '').trim();
             // O = DT thực, Q = status. Do not require length >= 15: Google omits
             // trailing empty cells, so blank DT thực rows were being dropped.
