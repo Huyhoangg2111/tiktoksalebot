@@ -247,9 +247,22 @@ function findSalesProductMappings(
     return byCategory;
   }
 
-  // Fallback: sheet F sometimes stores Tên vật tư (SpMap col B).
-  return config.spMap.filter(
+  // Fallback 1: sheet F sometimes stores Tên vật tư (SpMap col B).
+  const byMaterial = config.spMap.filter(
     sp => normalizeKey(sp.materialName) === normalizedProductName
+  );
+  if (byMaterial.length > 0) {
+    return byMaterial;
+  }
+
+  // Fallback 2 (theo từ khóa — đúng hành vi ghi trong Sale_AI_CONTEXT.md):
+  // sheet F chỉ cần CHỨA từ khóa chiến dịch đã cấu hình, không phân biệt hoa/thường.
+  // VD: F = "BRA CÁI TRƯỚC NÂU 36" khớp từ khóa "bra cái trước".
+  return config.spMap.filter(sp =>
+    splitShortNames(sp.shortName).some(alias => {
+      const normalizedAlias = normalizeKey(alias);
+      return normalizedAlias.length > 0 && normalizedProductName.includes(normalizedAlias);
+    })
   );
 }
 function getSalesProductShortName(productName: string | undefined, config: ConfigData): string {
