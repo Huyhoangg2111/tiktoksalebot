@@ -197,7 +197,8 @@ async function handle2FA(
   // Chờ mã TOTP mới (ít nhất 5 giây trước khi hết hạn)
   log('Dang tao ma TOTP...');
   const totpCode = await waitForFreshTOTP(credentials.totpSecret, 5);
-  log(`Ma TOTP: ${totpCode} (6 chu so)`);
+  // Không log nguyên mã TOTP vào console — chỉ log dạng che.
+  log(`Ma TOTP: ******${String(totpCode || '').slice(-2)} (6 chu so)`);
 
   // Submit 2FA
   log('Dang nhap ma 2FA...');

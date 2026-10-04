@@ -199,7 +199,12 @@ async function runScheduledCheck(): Promise<void> {
     'level1',
     'Check campaign notifications and material rules',
     async () => {
-      await checkAndRunDailyMaterialRuler(botInstance!);
+      // Lỗi Ruler theo lịch không được làm trượt engine material trong cùng tick.
+      try {
+        await checkAndRunDailyMaterialRuler(botInstance!);
+      } catch (rulerError) {
+        console.error('[scheduler] daily material ruler failed:', rulerError);
+      }
       await checkAndSendCampaignMaterialAlerts(botInstance!);
     }
   );

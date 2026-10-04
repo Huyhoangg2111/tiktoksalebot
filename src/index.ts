@@ -69,7 +69,7 @@ async function main() {
 
   // Initialize Telegram bot
   bot = new Telegraf(botToken);
-  await startAdminServer(async code => { await bot!.telegram.sendMessage(process.env.ADMIN_CHAT_ID || '', `🔐 Mã đăng nhập Admin: <code>${code}</code>\\nCó hiệu lực 5 phút và chỉ dùng một lần.`, { parse_mode: 'HTML' }); });
+  await startAdminServer(async code => { await bot!.telegram.sendMessage(process.env.ADMIN_CHAT_ID || '', `🔐 Mã đăng nhập Admin: <code>${code}</code>\nCó hiệu lực 5 phút và chỉ dùng một lần.`, { parse_mode: 'HTML' }); });
 
   // Retire the old alert actions before any legacy callbacks are registered.
   // This also strips their buttons from all Telegram send/edit payloads.
@@ -149,5 +149,7 @@ process.on('uncaughtException', (error) => scheduleFatalExit('Uncaught exception
 // Start the application
 main().catch((error) => {
   console.error(error);
-  process.exitCode = 1;
+  // Phải exit thật để Docker restart: admin server/scheduler giữ event loop sống
+  // nên chỉ đặt exitCode là process không bao giờ thoát, bot thành zombie.
+  process.exit(1);
 });

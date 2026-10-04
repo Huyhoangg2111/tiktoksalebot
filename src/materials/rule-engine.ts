@@ -155,50 +155,6 @@ function parseRuleSide(
   };
 }
 
-function normalizeLevel1Entity(value: unknown): 'campaign' | 'material' | undefined {
-  const normalized = normalizeText(value).replace(/[\s-]+/g, '_');
-  if (['campaign', 'campaigns'].includes(normalized)) return 'campaign';
-  if (['material', 'materials', 'creative', 'creatives', 'video', 'videos', 'tu_lieu', 'tulieu'].includes(normalized)) {
-    return 'material';
-  }
-  return undefined;
-}
-
-function parseLevel1RuleRows(rows: any[][]): Level1RuleSnapshot {
-  const campaignRules: MaterialRule[] = [];
-  const materialRules: MaterialRule[] = [];
-
-  rows.slice(1).forEach((row, index) => {
-    const entity = normalizeLevel1Entity(row[0]);
-    if (!entity) return;
-
-    const rowNumber = index + 2;
-    const leftActionIndex = normalizeAction(row[7]) ? 7 : 8;
-    const dualAction = Boolean(normalizeOperator(row[8]) && normalizeAction(row[12]));
-    const enabledFallbackIndex = leftActionIndex === 7 ? 8 : 9;
-    const enabledValue = String(row[13] ?? '').trim() !== '' ? row[13] : row[enabledFallbackIndex];
-    if (!parseEnabled(enabledValue)) return;
-
-    const noteValue = String(row[14] ?? '').trim() !== '' ? row[14] : row[leftActionIndex === 7 ? 9 : 10];
-    const note = String(noteValue || '').trim() || undefined;
-    const target = entity === 'campaign' ? campaignRules : materialRules;
-
-    const left = parseRuleSide(row, rowNumber, 3, leftActionIndex, note);
-    if (left) target.push(left);
-
-    if (dualAction) {
-      const right = parseRuleSide(row, rowNumber, 8, 12, note);
-      if (right) target.push(right);
-    }
-  });
-
-  return {
-    campaignRules,
-    materialRules,
-    loadedAtMs: Date.now(),
-  };
-}
-
 async function readDashboardRules(entity: 'campaign' | 'material'): Promise<MaterialRule[]> {
   const rows = await db.all<Record<string, unknown>>(
     'SELECT id,name_contains,metric,metric_operator,metric_threshold,metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note FROM alert_action_rules WHERE entity=? ORDER BY id',
@@ -233,11 +189,22 @@ function compareValues(
   if (operator === 'between') {
     return Number.isFinite(min) && current >= Number(min) && current <= threshold;
   }
-  if (operator === 'gt') return current > threshold;
-  if (operator === 'gte') return current >= threshold;
-  if (operator === 'lt') return current < threshold;
-  if (operator === 'lte') return current <= threshold;
-  return current === threshold;
+  if (operator === 'gt') {
+    if (!(current > threshold)) return false;
+  } else if (operator === 'gte') {
+    if (!(current >= threshold)) return false;
+  } else if (operator === 'lt') {
+    if (!(current < threshold)) return false;
+  } else if (operator === 'lte') {
+    if (!(current <= threshold)) return false;
+  } else if (current !== threshold) {
+    return false;
+  }
+  // "Mức từ" áp dụng cho mọi toán tử (giống bản tham chiếu alerts): VD CPA < 1.2 và >= 0.5.
+  if (Number.isFinite(min)) {
+    return current >= Number(min);
+  }
+  return true;
 }
 
 function getCampaignRuleKey(name: string | undefined): string {
@@ -246,12 +213,28 @@ function getCampaignRuleKey(name: string | undefined): string {
   return value.replace(/\s+/g, ' ').trim().toLocaleUpperCase('vi-VN');
 }
 
+/** contains nhưng yêu cầu needle đứng trọn vẹn một "token": MKT.CT không khớp MKT.CT1. */
+function containsStandaloneToken(haystack: string, needle: string): boolean {
+  if (!needle) return true;
+  let index = haystack.indexOf(needle);
+  while (index >= 0) {
+    const before = index === 0 ? '' : haystack[index - 1];
+    const afterIndex = index + needle.length;
+    const after = afterIndex >= haystack.length ? '' : haystack[afterIndex];
+    const boundaryBefore = before === '' || /[^A-Za-z0-9]/.test(before);
+    const boundaryAfter = after === '' || /[^A-Za-z0-9]/.test(after);
+    if (boundaryBefore && boundaryAfter) return true;
+    index = haystack.indexOf(needle, index + 1);
+  }
+  return false;
+}
+
 function matchesCampaignName(nameContains: string | undefined, campaignName: string | undefined): boolean {
   if (!nameContains) return true;
   const rule = getCampaignRuleKey(nameContains);
   const key = getCampaignRuleKey(campaignName);
   const full = String(campaignName || '').replace(/\s+/g, ' ').trim().toLocaleUpperCase('vi-VN');
-  return key === rule || key.includes(rule) || full.includes(rule);
+  return key === rule || containsStandaloneToken(key, rule) || containsStandaloneToken(full, rule);
 }
 
 function campaignMatchesRule(campaign: TikTokSpentCampaign, rule: MaterialRule): boolean {
@@ -330,7 +313,7 @@ async function sendMaterialPipelineWarning(bot: Telegraf, detail: string): Promi
 }
 
 function campaignSubjectKey(campaign: TikTokSpentCampaign, rule: MaterialRule): string {
-  return `campaign:${campaign.advertiser_id}:${campaign.campaign_id}:${rule.metric}:${rule.metricOperator}:${rule.metricThreshold}:${rule.conversionsOperator}:${rule.conversionsThreshold}:${rule.action}`;
+  return `campaign:${campaign.advertiser_id}:${campaign.campaign_id}:${rule.metric}:${rule.metricOperator}:${rule.metricThreshold}:${rule.metricMinThreshold ?? ''}:${rule.nameContains ?? ''}:${rule.conversionsOperator}:${rule.conversionsThreshold}:${rule.action}`;
 }
 
 function getMktGroupKey(mktCode: string | undefined | null): string {
@@ -357,6 +340,44 @@ function chunkInlineButtons(
     rows.push(buttons.slice(index, index + perRow));
   }
   return rows;
+}
+
+const TELEGRAM_MESSAGE_LIMIT = 3_800;
+
+/** Chia dòng tin thành nhiều message dưới giới hạn 4096 của Telegram để không mất tin. */
+function chunkLinesForTelegram(lines: string[], limit = TELEGRAM_MESSAGE_LIMIT): string[] {
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let length = 0;
+  for (const rawLine of lines) {
+    const line = rawLine.length > limit ? rawLine.slice(0, limit) : rawLine;
+    const lineLength = line.length + 1;
+    if (current.length > 0 && length + lineLength > limit) {
+      chunks.push(current.join('\n'));
+      current = [];
+      length = 0;
+    }
+    current.push(line);
+    length += lineLength;
+  }
+  if (current.length > 0) chunks.push(current.join('\n'));
+  return chunks.length > 0 ? chunks : [''];
+}
+
+async function sendChunkedMessage(
+  bot: Telegraf,
+  chatId: string,
+  lines: string[],
+  options?: { buttons?: Array<{ text: string; callback_data: string }> }
+): Promise<void> {
+  const chunks = chunkLinesForTelegram(lines);
+  for (let index = 0; index < chunks.length; index++) {
+    const isLast = index === chunks.length - 1;
+    await bot.telegram.sendMessage(chatId, chunks[index], {
+      parse_mode: 'HTML',
+      ...(isLast && options?.buttons?.length ? { reply_markup: { inline_keyboard: chunkInlineButtons(options.buttons, 3) } } : {}),
+    });
+  }
 }
 
 async function sendGroupedCampaignNotification(
@@ -398,7 +419,7 @@ async function sendGroupedCampaignNotification(
         `$${campaign.spend.toFixed(2)} · click ${campaign.clicks}/${campaign.ctr.toFixed(2)}% · conversion ${campaign.conversions} · CPA $${campaign.cpa.toFixed(2)}`
       );
       buttons.push({
-        text: `🔎 ${escapeHtml(shortCampaignLabel(campaign.campaign_name))}`,
+        text: `🔎 ${shortCampaignLabel(campaign.campaign_name)}`,
         callback_data: buildMaterialDetailCallbackData(campaign.advertiser_id, campaign.campaign_id, 0),
       });
     }
@@ -407,11 +428,15 @@ async function sendGroupedCampaignNotification(
   lines.push('ℹ️ Campaign chỉ cảnh báo, không tự tắt/bật.');
   plainLines.push('Campaign chỉ cảnh báo, không tự tắt/bật.');
 
-  await bot.telegram.sendMessage(adminChatId, lines.join('\n'), {
-    parse_mode: 'HTML',
-    ...(buttons.length > 0 ? { reply_markup: { inline_keyboard: chunkInlineButtons(buttons, 3) } } : {}),
-  });
-  await saveAlertHistory('campaign_notify', plainLines.join('\n'), 'low');
+  await sendChunkedMessage(bot, adminChatId, lines, { buttons });
+  const severityCampaign = campaigns[0];
+  const severity = severityCampaign
+    ? calculateCampaignActionSeverity(
+      rule.metric === 'spend' ? severityCampaign.spend : severityCampaign.cpa,
+      rule.metricThreshold
+    )
+    : 'low';
+  await saveAlertHistory('campaign_notify', plainLines.join('\n'), severity);
 }
 
 async function evaluateCampaignNotifications(
@@ -419,10 +444,8 @@ async function evaluateCampaignNotifications(
   campaigns: TikTokSpentCampaign[],
   sourceRules: MaterialRule[]
 ): Promise<void> {
-  const rules = sourceRules.filter(rule =>
-    rule.action === 'notify' &&
-    (rule.metricOperator === 'lt' || rule.metricOperator === 'lte')
-  );
+  // Mọi toán tử đều thông báo được: lt/lte = "đạt điều kiện", gt/gte = "vượt giới hạn".
+  const rules = sourceRules.filter(rule => rule.action === 'notify');
 
   for (const rule of rules) {
     const sendable: TikTokSpentCampaign[] = [];
@@ -582,7 +605,7 @@ async function sendGroupedMaterialActions(
     plainLines.push(`— ${getMktSectionLabel(mkt)} —`, ...group.plainLines);
   }
 
-  await bot.telegram.sendMessage(adminChatId, lines.join('\n'), { parse_mode: 'HTML' });
+  await sendChunkedMessage(bot, adminChatId, lines);
   await saveAlertHistory('material_auto_action', plainLines.join('\n'), 'low');
 }
 
@@ -660,7 +683,7 @@ async function applyCampaignDecisions(
     // Nút đảo chiều dùng lại handler campaign_action còn hoạt động ở bản hiện tại.
     const inverseStatus: TikTokCampaignOperationStatus = operationStatus === 'DISABLE' ? 'ENABLE' : 'DISABLE';
     group.buttons.push({
-      text: `${inverseStatus === 'DISABLE' ? '⏸' : '✅'} ${escapeHtml(shortCampaignLabel(campaign.campaign_name))}`,
+      text: `${inverseStatus === 'DISABLE' ? '⏸' : '✅'} ${shortCampaignLabel(campaign.campaign_name)}`,
       callback_data: `campaign_action:${inverseStatus}:${campaign.campaign_id}`,
     });
     groups.set(mkt, group);
@@ -673,10 +696,7 @@ async function applyCampaignDecisions(
     buttons.push(...group.buttons);
   }
 
-  await bot.telegram.sendMessage(adminChatId, lines.join('\n'), {
-    parse_mode: 'HTML',
-    ...(buttons.length > 0 ? { reply_markup: { inline_keyboard: chunkInlineButtons(buttons, 3) } } : {}),
-  });
+  await sendChunkedMessage(bot, adminChatId, lines, { buttons });
 }
 
 async function evaluateCampaignActions(

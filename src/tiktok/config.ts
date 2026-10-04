@@ -1,3 +1,4 @@
+import { db } from '../db/index.js';
 import {
   getAdvertiserPermissions,
   getBusinessCenterId,
@@ -111,6 +112,18 @@ async function getConfiguredAdvertiserAccounts(required: boolean): Promise<Adver
 
   if (advertiserAccounts.length > 0) {
     return advertiserAccounts;
+  }
+
+  // Dashboard CÓ dòng advertisers nhưng tất cả bị tắt → tôn trọng lựa chọn đó,
+  // không âm thầm fallback về ENV (trước đây admin tắt hết vẫn bị quét bình thường).
+  const adminAdvertiserRows = await db
+    .all<{ data_json: string }>("SELECT data_json FROM admin_config_rows WHERE section = 'advertisers'")
+    .catch(() => [] as { data_json: string }[]);
+  if (adminAdvertiserRows.length > 0) {
+    if (required) {
+      throw new Error('Mọi TKQC trong dashboard đều đang tắt. Bật lại trong dashboard (mục Tài khoản quảng cáo) hoặc xoá hết dòng để dùng TIKTOK_ADVERTISER_IDS.');
+    }
+    return [];
   }
 
   const envAdvertiserIds = getAdvertiserIdsFromEnv(false);

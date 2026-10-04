@@ -23,6 +23,7 @@ interface PendingCampaignBatch {
   firstAt: number;
   items: Map<string, ParsedCampaignAlert>;
   payload: Record<string, unknown>;
+  condition: CampaignCondition;
   timer?: NodeJS.Timeout;
 }
 
@@ -35,16 +36,14 @@ function escapeHtml(value: unknown): string {
 }
 
 function getCampaignDisplayName(campaignName: string): string {
-  const parts = String(campaignName || '')
-    .split(' - ')
-    .map(part => part.trim())
-    .filter(Boolean);
-
-  if (parts.length >= 2) {
-    return `${parts[0]} - ${parts[1]}`;
+  // Tên campaign mới phân tách bằng " · ", bản cũ dùng " - ". Giữ 3 dữ liệu đầu.
+  const value = String(campaignName || '').trim();
+  for (const separator of [' · ', ' - ']) {
+    const parts = value.split(separator).map(part => part.trim()).filter(Boolean);
+    if (parts.length >= 3) return parts.slice(0, 3).join(separator);
+    if (parts.length > 1) return parts.join(separator);
   }
-
-  return String(campaignName || '').trim();
+  return value;
 }
 
 function getAccountLabel(advertiserName: string | undefined, advertiserId: string | undefined): string {
@@ -66,17 +65,22 @@ function chunkArray<T>(items: T[], size: number): T[][] {
   return chunks;
 }
 
-function findMaterialDetailButton(replyMarkup: unknown): Record<string, unknown> | undefined {
-  if (!replyMarkup || typeof replyMarkup !== 'object') return undefined;
+function findMaterialDetailButtons(replyMarkup: unknown): Record<string, unknown>[] {
+  if (!replyMarkup || typeof replyMarkup !== 'object') return [];
   const keyboard = (replyMarkup as { inline_keyboard?: Array<Array<Record<string, unknown>>> }).inline_keyboard;
-  if (!Array.isArray(keyboard)) return undefined;
+  if (!Array.isArray(keyboard)) return [];
 
   return keyboard
     .flat()
-    .find(button => String(button?.callback_data || '').startsWith('md:'));
+    .filter(button => String(button?.callback_data || '').startsWith('md:'));
 }
 
-function parseCampaignAlertPayload(payload: unknown): ParsedCampaignAlert | undefined {
+/**
+ * Parse message "🔔 Campaign đạt điều kiện / vượt giới hạn" theo format nhóm MKT mới:
+ * heading, dòng điều kiện (📏 …), rồi các khối "— MKT —" + "<b>camp</b> - <code>id</code>" + dòng metrics.
+ * Trả về danh sách campaign (mỗi camp một item, nút md: gán theo thứ tự).
+ */
+function parseCampaignAlertPayload(payload: unknown): ParsedCampaignAlert[] | undefined {
   if (!payload || typeof payload !== 'object') return undefined;
   const source = payload as Record<string, unknown>;
   if (String(source.parse_mode || '').toUpperCase() !== 'HTML' || typeof source.text !== 'string') {
@@ -89,28 +93,30 @@ function parseCampaignAlertPayload(payload: unknown): ParsedCampaignAlert | unde
   const headingMatch = lines[0]?.match(/^🔔\s*<b>Campaign\s+(đạt điều kiện|vượt giới hạn)<\/b>\s*$/i);
   if (!headingMatch) return undefined;
 
-  const campaignMatch = lines[1]?.match(/^<b>(.*?)<\/b>\s*-\s*<code>(\d{10,})<\/code>\s*$/);
-  if (!campaignMatch) return undefined;
-
   const condition = headingMatch[1].toLowerCase() as CampaignCondition;
-  const campaignName = getCampaignDisplayName(campaignMatch[1]);
-  const campaignId = campaignMatch[2];
-  const metricsLine = lines[2] || '';
-  const detailButton = findMaterialDetailButton(source.reply_markup);
-  const detailCallback = String(detailButton?.callback_data || '');
+  const detailButtons = findMaterialDetailButtons(source.reply_markup);
+  const detailCallback = String(detailButtons[0]?.callback_data || '');
   const detailRef = detailCallback ? parseMaterialDetailCallbackData(detailCallback) : undefined;
 
-  return {
-    condition,
-    campaignName,
-    campaignId,
-    advertiserId: detailRef?.advertiserId,
-    metricsLine,
-    detailButton,
-  };
+  const items: ParsedCampaignAlert[] = [];
+  for (let index = 1; index < lines.length; index++) {
+    const campaignMatch = lines[index]?.match(/^<b>(.*?)<\/b>\s*-\s*<code>(\d{10,})<\/code>\s*$/);
+    if (!campaignMatch) continue;
+    const metricsLine = (lines[index + 1] || '').startsWith('💵') ? lines[index + 1] : '';
+    items.push({
+      condition,
+      campaignName: getCampaignDisplayName(campaignMatch[1]),
+      campaignId: campaignMatch[2],
+      advertiserId: detailRef?.advertiserId,
+      metricsLine,
+      detailButton: detailButtons[items.length],
+    });
+  }
+
+  return items.length > 0 ? items : undefined;
 }
 
-async function buildGroupedCampaignMessage(items: ParsedCampaignAlert[]) {
+async function buildGroupedCampaignMessage(items: ParsedCampaignAlert[], condition: CampaignCondition) {
   const visibleItems = items.slice(0, MAX_CAMPAIGNS_IN_MESSAGE);
   const buttons: Record<string, unknown>[] = [];
 
@@ -129,9 +135,10 @@ async function buildGroupedCampaignMessage(items: ParsedCampaignAlert[]) {
     trackingStates.map(state => [state.advertiserId, state.advertiserName])
   );
 
-  const lines: string[] = [
-    `<b>✅ ADS Đạt Điều Kiện (${items.length} camp)</b>`,
-  ];
+  const heading = condition === 'vượt giới hạn'
+    ? `<b>⚠️ ADS Vượt Giới Hạn (${items.length} camp)</b>`
+    : `<b>✅ ADS Đạt Điều Kiện (${items.length} camp)</b>`;
+  const lines: string[] = [heading];
 
   visibleItems.forEach((item, index) => {
     const accountLabel = getAccountLabel(
@@ -187,10 +194,10 @@ function buildBufferedResponse(payload: Record<string, unknown>): Record<string,
 
 /**
  * Presentation compatibility cho campaign Level 1:
- * - campaign chỉ thông báo khi `đạt điều kiện`;
- * - `vượt giới hạn` không gửi alert campaign vì phần này đã được material ruler tự động xử lý
- *   và có thông báo Pause/Active riêng;
- * - các camp đạt điều kiện trong cùng lượt được gom thành một message;
+ * - parse message nhóm MKT mới (heading + 📏 điều kiện + các khối "— MKT —" + camp);
+ * - "đạt điều kiện" hiển thị "✅ ADS Đạt Điều Kiện (N camp)";
+ * - "vượt giới hạn" (rule notify gt/gte) hiển thị "⚠️ ADS Vượt Giới Hạn (N camp)";
+ * - các camp trong cùng lượt được gom thành một message, dedupe theo campaign id;
  * - khôi phục format cũ: account số ngắn kiểu `32` và clone count `🚀 xN`;
  * - giữ dòng metrics và callback `Chi tiết camp`;
  * - không thay đổi quyết định material rule hay TikTok write API.
@@ -210,7 +217,7 @@ export function setupCampaignAlertUiCompatibility(bot: Telegraf): void {
     if (items.length === 0) return;
 
     try {
-      const grouped = await buildGroupedCampaignMessage(items);
+      const grouped = await buildGroupedCampaignMessage(items, batch.condition);
       const nextPayload: Record<string, unknown> = {
         ...batch.payload,
         text: grouped.text,
@@ -234,33 +241,33 @@ export function setupCampaignAlertUiCompatibility(bot: Telegraf): void {
     }
 
     const source = payload as Record<string, unknown>;
-    const parsed = parseCampaignAlertPayload(source);
-    if (!parsed) {
+    const parsedItems = parseCampaignAlertPayload(source);
+    if (!parsedItems) {
       return originalCallApi(method, payload, ...rest);
     }
 
-    // Level 1 không còn gửi cảnh báo campaign vượt giới hạn.
-    // Material ruler chịu trách nhiệm auto Pause/Active và gửi feedback riêng.
-    if (parsed.condition === 'vượt giới hạn') {
-      return buildBufferedResponse(source);
-    }
-
-    const batchKey = getBatchKey(source, parsed.condition);
+    const condition = parsedItems[0].condition;
+    const batchKey = getBatchKey(source, condition);
     const now = Date.now();
     const existing = pendingByKey.get(batchKey);
     const batch: PendingCampaignBatch = existing || {
       firstAt: now,
       items: new Map<string, ParsedCampaignAlert>(),
       payload: source,
+      condition,
     };
 
     // Một camp có thể đồng thời match nhiều rule đạt điều kiện. Chỉ hiển thị camp đó một lần.
-    batch.items.set(parsed.campaignId, parsed);
+    parsedItems.forEach(item => batch.items.set(item.campaignId, item));
     if (batch.timer) clearTimeout(batch.timer);
 
     const maxRemaining = Math.max(0, BATCH_MAX_WAIT_MS - (now - batch.firstAt));
     const waitMs = Math.min(BATCH_IDLE_MS, maxRemaining);
-    batch.timer = setTimeout(() => void flushBatch(batchKey), waitMs);
+    batch.timer = setTimeout(() => {
+      void flushBatch(batchKey).catch(error => {
+        console.error('[CampaignAlertUiCompatibility] unhandled flush failure:', error);
+      });
+    }, waitMs);
     pendingByKey.set(batchKey, batch);
 
     return buildBufferedResponse(source);

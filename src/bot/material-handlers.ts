@@ -72,7 +72,8 @@ function escapeHtml(value: unknown): string {
 
 function isAdmin(ctx: any): boolean {
   const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
-  if (!adminChatId) return true;
+  // Mặc định từ chối khi thiếu ADMIN_CHAT_ID — đồng bộ với các module admin khác.
+  if (!adminChatId) return false;
   return String(ctx?.chat?.id ?? ctx?.callbackQuery?.message?.chat?.id ?? '') === adminChatId;
 }
 

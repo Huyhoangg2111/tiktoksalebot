@@ -367,7 +367,7 @@ export interface AccountBotCredentials {
 }
 
 function parseAdvertiserPermissionRows(rows: any[][], options: MktScopeOptions = {}): AdvertiserPermission[] {
-  void options;
+  const targetMktCode = options.targetMktCode?.trim();
 
   return rows
     .slice(1)
@@ -380,7 +380,8 @@ function parseAdvertiserPermissionRows(rows: any[][], options: MktScopeOptions =
     }))
     .filter(permission =>
       permission.enabled &&
-      permission.advertiserId
+      permission.advertiserId &&
+      (!targetMktCode || normalizeKey(permission.mktCode) === normalizeKey(targetMktCode))
     );
 }
 
@@ -879,18 +880,34 @@ function findPageMapping(pageMap: PageMapping[], channelLink: string, pageName?:
     return undefined;
   }
 
-  return pageMap.find(mapping => {
+  // Chấm điểm thay vì lấy dòng đầu tiên khớp: khớp chính xác tên page được ưu tiên,
+  // và handle/url khớp dài hơn thắng — tránh "VN" bắt nhầm "VN2" theo thứ tự dòng.
+  let best: PageMapping | undefined;
+  let bestScore = 0;
+  for (const mapping of pageMap) {
     const normalizedPageHandle = normalizeKey(mapping.pageHandle);
     const normalizedPageUrl = normalizeKey(mapping.pageUrl);
     const normalizedPageName = normalizeKey(mapping.pageName);
+    let score = 0;
 
-    return Boolean(
-      (normalizedChannelLink && normalizedPageHandle && normalizedChannelLink.includes(normalizedPageHandle)) ||
-      (normalizedChannelLink && normalizedPageUrl && normalizedChannelLink.includes(normalizedPageUrl)) ||
-      (normalizedInputPageName && normalizedPageName && normalizedInputPageName === normalizedPageName) ||
-      (normalizedInputPageName && normalizedPageName && normalizedInputPageName.includes(normalizedPageName))
-    );
-  });
+    if (normalizedChannelLink && normalizedPageHandle && normalizedChannelLink.includes(normalizedPageHandle)) {
+      score = Math.max(score, 1 + normalizedPageHandle.length);
+    }
+    if (normalizedChannelLink && normalizedPageUrl && normalizedChannelLink.includes(normalizedPageUrl)) {
+      score = Math.max(score, 1 + normalizedPageUrl.length);
+    }
+    if (normalizedInputPageName && normalizedPageName) {
+      if (normalizedInputPageName === normalizedPageName) score = Math.max(score, 100 + normalizedPageName.length);
+      else if (normalizedInputPageName.includes(normalizedPageName)) score = Math.max(score, 1 + normalizedPageName.length);
+    }
+
+    if (score > bestScore) {
+      best = mapping;
+      bestScore = score;
+    }
+  }
+
+  return best;
 }
 
 /**

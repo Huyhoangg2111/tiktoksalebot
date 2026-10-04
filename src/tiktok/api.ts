@@ -931,7 +931,7 @@ function includeActiveCampaignsWithoutSpend(
 
       activeNoSpendCampaigns.push({
         campaign_id: campaignId,
-        campaign_name: campaignStatus.campaignName || 'KhÃ´ng rÃµ tÃªn campaign',
+        campaign_name: campaignStatus.campaignName || 'Không rõ tên campaign',
         advertiser_id: advertiserId,
         advertiser_name: advertiserAccount?.advertiserName,
         mkt_code: advertiserAccount?.mktCode,

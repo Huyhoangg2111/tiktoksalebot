@@ -79,15 +79,27 @@ function splitMessage(message: string, maxLength = 3500): string[] {
   const chunks: string[] = [];
   let current = '';
 
-  for (const line of message.split('\n')) {
-    const next = current ? `${current}\n${line}` : line;
-    if (next.length <= maxLength) {
-      current = next;
-      continue;
+  for (const rawLine of message.split('\n')) {
+    // Một dòng dài hơn maxLength bị tách thành nhiều phần — nếu giữ nguyên,
+    // Telegram sẽ từ chối toàn bộ message vì vượt giới hạn.
+    const pieces: string[] = [];
+    let line = rawLine;
+    while (line.length > maxLength) {
+      pieces.push(line.slice(0, maxLength));
+      line = line.slice(maxLength);
     }
+    pieces.push(line);
 
-    if (current) chunks.push(current);
-    current = line;
+    for (const piece of pieces) {
+      const next = current ? `${current}\n${piece}` : piece;
+      if (next.length <= maxLength) {
+        current = next;
+        continue;
+      }
+
+      if (current) chunks.push(current);
+      current = piece;
+    }
   }
 
   if (current) chunks.push(current);

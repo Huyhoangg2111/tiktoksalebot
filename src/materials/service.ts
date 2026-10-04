@@ -406,7 +406,7 @@ async function fetchMaterialReportForAd(
   endDate = startDate
 ): Promise<MaterialReportRow[]> {
   const accessToken = await getReadToken();
-  const request = async () => axios.get(`${TIKTOK_API_BASE}/smart_plus/material_report/breakdown/`, {
+  const request = async (page: number) => axios.get(`${TIKTOK_API_BASE}/smart_plus/material_report/breakdown/`, {
     params: {
       advertiser_id: advertiserId,
       dimensions: JSON.stringify(['main_material_id']),
@@ -423,29 +423,36 @@ async function fetchMaterialReportForAd(
       filtering: JSON.stringify({ smart_plus_ad_ids: [smartPlusAdId] }),
       start_date: startDate,
       end_date: endDate,
-      page: 1,
+      page,
       page_size: SMART_PLUS_PAGE_SIZE,
     },
     headers: { 'Access-Token': accessToken },
     timeout: 30_000,
   });
 
-  let response = await request();
-  if (
-    Number(response.data?.code || 0) !== 0 &&
-    /qps|over_qps/i.test(getApiErrorMessage(response.data))
-  ) {
-    await sleep(1_500);
-    response = await request();
-  }
+  // Phân trang đầy đủ: trước đây chỉ lấy trang 1 nên ad có hơn 100 material
+  // bị cắt im lặng — material từ số 101 trở đi không được rule đánh giá.
+  const collected: MaterialReportRow[] = [];
+  const maxPages = 20;
+  for (let page = 1; page <= maxPages; page++) {
+    let response = await request(page);
+    if (
+      Number(response.data?.code || 0) !== 0 &&
+      /qps|over_qps/i.test(getApiErrorMessage(response.data))
+    ) {
+      await sleep(1_500);
+      response = await request(page);
+    }
 
-  assertTikTokSuccess(response.data, `Material report Smart+ ad=${smartPlusAdId}`);
+    assertTikTokSuccess(response.data, `Material report Smart+ ad=${smartPlusAdId}`);
 
-  return (response.data?.data?.list || [])
-    .map((row: any) => {
+    const list = response.data?.data?.list || [];
+    for (const row of list) {
       const metrics = row?.metrics || {};
-      return {
-        mainMaterialId: String(row?.dimensions?.main_material_id || row?.main_material_id || ''),
+      const mainMaterialId = String(row?.dimensions?.main_material_id || row?.main_material_id || '');
+      if (!mainMaterialId) continue;
+      collected.push({
+        mainMaterialId,
         metrics: {
           spend: toNumber(metrics.spend ?? row?.spend),
           impressions: toNumber(metrics.impressions ?? row?.impressions),
@@ -457,9 +464,13 @@ async function fetchMaterialReportForAd(
           videoPlayActions: toNumber(metrics.video_play_actions ?? row?.video_play_actions),
           name: String(metrics.main_material_name || row?.main_material_name || '').trim() || undefined,
         },
-      } satisfies MaterialReportRow;
-    })
-    .filter((row: MaterialReportRow) => Boolean(row.mainMaterialId));
+      } satisfies MaterialReportRow);
+    }
+
+    if (list.length < SMART_PLUS_PAGE_SIZE) break;
+  }
+
+  return collected;
 }
 
 function getCreativeStatus(creative: any): SmartPlusCreativeRef['status'] {

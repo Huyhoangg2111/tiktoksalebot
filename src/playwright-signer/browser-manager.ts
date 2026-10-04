@@ -764,7 +764,8 @@ export class BrowserManager {
 
     // Bước 2: Nhập mã TOTP
     // TikTok dùng 6 ô input riêng biệt cho mỗi chữ số
-    console.log(`[browser-manager] Dang nhap ma 2FA: ${payload.code}...`);
+    // Không log nguyên mã 2FA vào console — chỉ log dạng che.
+    console.log(`[browser-manager] Dang nhap ma 2FA: ******${String(payload.code || '').slice(-2)}`);
     const digits = payload.code.split('');
 
     // Cách 1: Tìm 6 ô input riêng biệt

@@ -107,6 +107,16 @@ const campaignsMktStateByMessage = new Map<string, {
   period: CampaignAccountReportPeriod;
   mktCode: string;
 }>();
+
+// Giới hạn kích thước state theo message — Map không eviction sẽ phình chậm theo thời gian chạy.
+const MAX_MESSAGE_STATE_ENTRIES = 500;
+function capMessageStateEntries<K, V>(map: Map<K, V>): void {
+  while (map.size > MAX_MESSAGE_STATE_ENTRIES) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey === undefined) break;
+    map.delete(oldestKey);
+  }
+}
 const pendingCampaignListActions = new Map<string, CampaignOperationStatus>();
 const pendingSettingsByChat = new Map<number, RuntimeSettingKey>();
 const execFileAsync = promisify(execFile);
@@ -758,6 +768,7 @@ function saveCampaignsListMessageState(
       period,
     }
   );
+  capMessageStateEntries(campaignsListStateByMessage);
 }
 
 function updateCampaignAdStatusInCampaignListState(
@@ -1734,6 +1745,7 @@ function saveCampaignMktMessageState(
       mktCode,
     }
   );
+  capMessageStateEntries(campaignsMktStateByMessage);
 }
 
 async function editCampaignMktReportMessage(
@@ -2494,13 +2506,6 @@ async function handleCampaignsRequest(ctx: Context, forcedArgs?: string[]): Prom
     const messageText = getTextMessage(ctx);
     const args = forcedArgs ?? messageText.split(/\s+/).slice(1).filter(Boolean);
     const parseResult = parseCampaignsPeriodArgs(args);
-
-    if (parseResult.error) {
-      await ctx.reply(
-        `Thời gian không hợp lệ.\n\nVí dụ:\n/campaigns 24\n/campaigns 24-29\n/campaigns 24/04-29/04\n/campaigns 2026-04-24 2026-04-29`
-      );
-      return;
-    }
 
     if (parseResult.error) {
       await ctx.reply(

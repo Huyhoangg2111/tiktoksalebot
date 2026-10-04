@@ -189,13 +189,16 @@ export async function checkAndRunDailyMaterialRuler(bot:Telegraf){await ensureTa
  try{
   const s=await executeExclusive(false);
   if(id)await bot.telegram.sendMessage(id,formatRulerSummary(s),{parse_mode:'HTML'});
-  const failed='failedGroups' in s?s.failedGroups:s.failedCount;
   const changed='enabledMaterials' in s?s.enabledMaterials:s.enabledCampaigns;
-  if(!failed)await mark(now.dateKey,runTime,s.matchedCampaigns,changed);
+  // Lượt nào cũng được ghi nhận (kể cả có campaign lỗi): nếu chỉ mark khi sạch lỗi,
+  // scheduler sẽ chạy lại Ruler và gửi lại tin mỗi phút suốt ngày.
+  await mark(now.dateKey,runTime,s.matchedCampaigns,changed);
  }catch(error){
-  const message=error instanceof Error?error.message:String(error);
+  const message=error instanceof Error ? error.message : String(error);
   console.error('[MaterialRuler] scheduled run failed',error);
   if(id)await bot.telegram.sendMessage(id,`❌ <b>${rulerLabel} theo lịch thất bại</b>\n<code>${esc(message.slice(0,1000))}</code>`,{parse_mode:'HTML'});
+  // Coi lượt này đã chạy để không retry spam; lỗi đã báo Telegram cho admin xử lý.
+  await mark(now.dateKey,runTime,0,0);
   throw error;
  }
 }

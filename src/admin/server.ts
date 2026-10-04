@@ -314,7 +314,6 @@ function rulerWarnings(state){
     const pause=sideSentence(group.metric,group.pause||{}),enable=sideSentence(group.metric,group.enable||{});
     if(!pause&&!enable)out.push('Quy tắc '+rulerTitle(group)+pos+' chưa có mức nào — sẽ không có tác dụng');
     if(pause&&enable&&pause===enable)out.push('Quy tắc '+rulerTitle(group)+pos+' có điều kiện TẮT và BẬT giống hệt nhau');
-    if(group.entity==='material')out.push('Quy tắc '+rulerTitle(group)+pos+': engine hiện KHÔNG chạy rule Material trong Ruler Auto — hãy chuyển sang tab Ruler Material');
     if(group.entity==='ad'&&(pause||enable))out.push('Quy tắc '+rulerTitle(group)+pos+': engine chỉ cho notify ở cấp Quảng cáo, không tự tắt/bật');
     [['TẮT',group.pause],['BẬT',group.enable]].forEach(([name,side])=>{
       if(side&&side.metric_operator==='between'&&String(side.metric_min_threshold??'').trim()){

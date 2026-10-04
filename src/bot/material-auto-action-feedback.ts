@@ -25,6 +25,7 @@ interface ParsedAutoAction {
   campaignLine: string;
   campaignId?: string;
   advertiserId?: string;
+  mkt?: string;
   pauseSuccess: number;
   activeSuccess: number;
   unverified: number;
@@ -35,6 +36,7 @@ interface ParsedAutoAction {
 interface PendingBatch {
   firstAt: number;
   items: ParsedAutoAction[];
+  payload?: Record<string, unknown>;
   timer?: NodeJS.Timeout;
 }
 
@@ -76,10 +78,6 @@ function isMaterialAutoActionText(text: string): boolean {
   return /^🤖\s*<b>Material Rule Auto<\/b>/i.test(text.trim());
 }
 
-function isTodayCampaignListText(text: string): boolean {
-  return /Chiến dịch có chi tiêu hôm nay/i.test(text) && /Trạng thái QC:/i.test(text);
-}
-
 function chunkArray<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let index = 0; index < items.length; index += size) {
@@ -88,31 +86,27 @@ function chunkArray<T>(items: T[], size: number): T[][] {
   return chunks;
 }
 
-function findMaterialDetailButton(replyMarkup: unknown): Record<string, unknown> | undefined {
-  if (!replyMarkup || typeof replyMarkup !== 'object') return undefined;
-  const keyboard = (replyMarkup as { inline_keyboard?: Array<Array<Record<string, unknown>>> }).inline_keyboard;
-  if (!Array.isArray(keyboard)) return undefined;
-
-  return keyboard
-    .flat()
-    .find(button => String(button?.callback_data || '').startsWith('md:'));
-}
-
 function extractCampaignId(campaignLine: string): string | undefined {
   return campaignLine.match(/<code>(\d{10,})<\/code>/)?.[1];
 }
 
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function getCampaignDisplayName(campaignName: string): string {
-  const parts = String(campaignName || '')
-    .split(' - ')
-    .map(part => part.trim())
-    .filter(Boolean);
-
-  if (parts.length >= 2) {
-    return `${parts[0]} - ${parts[1]}`;
+  // Tên campaign mới phân tách bằng " · ", bản cũ dùng " - ". Giữ 3 dữ liệu đầu.
+  const value = String(campaignName || '').trim();
+  for (const separator of [' · ', ' - ']) {
+    const parts = value.split(separator).map(part => part.trim()).filter(Boolean);
+    if (parts.length >= 3) return parts.slice(0, 3).join(separator);
+    if (parts.length > 1) return parts.join(separator);
   }
-
-  return String(campaignName || '').trim();
+  return value;
 }
 
 function normalizeCampaignLine(campaignLine: string): string {
@@ -393,62 +387,6 @@ export async function applyMaterialDisplayStatusesToCampaigns(
   });
 }
 
-function getCampaignStatusIcon(status: CampaignDisplayStatus): string {
-  if (status === 'active') return '🟢';
-  if (status === 'paused') return '🟡';
-  if (status === 'mixed') return '🟠';
-  return '⚪';
-}
-
-async function rewriteTodayCampaignListText(text: string): Promise<string> {
-  const snapshot = await getCampaignMaterialDisplaySnapshot();
-  const fallbackStatusByCampaignId = new Map(
-    snapshot.campaignRows.map(row => [row.campaign_id, normalizeStoredCampaignStatus(row.status)])
-  );
-
-  let rewritten = text.replace(
-    /(^|\n)(\d+\.\s+)(🟢|🟡|🟠|⚪)(\s+[^\n]*?<code>(\d{10,})<\/code>[^\n]*)/g,
-    (full, lineStart: string, itemPrefix: string, _oldIcon: string, lineRest: string, campaignId: string) => {
-      const fallbackStatus = fallbackStatusByCampaignId.get(campaignId) || 'active';
-      const status = fallbackStatus === 'deleted'
-        ? 'deleted'
-        : snapshot.byCampaignId.get(campaignId) || fallbackStatus;
-      return `${lineStart}${itemPrefix}${getCampaignStatusIcon(status)}${lineRest}`;
-    }
-  );
-
-  const declaredTotalMatch = rewritten.match(/([\d,.]+)\s+chiến dịch\s+-/i);
-  const declaredTotal = Number(String(declaredTotalMatch?.[1] || '').replace(/[,.]/g, ''));
-  const counts: Record<CampaignDisplayStatus, number> = {
-    active: 0,
-    paused: 0,
-    mixed: 0,
-    deleted: 0,
-  };
-
-  for (const row of snapshot.campaignRows) {
-    const fallbackStatus = normalizeStoredCampaignStatus(row.status);
-    const status = fallbackStatus === 'deleted'
-      ? 'deleted'
-      : snapshot.byCampaignId.get(row.campaign_id) || fallbackStatus;
-    counts[status] += 1;
-  }
-
-  // /campaigns có thể bổ sung campaign active chưa spend, các campaign này không nằm trong spent_campaign_cache.
-  // Phần thiếu so với tổng hiển thị vì vậy được tính là active thay vì làm sai tổng số campaign.
-  const counted = counts.active + counts.paused + counts.mixed + counts.deleted;
-  if (Number.isFinite(declaredTotal) && declaredTotal > counted) {
-    counts.active += declaredTotal - counted;
-  }
-
-  rewritten = rewritten.replace(
-    /Trạng thái QC:[^\n]*/i,
-    `Trạng thái QC: 🟢 Active ${counts.active} · 🟡 Pause ${counts.paused} · 🟠 Mix ${counts.mixed} · ⚪ Deleted ${counts.deleted}`
-  );
-
-  return rewritten;
-}
-
 async function getCampaignDisplayDataMap(items: ParsedAutoAction[]): Promise<Map<string, CampaignDisplayData>> {
   const targetCampaignIds = new Set(
     items
@@ -481,7 +419,66 @@ async function getCampaignDisplayDataMap(items: ParsedAutoAction[]): Promise<Map
   }
 }
 
-function parseAutoActionPayload(payload: unknown): ParsedAutoAction | undefined {
+/**
+ * Parse message "Material Rule Auto" theo format nhóm MKT:
+ *   🤖 <b>Material Rule Auto</b>
+ *   — <b>MKT80.HOÀNG-TH</b> —
+ *   <b>Tên camp</b> - <code>ID</code>
+ *   ✅ #4 TẮT · $0.62 · 🎯 0 · CPA $0.00
+ * Mỗi campaign trở thành một item riêng; header MKT gắn vào item theo sau nó.
+ */
+export function parseGroupedAutoActionItems(text: string): ParsedAutoAction[] {
+  const lines = text.split('\n');
+  const items: ParsedAutoAction[] = [];
+  let current: ParsedAutoAction | undefined;
+  let currentMkt: string | undefined;
+
+  for (let index = 1; index < lines.length; index++) {
+    const line = lines[index];
+    if (!line.trim()) continue;
+
+    const mktHeader = line.match(/^—\s*<b>(.*?)<\/b>\s*—\s*$/);
+    if (mktHeader) {
+      currentMkt = mktHeader[1];
+      current = undefined;
+      continue;
+    }
+
+    const campaignMatch = line.match(/^<b>(.*?)<\/b>\s*-\s*<code>(\d{10,})<\/code>\s*$/);
+    if (campaignMatch) {
+      current = {
+        campaignLine: normalizeCampaignLine(line),
+        campaignId: campaignMatch[2],
+        mkt: currentMkt,
+        pauseSuccess: 0,
+        activeSuccess: 0,
+        unverified: 0,
+        details: [],
+      };
+      items.push(current);
+      continue;
+    }
+
+    if (!current) continue;
+    const isVerified = line.startsWith('✅');
+    const isPause = /\sTẮT\s/.test(line);
+    const isActive = /\sBẬT\s/.test(line);
+
+    if (isVerified && isPause) current.pauseSuccess += 1;
+    if (isVerified && isActive) current.activeSuccess += 1;
+    if (!isVerified) current.unverified += 1;
+
+    current.details.push(line
+      .replace(/^✅\s*/, isPause ? '⏸ ' : isActive ? '▶️ ' : '✅ ')
+      .replace(/^⚠️\s*/, '⚠️ ')
+      .replace(/\sTẮT\s·/, ' ·')
+      .replace(/\sBẬT\s·/, ' ·'));
+  }
+
+  return items;
+}
+
+function parseAutoActionPayload(payload: unknown): ParsedAutoAction[] | undefined {
   if (!payload || typeof payload !== 'object') return undefined;
   const source = payload as Record<string, unknown>;
   if (String(source.parse_mode || '').toUpperCase() !== 'HTML' || typeof source.text !== 'string') {
@@ -490,44 +487,8 @@ function parseAutoActionPayload(payload: unknown): ParsedAutoAction | undefined 
 
   const text = source.text;
   if (!isMaterialAutoActionText(text)) return undefined;
-  const lines = text.split('\n');
-  if (lines.length < 3) return undefined;
-
-  const campaignLine = lines[1] || '';
-  const resultLines = lines.slice(2).filter(Boolean);
-  const detailButton = findMaterialDetailButton(source.reply_markup);
-  const detailCallback = String(detailButton?.callback_data || '');
-  const detailRef = detailCallback ? parseMaterialDetailCallbackData(detailCallback) : undefined;
-  let pauseSuccess = 0;
-  let activeSuccess = 0;
-  let unverified = 0;
-
-  const details = resultLines.map(line => {
-    const isVerified = line.startsWith('✅');
-    const isPause = /\sTẮT\s/.test(line);
-    const isActive = /\sBẬT\s/.test(line);
-
-    if (isVerified && isPause) pauseSuccess += 1;
-    if (isVerified && isActive) activeSuccess += 1;
-    if (!isVerified) unverified += 1;
-
-    return line
-      .replace(/^✅\s*/, isPause ? '⏸ ' : isActive ? '▶️ ' : '✅ ')
-      .replace(/^⚠️\s*/, '⚠️ ')
-      .replace(/\sTẮT\s·/, ' ·')
-      .replace(/\sBẬT\s·/, ' ·');
-  });
-
-  return {
-    campaignLine: normalizeCampaignLine(campaignLine),
-    campaignId: extractCampaignId(campaignLine),
-    advertiserId: detailRef?.advertiserId,
-    pauseSuccess,
-    activeSuccess,
-    unverified,
-    details,
-    detailButton,
-  };
+  const items = parseGroupedAutoActionItems(text);
+  return items.length > 0 ? items : undefined;
 }
 
 async function buildGroupedMessage(
@@ -568,40 +529,55 @@ async function buildGroupedMessage(
   const detailLines: string[] = [];
   const buttons: Record<string, unknown>[] = [];
 
-  visibleItems.forEach((item, index) => {
-    const displayData = item.campaignId
-      ? campaignDisplayData.get(item.campaignId)
-      : undefined;
-    const advertiserId = item.advertiserId || displayData?.advertiserId;
-    const accountLabel = getAccountLabel(displayData?.advertiserName, advertiserId);
-    const accountSuffix = accountLabel ? ` · ${accountLabel}` : '';
-    const cloneCount = item.campaignId
-      ? cloneCountByCampaignId.get(item.campaignId) || 0
-      : 0;
-
-    detailLines.push(
-      '',
-      `<b>${index + 1}.</b> ${item.campaignLine}${accountSuffix} · 🚀 x${cloneCount}`
-    );
-
-    if (displayData?.reportLine) {
-      detailLines.push(displayData.reportLine);
-    }
-
-    const visibleDetails = item.details.slice(0, MAX_DETAILS_PER_CAMPAIGN);
-    detailLines.push(...visibleDetails);
-    const hiddenDetails = item.details.length - visibleDetails.length;
-    if (hiddenDetails > 0) {
-      detailLines.push(`… +${hiddenDetails} material khác`);
-    }
-
-    if (item.detailButton) {
-      buttons.push({
-        ...item.detailButton,
-        text: `🔎 ${index + 1}`,
-      });
-    }
+  // Giữ nguyên phân nhóm MKT như message gốc từ rule engine.
+  const mktGroups = new Map<string, ParsedAutoAction[]>();
+  visibleItems.forEach(item => {
+    const key = item.mkt || '';
+    const list = mktGroups.get(key) || [];
+    list.push(item);
+    mktGroups.set(key, list);
   });
+
+  let displayIndex = 0;
+  for (const [mkt, groupItems] of mktGroups.entries()) {
+    if (mktGroups.size > 1 || mkt) {
+      detailLines.push(`— <b>${escapeHtml(mkt === 'CHUA_GAN_MKT' ? 'Chưa gắn MKT' : mkt)}</b> —`);
+    }
+    for (const item of groupItems) {
+      displayIndex += 1;
+      const displayData = item.campaignId
+        ? campaignDisplayData.get(item.campaignId)
+        : undefined;
+      const advertiserId = item.advertiserId || displayData?.advertiserId;
+      const accountLabel = getAccountLabel(displayData?.advertiserName, advertiserId);
+      const accountSuffix = accountLabel ? ` · ${accountLabel}` : '';
+      const cloneCount = item.campaignId
+        ? cloneCountByCampaignId.get(item.campaignId) || 0
+        : 0;
+
+      detailLines.push(
+        `<b>${displayIndex}.</b> ${item.campaignLine}${accountSuffix} · 🚀 x${cloneCount}`
+      );
+
+      if (displayData?.reportLine) {
+        detailLines.push(displayData.reportLine);
+      }
+
+      const visibleDetails = item.details.slice(0, MAX_DETAILS_PER_CAMPAIGN);
+      detailLines.push(...visibleDetails);
+      const hiddenDetails = item.details.length - visibleDetails.length;
+      if (hiddenDetails > 0) {
+        detailLines.push(`… +${hiddenDetails} material khác`);
+      }
+
+      if (item.detailButton) {
+        buttons.push({
+          ...item.detailButton,
+          text: `🔎 ${displayIndex}`,
+        });
+      }
+    }
+  }
 
   const hiddenCampaigns = items.length - visibleItems.length;
   if (hiddenCampaigns > 0) {
@@ -660,25 +636,33 @@ export function setupMaterialAutoActionFeedback(bot: Telegraf): void {
     if (batch.timer) clearTimeout(batch.timer);
     if (batch.items.length === 0) return;
 
-    const campaignDisplayData = await getCampaignDisplayDataMap(batch.items);
-    const grouped = await buildGroupedMessage(batch.items, campaignDisplayData);
-    const firstItemPayload = (batch as PendingBatch & { payload?: Record<string, unknown> }).payload;
-    if (!firstItemPayload) return;
-
-    const nextPayload: Record<string, unknown> = {
-      ...firstItemPayload,
-      text: grouped.text,
-    };
-    if (grouped.replyMarkup) {
-      nextPayload.reply_markup = grouped.replyMarkup;
-    } else {
-      delete nextPayload.reply_markup;
-    }
-
     try {
+      const campaignDisplayData = await getCampaignDisplayDataMap(batch.items);
+      const grouped = await buildGroupedMessage(batch.items, campaignDisplayData);
+      const firstItemPayload = (batch as PendingBatch & { payload?: Record<string, unknown> }).payload;
+      if (!firstItemPayload) return;
+
+      const nextPayload: Record<string, unknown> = {
+        ...firstItemPayload,
+        text: grouped.text,
+      };
+      if (grouped.replyMarkup) {
+        nextPayload.reply_markup = grouped.replyMarkup;
+      } else {
+        delete nextPayload.reply_markup;
+      }
+
       await originalCallApi('sendMessage', nextPayload);
     } catch (error) {
+      // Không để lỗi DB/Telegram khi flush làm crash bot; gửi lại message gốc (chưa rút gọn) nếu được.
       console.error('[MaterialAutoActionFeedback] grouped notification failed:', error);
+      try {
+        const fallbackPayload: Record<string, unknown> = { ...(batch.payload || {}) };
+        delete fallbackPayload.reply_markup;
+        await originalCallApi('sendMessage', fallbackPayload);
+      } catch (fallbackError) {
+        console.error('[MaterialAutoActionFeedback] fallback notification failed:', fallbackError);
+      }
     }
   };
 
@@ -688,29 +672,14 @@ export function setupMaterialAutoActionFeedback(bot: Telegraf): void {
     }
 
     const methodName = String(method);
-    let source = payload as Record<string, unknown>;
-
-    if (
-      (methodName === 'sendMessage' || methodName === 'editMessageText') &&
-      typeof source.text === 'string' &&
-      isTodayCampaignListText(source.text)
-    ) {
-      try {
-        source = {
-          ...source,
-          text: await rewriteTodayCampaignListText(source.text),
-        };
-      } catch (error) {
-        console.warn('[CampaignMaterialStatus] failed to rewrite /campaigns colors:', error);
-      }
-    }
+    const source = payload as Record<string, unknown>;
 
     if (methodName !== 'sendMessage') {
       return originalCallApi(method, source, ...rest);
     }
 
-    const parsed = parseAutoActionPayload(source);
-    if (!parsed) {
+    const parsedItems = parseAutoActionPayload(source);
+    if (!parsedItems) {
       return originalCallApi(method, source, ...rest);
     }
 
@@ -726,13 +695,17 @@ export function setupMaterialAutoActionFeedback(bot: Telegraf): void {
       payload: source,
     };
 
-    batch.items.push(parsed);
+    batch.items.push(...parsedItems);
     batch.payload ||= source;
     if (batch.timer) clearTimeout(batch.timer);
 
     const maxRemaining = Math.max(0, BATCH_MAX_WAIT_MS - (now - batch.firstAt));
     const waitMs = Math.min(BATCH_IDLE_MS, maxRemaining);
-    batch.timer = setTimeout(() => void flushBatch(batchKey), waitMs);
+    batch.timer = setTimeout(() => {
+      void flushBatch(batchKey).catch(error => {
+        console.error('[MaterialAutoActionFeedback] unhandled flush failure:', error);
+      });
+    }, waitMs);
     pendingByChat.set(batchKey, batch);
 
     return buildBufferedResponse(source);

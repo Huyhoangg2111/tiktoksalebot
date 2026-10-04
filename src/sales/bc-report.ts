@@ -1071,8 +1071,10 @@ export async function buildBcSalesReport(options: BcReportOptions): Promise<BcSa
   const targetMktCode = options.targetMktCode?.trim() || getTargetMktCode();
   const startedAt = Date.now();
   const config = await getConfigSnapshot({ includeAllMkt: true });
+  // /bc báo cáo cho đúng một mã MKT: doanh số lọc theo MKT, chi tiêu cũng chỉ lấy
+  // TKQC thuộc MKT đó — nếu không sẽ pha loãng %CP Ads với spend của MKT khác.
   const advertiserAccounts = config.permissions
-    .filter(permission => permission.enabled)
+    .filter(permission => permission.enabled && normalizeKey(permission.mktCode) === normalizeKey(targetMktCode))
     .map(permission => ({
       advertiserId: permission.advertiserId,
       advertiserName: permission.advertiserName,
