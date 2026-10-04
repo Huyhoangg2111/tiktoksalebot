@@ -1,4 +1,5 @@
 import { Markup, Telegraf, type Context } from 'telegraf';
+import { getAdvertiserPermissions } from '../google-sheets/api.js';
 import {
   buildBcSalesReport,
   getMonthBcReportPeriod,
@@ -204,40 +205,84 @@ export async function sendBcMenu(ctx: Context): Promise<void> {
     }
   );
 }
+/**
+ * Danh sách mã MKT mà /bc sẽ báo cáo: mọi mã MKT của TKQC đang bật trong dashboard
+ * (mã MKT env/target đứng đầu nếu có), fallback về TARGET_MKT_CODE khi dashboard trống.
+ */
+async function getBcTargetMktCodes(): Promise<string[]> {
+  const permissions = await getAdvertiserPermissions({ includeAllMkt: true }).catch(() => []);
+  const codes = [...new Set(
+    permissions
+      .filter(permission => permission.enabled && permission.mktCode.trim())
+      .map(permission => permission.mktCode.trim())
+  )];
+
+  if (codes.length === 0) {
+    return [getTargetMktCode()];
+  }
+
+  const target = getTargetMktCode();
+  const rest = codes
+    .filter(code => code.toLocaleUpperCase('vi-VN') !== target.toLocaleUpperCase('vi-VN'))
+    .sort((a, b) => a.localeCompare(b, 'vi'));
+  return codes.some(code => code.toLocaleUpperCase('vi-VN') === target.toLocaleUpperCase('vi-VN'))
+    ? [target, ...rest]
+    : rest.length > 0 ? rest : [target];
+}
+
 async function sendBcReport(ctx: Context, period: BcReportPeriod): Promise<void> {
-  const waitMessage = await ctx.reply('Đang tổng hợp dữ liệu sales và TikTok Ads...');
+  const waitMessage = await ctx.reply('Đang tổng hợp dữ liệu sales và TikTok Ads cho tất cả mã MKT...');
 
   try {
-    const report = await buildBcSalesReport({
-      ...period,
-      targetMktCode: getTargetMktCode(),
-    });
-    const keyboard = buildBcIssueKeyboard(report.issues);
-    const chunks = splitMessage(report.message);
-    const chatId = ctx.chat?.id;
-
-    if (chatId && chunks[0]) {
-      await ctx.telegram.editMessageText(
-        chatId,
-        waitMessage.message_id,
-        undefined,
-        chunks[0],
-        {
-          parse_mode: 'HTML',
-          ...(keyboard ? keyboard : {}),
-        }
-      );
-
-      for (const chunk of chunks.slice(1)) {
-        await ctx.reply(chunk, { parse_mode: 'HTML' });
+    const targetCodes = await getBcTargetMktCodes();
+    // Các mã MKT chạy song song; mỗi mã vẫn là một báo cáo hoàn chỉnh theo format /bc.
+    const results = await Promise.all(targetCodes.map(async code => {
+      try {
+        return { code, report: await buildBcSalesReport({ ...period, targetMktCode: code }) };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(`[bc] report failed for ${code}:`, error);
+        return { code, failedMessage: `❌ Không thể tạo báo cáo <b>${escapeHtml(code)}</b>:\n${escapeHtml(errorMessage)}` };
       }
-      return;
-    }
+    }));
 
-    await replyLongMessage(ctx, report.message, { parse_mode: 'HTML' });
+    const chatId = ctx.chat?.id;
+    let usedWaitMessage = false;
 
-    if (keyboard) {
-      await ctx.reply('Có dòng dữ liệu sale cần kiểm tra:', keyboard);
+    for (const result of results) {
+      const message = result.failedMessage ?? result.report?.message ?? '';
+      const issues = result.report?.issues ?? [];
+      const keyboard = buildBcIssueKeyboard(issues);
+      const chunks = splitMessage(message);
+
+      if (chatId && chunks[0] && !usedWaitMessage) {
+        usedWaitMessage = true;
+        await ctx.telegram.editMessageText(
+          chatId,
+          waitMessage.message_id,
+          undefined,
+          chunks[0],
+          {
+            parse_mode: 'HTML',
+            ...(keyboard && chunks.length === 1 ? keyboard : {}),
+          }
+        );
+
+        for (const chunk of chunks.slice(1)) {
+          await ctx.reply(chunk, { parse_mode: 'HTML' });
+        }
+        if (keyboard && chunks.length > 1) {
+          await ctx.reply('Có dòng dữ liệu sale cần kiểm tra:', keyboard);
+        }
+        continue;
+      }
+
+      for (const [index, chunk] of chunks.entries()) {
+        await ctx.reply(chunk, {
+          parse_mode: 'HTML',
+          ...(keyboard && index === chunks.length - 1 ? keyboard : {}),
+        });
+      }
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
