@@ -655,9 +655,9 @@ async function createProductCpAdsAlertContent(
   for (const [mkt, groupSummaries] of [...mktGroups.entries()].sort((a, b) => a[0].localeCompare(b[0], 'vi'))) {
     if (mkt !== 'ALL') {
       const mktLabel = mkt === 'CHUA_GAN_MKT' ? 'Chưa gắn MKT' : mkt;
-      const sectionHeader = `— ${mktLabel} —`;
+      const sectionHeader = `🏷️ ${mktLabel}`;
       plainLines.push(sectionHeader);
-      htmlLines.push(`— <b>${escapeHtml(mktLabel)}</b> —`);
+      htmlLines.push(`🏷️ <b>${escapeHtml(mktLabel)}</b>`);
     }
 
     groupSummaries.forEach(summary => {

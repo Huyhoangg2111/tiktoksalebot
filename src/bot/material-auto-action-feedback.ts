@@ -422,7 +422,7 @@ async function getCampaignDisplayDataMap(items: ParsedAutoAction[]): Promise<Map
 /**
  * Parse message "Material Rule Auto" theo format nhóm MKT:
  *   🤖 <b>Material Rule Auto</b>
- *   — <b>MKT80.HOÀNG-TH</b> —
+ *   🏷️ <b>MKT80.HOÀNG-TH</b>
  *   <b>Tên camp</b> - <code>ID</code>
  *   ✅ #4 TẮT · $0.62 · 🎯 0 · CPA $0.00
  * Mỗi campaign trở thành một item riêng; header MKT gắn vào item theo sau nó.
@@ -437,7 +437,7 @@ export function parseGroupedAutoActionItems(text: string): ParsedAutoAction[] {
     const line = lines[index];
     if (!line.trim()) continue;
 
-    const mktHeader = line.match(/^—\s*<b>(.*?)<\/b>\s*—\s*$/);
+    const mktHeader = line.match(/^🏷️\s*<b>(.*?)<\/b>\s*$/);
     if (mktHeader) {
       currentMkt = mktHeader[1];
       current = undefined;
@@ -541,7 +541,7 @@ async function buildGroupedMessage(
   let displayIndex = 0;
   for (const [mkt, groupItems] of mktGroups.entries()) {
     if (mktGroups.size > 1 || mkt) {
-      detailLines.push(`— <b>${escapeHtml(mkt === 'CHUA_GAN_MKT' ? 'Chưa gắn MKT' : mkt)}</b> —`);
+      detailLines.push(`🏷️ <b>${escapeHtml(mkt === 'CHUA_GAN_MKT' ? 'Chưa gắn MKT' : mkt)}</b>`);
     }
     for (const item of groupItems) {
       displayIndex += 1;

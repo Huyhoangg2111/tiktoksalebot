@@ -407,8 +407,8 @@ async function sendGroupedCampaignNotification(
   const buttons: Array<{ text: string; callback_data: string }> = [];
 
   for (const [mkt, list] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0], 'vi'))) {
-    lines.push(`— <b>${escapeHtml(getMktSectionLabel(mkt))}</b> —`);
-    plainLines.push(`— ${getMktSectionLabel(mkt)} —`);
+    lines.push(`🏷️ <b>${escapeHtml(getMktSectionLabel(mkt))}</b>`);
+    plainLines.push(`🏷️ ${getMktSectionLabel(mkt)}`);
     for (const campaign of list) {
       lines.push(
         `<b>${escapeHtml(campaign.campaign_name)}</b> - <code>${escapeHtml(campaign.campaign_id)}</code>`,

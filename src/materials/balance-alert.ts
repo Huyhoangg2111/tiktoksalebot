@@ -139,8 +139,8 @@ export async function checkAndSendLowBalanceAlert(bot: Telegraf): Promise<void> 
   const plainLines: string[] = [];
   for (const group of mktGroups) {
     if (useMktSections) {
-      htmlLines.push(`— <b>${escapeHtml(getMktSectionLabel(group.mkt))}</b> —`);
-      plainLines.push(`— ${getMktSectionLabel(group.mkt)} —`);
+      htmlLines.push(`🏷️ <b>${escapeHtml(getMktSectionLabel(group.mkt))}</b>`);
+      plainLines.push(`🏷️ ${getMktSectionLabel(group.mkt)}`);
     }
     for (const account of group.accounts) {
       const line = `- ${getAccountLabel(account)}: ${formatUsd(Number(account.balance || 0), account.currency)}`;
