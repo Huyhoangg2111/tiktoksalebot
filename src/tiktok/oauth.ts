@@ -12,15 +12,6 @@ import axios from 'axios';
 const TIKTOK_AUTH_URL = 'https://business-api.tiktok.com/portal/auth';
 const TIKTOK_ACCESS_TOKEN_URL = 'https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token/';
 
-function resolveAccessTokenUrl(): string {
-  // Test-only override so local checks can stub TikTok without shipping a configurable token endpoint.
-  if (process.env.NODE_ENV === 'test') {
-    const override = String(process.env.TIKTOK_OAUTH_TOKEN_URL || '').trim();
-    if (override) return override;
-  }
-  return TIKTOK_ACCESS_TOKEN_URL;
-}
-
 export type TikTokTokenTarget = 'read' | 'write' | 'both';
 
 export interface TikTokAppCredentials {
@@ -162,7 +153,7 @@ export async function exchangeTikTokAuthCode(
 
   try {
     const response = await axios.post(
-      resolveAccessTokenUrl(),
+      TIKTOK_ACCESS_TOKEN_URL,
       {
         app_id: credentials.appId,
         secret: credentials.secret,
