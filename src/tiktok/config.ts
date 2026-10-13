@@ -30,6 +30,11 @@ const PLACEHOLDER_VALUES = new Set([
 const TIKTOK_TOKEN_CACHE_TTL_MS = 60_000;
 let cachedTikTokTokenConfig: { value: TikTokTokenConfig; expiresAt: number } | undefined;
 
+/** Drop the in-process token cache after the dashboard saves a new access token. */
+export function invalidateTikTokTokenCache(): void {
+  cachedTikTokTokenConfig = undefined;
+}
+
 function isPlaceholder(value: string): boolean {
   return PLACEHOLDER_VALUES.has(value) || value.startsWith('your_') || value.endsWith('_here');
 }
