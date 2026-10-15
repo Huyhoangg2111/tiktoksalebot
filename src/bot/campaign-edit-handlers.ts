@@ -1,0 +1,313 @@
+import { Markup, Telegraf, type Context } from 'telegraf';
+import { enqueueXcampJob } from './handlers.js';
+import { duplicateCampaign } from '../campaigns/manager.js';
+import { recordCampaignClone } from '../campaigns/clone-tracking.js';
+import {
+  cancelConfirmation,
+  consumeConfirmation,
+  createConfirmation,
+  type BidConfirmPayload,
+  type BudgetConfirmPayload,
+  type DeleteConfirmPayload,
+  type DuplicateConfirmPayload,
+  type ResumeConfirmPayload,
+} from '../campaigns/confirmations.js';
+import {
+  deletePartialCampaign,
+  previewDeletePartial,
+  previewOfficialDuplicate,
+} from '../campaigns/official-duplicate.js';
+import { commitBidChange, commitBudgetChange, describeMoneyError, previewBidChange, previewBudgetChange } from '../campaigns/money-edit.js';
+import { parseBudgetMode, parsePositiveMoney } from '../tiktok/smartplus/money.js';
+
+function isAdmin(ctx: Context): boolean {
+  const adminChatId = process.env.ADMIN_CHAT_ID;
+  return adminChatId ? ctx.chat?.id.toString() === adminChatId : false;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function actorOf(ctx: Context): string {
+  return `telegram:${ctx.chat?.id ?? 'unknown'}`;
+}
+
+function argsOf(ctx: Context): string[] {
+  const text = ctx.message && 'text' in ctx.message ? ctx.message.text : '';
+  return text.split(/\s+/).filter(Boolean);
+}
+
+function confirmKeyboard(ok: string, no: string, token: string) {
+  return Markup.inlineKeyboard([
+    Markup.button.callback('Xác nhận', `${ok}:${token}`),
+    Markup.button.callback('Hủy', `${no}:${token}`),
+  ]);
+}
+
+async function replyPreview(ctx: Context, title: string, body: string, ok: string, no: string, token: string | undefined): Promise<void> {
+  const text = `<b>${escapeHtml(title)}</b>\n<pre>${escapeHtml(body).slice(0, 3500)}</pre>`;
+  if (!token) {
+    await ctx.reply(text, { parse_mode: 'HTML' });
+    return;
+  }
+  await ctx.reply(text, { parse_mode: 'HTML', ...confirmKeyboard(ok, no, token) });
+}
+
+async function handleDuplicateCommand(ctx: Context): Promise<void> {
+  if (!isAdmin(ctx)) {
+    await ctx.reply('Chỉ admin mới nhân bản được campaign.');
+    return;
+  }
+  const args = argsOf(ctx);
+  const campaignId = args[1];
+  if (!campaignId || !/^\d+$/.test(campaignId)) {
+    await ctx.reply('Dùng: /xcamp <campaign_id> [số lượng] [ngân sách] [giá thầu]\nVí dụ: /xcamp 12345 1 20 0.5');
+    return;
+  }
+  const quantity = Math.max(1, parseInt(args[2] || '1', 10) || 1);
+  if (quantity > 20) {
+    await ctx.reply('Số lượng tối đa mỗi lần là 20.');
+    return;
+  }
+  let budget: number | undefined;
+  let bid: number | undefined;
+  try {
+    if (args[3] && args[3] !== '-') budget = parsePositiveMoney(args[3], 'Ngân sách');
+    if (args[4] && args[4] !== '-') bid = parsePositiveMoney(args[4], 'Giá thầu');
+  } catch (error) {
+    await ctx.reply(error instanceof Error ? error.message : String(error));
+    return;
+  }
+
+  await ctx.reply('Đang đọc campaign trên Marketing API (chưa tạo gì)...');
+  try {
+    const preview = await previewOfficialDuplicate(campaignId, { overrideBudget: budget, overrideBid: bid, actor: actorOf(ctx) });
+    const lines = [
+      preview.summary,
+      '',
+      `Cách làm: ${preview.method}`,
+      `Tên bản sao: ${preview.campaignName}`,
+      `Số lượng: ${quantity}`,
+      preview.warnings.length ? `Cảnh báo:\n${preview.warnings.slice(0, 6).join('\n')}` : '',
+      preview.blockers.length ? `Chặn:\n${preview.blockers.slice(0, 6).join('\n')}` : '',
+    ].filter(Boolean).join('\n');
+    if (!preview.canConfirm) {
+      await replyPreview(ctx, 'Không nhân bản được', lines, 'xok', 'xno', undefined);
+      return;
+    }
+    const token = createConfirmation({
+      kind: 'duplicate',
+      actor: actorOf(ctx),
+      summary: lines,
+      payload: { campaignId, quantity, budget, bid, campaignName: preview.campaignName },
+    });
+    await replyPreview(ctx, 'Xác nhận nhân bản', `${lines}\n\nBấm Xác nhận để tạo. Bản sao ở trạng thái DISABLE.`, 'xok', 'xno', token);
+  } catch (error) {
+    await ctx.reply(`Không đọc được campaign:\n${escapeHtml(describeMoneyError(error))}`, { parse_mode: 'HTML' });
+  }
+}
+
+async function handleBudgetCommand(ctx: Context): Promise<void> {
+  if (!isAdmin(ctx)) {
+    await ctx.reply('Chỉ admin mới đổi ngân sách.');
+    return;
+  }
+  const args = argsOf(ctx);
+  const campaignId = args[1];
+  if (!campaignId || !args[2]) {
+    await ctx.reply('Dùng: /budget <campaign_id> <số tiền> [ngày|trọn|dynamic]\nVí dụ: /budget 12345 30 ngày');
+    return;
+  }
+  try {
+    const budget = parsePositiveMoney(args[2], 'Ngân sách');
+    const mode = parseBudgetMode(args[3]);
+    const { plan } = await previewBudgetChange(campaignId, budget, mode);
+    const body = [plan.before, '', 'Sau khi xác nhận:', plan.after, '', ...plan.writes.map(write => `${write.endpoint}\n${write.summary}`), ...plan.limitations].join('\n');
+    const token = createConfirmation({
+      kind: 'budget',
+      actor: actorOf(ctx),
+      summary: body,
+      payload: { campaignId, budget, mode },
+    });
+    await replyPreview(ctx, 'Xác nhận đổi ngân sách', body, 'bok', 'bno', token);
+  } catch (error) {
+    await ctx.reply(describeMoneyError(error));
+  }
+}
+
+async function handleBidCommand(ctx: Context): Promise<void> {
+  if (!isAdmin(ctx)) {
+    await ctx.reply('Chỉ admin mới đổi giá thầu.');
+    return;
+  }
+  const args = argsOf(ctx);
+  const campaignId = args[1];
+  if (!campaignId || !args[2]) {
+    await ctx.reply('Dùng: /bid <campaign_id> <giá thầu>\nVí dụ: /bid 12345 0.45');
+    return;
+  }
+  try {
+    const bid = parsePositiveMoney(args[2], 'Giá thầu');
+    const { plan } = await previewBidChange(campaignId, bid);
+    const body = [plan.before, '', 'Sau khi xác nhận:', plan.after, '', ...plan.limitations].join('\n');
+    const token = createConfirmation({
+      kind: 'bid',
+      actor: actorOf(ctx),
+      summary: body,
+      payload: { campaignId, bid },
+    });
+    await replyPreview(ctx, 'Xác nhận đổi giá thầu', body, 'iok', 'ino', token);
+  } catch (error) {
+    await ctx.reply(describeMoneyError(error));
+  }
+}
+
+async function handleResumeCommand(ctx: Context): Promise<void> {
+  if (!isAdmin(ctx)) {
+    await ctx.reply('Chỉ admin mới tiếp tục bản sao dở.');
+    return;
+  }
+  const args = argsOf(ctx);
+  const sourceCampaignId = args[1];
+  const newCampaignId = args[2];
+  const adgroupId = args[3];
+  if (!sourceCampaignId || !newCampaignId) {
+    await ctx.reply('Dùng: /xcamp_resume <campaign_gốc> <campaign_mới> [adgroup_id]');
+    return;
+  }
+  await ctx.reply('Đang đối chiếu phần đã tạo (chưa ghi thêm)...');
+  try {
+    const preview = await previewOfficialDuplicate(sourceCampaignId, {
+      resume: { campaignId: newCampaignId, adgroupId },
+      actor: actorOf(ctx),
+    });
+    if (!preview.canConfirm) {
+      await replyPreview(ctx, 'Không tiếp tục được', preview.summary, 'rok', 'rno', undefined);
+      return;
+    }
+    const token = createConfirmation({
+      kind: 'resume',
+      actor: actorOf(ctx),
+      summary: preview.summary,
+      payload: { sourceCampaignId, newCampaignId, adgroupId },
+    });
+    await replyPreview(ctx, 'Xác nhận tiếp tục bản dở', `${preview.summary}\n\nCampaign gốc không bị tạo lại.`, 'rok', 'rno', token);
+  } catch (error) {
+    await ctx.reply(describeMoneyError(error));
+  }
+}
+
+async function handleDeleteCommand(ctx: Context): Promise<void> {
+  if (!isAdmin(ctx)) {
+    await ctx.reply('Chỉ admin mới xóa bản sao dở.');
+    return;
+  }
+  const campaignId = argsOf(ctx)[1];
+  if (!campaignId) {
+    await ctx.reply('Dùng: /xcamp_xoa <campaign_id>');
+    return;
+  }
+  try {
+    const preview = await previewDeletePartial(campaignId);
+    if (!preview.canConfirm) {
+      await replyPreview(ctx, 'Không xóa', preview.summary, 'dok', 'dno', undefined);
+      return;
+    }
+    const token = createConfirmation({
+      kind: 'delete-partial',
+      actor: actorOf(ctx),
+      summary: preview.summary,
+      payload: { campaignId },
+    });
+    await replyPreview(ctx, 'Xác nhận xóa bản dở', preview.summary, 'dok', 'dno', token);
+  } catch (error) {
+    await ctx.reply(describeMoneyError(error));
+  }
+}
+
+export function setupCampaignEditHandlers(bot: Telegraf): void {
+  bot.command('xcamp', ctx => void handleDuplicateCommand(ctx));
+  bot.command('duplicate', ctx => void handleDuplicateCommand(ctx));
+  bot.command('budget', ctx => void handleBudgetCommand(ctx));
+  bot.command('bid', ctx => void handleBidCommand(ctx));
+  bot.command('xcamp_resume', ctx => void handleResumeCommand(ctx));
+  bot.command('xcamp_xoa', ctx => void handleDeleteCommand(ctx));
+  bot.command('xcamp_delete', ctx => void handleDeleteCommand(ctx));
+
+  bot.action(/^(xok|xno|bok|bno|iok|ino|rok|rno|dok|dno):([0-9a-f]{8})$/, async ctx => {
+    if (!isAdmin(ctx)) {
+      await ctx.answerCbQuery('Không có quyền.');
+      return;
+    }
+    const action = ctx.match[1] || '';
+    const token = ctx.match[2] || '';
+    const cancel = action.endsWith('no');
+    if (cancel) {
+      cancelConfirmation(token);
+      await ctx.answerCbQuery('Đã hủy');
+      await ctx.editMessageText('Đã hủy. Không có gì được ghi lên TikTok.');
+      return;
+    }
+    const pending = consumeConfirmation(token);
+    if (!pending) {
+      await ctx.answerCbQuery('Phiên xác nhận đã hết hạn hoặc đã dùng.');
+      return;
+    }
+    await ctx.answerCbQuery('Đang thực hiện...');
+    try {
+      if (pending.kind === 'duplicate' && action === 'xok') {
+        const payload = pending.payload as DuplicateConfirmPayload;
+        const wait = await ctx.reply(`Đã xác nhận. Đang xếp hàng nhân bản ${payload.quantity} bản từ ${payload.campaignId}. Bản sao sẽ DISABLE.`);
+        enqueueXcampJob({
+          ctx,
+          waitMessageId: wait.message_id,
+          chatId: ctx.chat?.id,
+          campaignId: payload.campaignId,
+          quantity: payload.quantity,
+          budget: payload.budget,
+          bid: payload.bid,
+        });
+        return;
+      }
+      if (pending.kind === 'budget' && action === 'bok') {
+        const payload = pending.payload as BudgetConfirmPayload;
+        const plan = await commitBudgetChange(payload.campaignId, payload.budget, payload.mode ? parseBudgetMode(payload.mode) : undefined, pending.actor);
+        await ctx.reply(`Đã cập nhật ngân sách ${payload.campaignId}.\n${plan.after}`);
+        return;
+      }
+      if (pending.kind === 'bid' && action === 'iok') {
+        const payload = pending.payload as BidConfirmPayload;
+        const plan = await commitBidChange(payload.campaignId, payload.bid, pending.actor);
+        await ctx.reply(`Đã cập nhật giá thầu ${payload.campaignId}.\n${plan.after}`);
+        return;
+      }
+      if (pending.kind === 'resume' && action === 'rok') {
+        const payload = pending.payload as ResumeConfirmPayload;
+        const result = await duplicateCampaign(payload.sourceCampaignId, {
+          resume: { campaignId: payload.newCampaignId, adgroupId: payload.adgroupId },
+          actor: pending.actor,
+        });
+        try {
+          await recordCampaignClone(payload.sourceCampaignId, result);
+        } catch (recordError) {
+          console.error('Không ghi được bộ đếm nhân bản campaign:', recordError);
+        }
+        await ctx.reply(`Đã tiếp tục campaign ${result.campaignId}. Trạng thái vẫn DISABLE cho đến khi /on.`);
+        return;
+      }
+      if (pending.kind === 'delete-partial' && action === 'dok') {
+        const payload = pending.payload as DeleteConfirmPayload;
+        await deletePartialCampaign(payload.campaignId, pending.actor);
+        await ctx.reply(`Đã xóa campaign Smart+ ${payload.campaignId}.`);
+        return;
+      }
+      await ctx.reply('Nút xác nhận không khớp thao tác. Không có gì được ghi.');
+    } catch (error) {
+      await ctx.reply(`Không thực hiện được:\n${describeMoneyError(error)}`);
+    }
+  });
+}

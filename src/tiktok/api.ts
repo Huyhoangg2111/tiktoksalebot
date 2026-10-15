@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { duplicateSmartPlusCampaign } from '../campaigns/smartplus-duplicator.js';
+import { executeOfficialDuplicate } from '../campaigns/official-duplicate.js';
 import {
   assertAdvertiserAllowed,
   getAllowedAdvertiserIds,
@@ -246,13 +246,6 @@ interface TikTokAdGroupRecord {
   bid_price?: number | string;
   conversion_bid_price?: number | string;
   deep_bid?: number | string;
-}
-
-function buildDuplicateCampaignName(baseName: string): string {
-  const normalizedBaseName = String(baseName || 'Campaign').trim() || 'Campaign';
-  const apiSuffixPattern = /\s*-\s*API$/i;
-  const baseWithoutSuffix = normalizedBaseName.replace(apiSuffixPattern, '').trim() || normalizedBaseName;
-  return `${baseWithoutSuffix} - API`.slice(0, 512);
 }
 
 function parseMetricNumber(value: unknown): number {
@@ -1949,104 +1942,12 @@ export async function duplicateCampaign(
     newName?: string;
     overrideBudget?: number;
     overrideBid?: number;
+    forceSignerFallback?: boolean;
+    resume?: { campaignId: string; adgroupId?: string };
+    actor?: string;
   }
 ): Promise<TikTokDuplicateCampaignResult | null> {
-  const accessToken = await getTikTokWriteAccessToken();
-
-  const originalCampaign = await getRawCampaignById(originalCampaignId);
-  if (!originalCampaign) {
-    console.error(`Original campaign not found: ${originalCampaignId}`);
-    return null;
-  }
-
-  const targetCampaignName =
-    options?.newName ||
-    buildDuplicateCampaignName(originalCampaign.campaign_name || originalCampaignId);
-
-  // Handle Smart Plus Campaigns with our new Playwright Signer API!
-  if (isUpgradedSmartPlusCampaign(originalCampaign)) {
-    console.log(`[SmartPlus Duplicator] Phat hien Smart+ campaign. Chuyen sang xu ly bang Playwright API...`);
-    try {
-      const result = await duplicateSmartPlusCampaign(
-        originalCampaign.advertiser_id,
-        originalCampaignId,
-        {
-          ...options,
-          newName: targetCampaignName,
-        }
-      );
-      console.log(`[SmartPlus Duplicator] Smart+ duplicate result: ${JSON.stringify(result)}`);
-
-      if (result.status === 'created' && result.campaignId) {
-        return {
-          campaignId: result.campaignId,
-          advertiserId: result.advertiserId,
-          campaignName: result.campaignName,
-        };
-      }
-
-      if (result.status === 'draft' && result.campaignId) {
-        throw new Error(
-          `TikTok da tao ban nhap nhung chua publish thanh campaign chinh thuc. Draft ID: ${result.campaignId}. Ten: ${result.campaignName || 'khong ro'}. Task ID: ${result.taskId || 'khong ro'}`
-        );
-      }
-
-      throw new Error(
-        `TikTok moi tiep nhan yeu cau nhan ban Smart+ chua tao xong campaign that. Task ID: ${result.taskId || 'khong ro'}. Ten du kien: ${result.campaignName || 'khong ro'}`
-      );
-    } catch (error: any) {
-      console.error('[SmartPlus Duplicator] Error duplicating Smart+ campaign:', error);
-      throw (error instanceof Error
-        ? error
-        : new Error('Co loi xay ra khi nhan ban Smart+ campaign.'));
-    }
-  }
-
-  try {
-    const createPayload = {
-      advertiser_id: originalCampaign.advertiser_id,
-      campaign_name: targetCampaignName,
-      objective_type: originalCampaign.objective_type,
-      ...(originalCampaign.budget_mode && { budget_mode: originalCampaign.budget_mode }),
-      ...(options?.overrideBudget != null ? { budget: Number(options.overrideBudget) } : originalCampaign.budget != null ? { budget: Number(originalCampaign.budget) } : {}),
-    };
-
-    const response = await axios.post(
-      `${TIKTOK_API_BASE_URL}/campaign/create/`,
-      createPayload,
-      {
-        headers: {
-          'Access-Token': accessToken,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    if (response.data && response.data.code === 0) {
-      const newCampaignId = response.data.data?.campaign_id;
-      console.log(`Campaign duplicated successfully. New ID: ${newCampaignId}`);
-      return newCampaignId
-        ? {
-          campaignId: String(newCampaignId),
-          advertiserId: originalCampaign.advertiser_id,
-          campaignName: targetCampaignName,
-        }
-        : null;
-    } else {
-      console.error(`Failed to duplicate campaign ${originalCampaignId}:`, response.data);
-      return null;
-    }
-  } catch (error: any) {
-    console.error(`Error duplicating campaign ${originalCampaignId}:`, error.message || error);
-    if (error.response) {
-      console.error(`Response data:`, error.response.data);
-      console.error(`Response status:`, error.response.status);
-      console.error(`Response headers:`, error.response.headers);
-    } else if (error.request) {
-      console.error(`Request data:`, error.request);
-    }
-    return null;
-  }
+  return executeOfficialDuplicate(originalCampaignId, options);
 }
 
 /**
@@ -2565,6 +2466,3 @@ async function getRawCampaignById(campaignId: string): Promise<TikTokCampaignRec
   return null;
 }
 
-function isUpgradedSmartPlusCampaign(campaign: TikTokCampaignRecord): boolean {
-  return String(campaign.campaign_automation_type || '').toUpperCase() === 'UPGRADED_SMART_PLUS';
-}

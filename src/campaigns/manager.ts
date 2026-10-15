@@ -15,6 +15,9 @@ export async function duplicateCampaign(
     newName?: string;
     overrideBudget?: number;
     overrideBid?: number;
+    forceSignerFallback?: boolean;
+    resume?: { campaignId: string; adgroupId?: string };
+    actor?: string;
   }
 ): Promise<TikTokDuplicateCampaignResult> {
   const duplicateResult = await tiktokDuplicateCampaign(originalCampaignId, options);

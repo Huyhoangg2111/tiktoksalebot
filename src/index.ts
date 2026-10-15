@@ -11,6 +11,7 @@ import { setupAppealMenuCleanup } from './bot/appeal-menu-cleanup.js';
 import { setupCampaignAlertUiCompatibility } from './bot/campaign-alert-ui-compat.js';
 import { setupMaterialAutoActionFeedback } from './bot/material-auto-action-feedback.js';
 import { setupCampaignDetailHandlers } from './bot/campaign-detail.js';
+import { setupCampaignEditHandlers } from './bot/campaign-edit-handlers.js';
 import { initializeAlertRules } from './alerts/index.js';
 import { startScheduler } from './scheduler/index.js';
 import { startServer, type SignerServerRuntime } from './playwright-signer/server.js';
@@ -101,6 +102,7 @@ async function main() {
 
   // Commands in standalone modules must be registered before the legacy catch-all text handler.
   setupCampaignDetailHandlers(bot);
+  setupCampaignEditHandlers(bot);
 
   // Setup the rest of the bot command handlers and text fallbacks.
   setupBotHandlers(bot);

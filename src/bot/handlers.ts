@@ -84,6 +84,10 @@ const COMMAND_MENU_ADMIN = [
   { command: 'on', description: '✅ Bật campaign' },
   { command: 'off', description: '⏸ Tắt campaign' },
   { command: 'xcamp', description: '🚀 Nhân bản chiến dịch' },
+  { command: 'budget', description: '💰 Đổi ngân sách campaign' },
+  { command: 'bid', description: '🎯 Đổi giá thầu' },
+  { command: 'xcamp_resume', description: '↩️ Tiếp tục bản sao dở' },
+  { command: 'xcamp_xoa', description: '🗑 Xóa bản sao Smart+ dở' },
 ] as const;
 
 let isReloading = false;
@@ -2120,15 +2124,6 @@ function getTextMessage(ctx: Context): string {
     : '';
 }
 
-function parseOptionalPositiveNumberArg(value: string | undefined): number | undefined {
-  if (!value || value === '-') {
-    return undefined;
-  }
-
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : NaN;
-}
-
 async function updateXcampQueueMessage(job: XcampQueueJob, message: string): Promise<void> {
   if (job.chatId) {
     await job.ctx.telegram.editMessageText(
@@ -2202,6 +2197,9 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
       finalMsg += `\n❌ <b>Lỗi:</b>\n${escapeHtml(errors[0])}`;
       if (errors.length > 1) finalMsg += ` (và ${errors.length - 1} lỗi khác)`;
     }
+    if (duplicatedCampaigns.length > 0) {
+      finalMsg += '\n\nBản sao đang <b>DISABLE</b>. Dùng /on &lt;id&gt; khi muốn bật.';
+    }
 
     await updateXcampQueueMessage(job, finalMsg);
   } catch (error) {
@@ -2216,6 +2214,13 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
       console.error('Lỗi khi cập nhật tin nhắn lỗi xcamp:', editError);
     }
   }
+}
+
+export function enqueueXcampJob(job: XcampQueueJob): { position: number } {
+  const position = (isDuplicatingCampaigns ? 1 : 0) + xcampQueue.length + 1;
+  xcampQueue.push(job);
+  void processXcampQueue();
+  return { position };
 }
 
 async function processXcampQueue(): Promise<void> {
@@ -3261,50 +3266,6 @@ export function setupBotHandlers(bot: Telegraf) {
       const errMsg = error instanceof Error ? error.message : String(error);
       await ctx.reply(`❌ Không thể tắt campaign <code>${escapeHtml(campaignId)}</code>:\n${escapeHtml(errMsg)}`, { parse_mode: 'HTML' });
     }
-  });
-
-  bot.command('xcamp', async (ctx) => {
-    if (!isAdmin(ctx)) {
-      await ctx.reply('❌ Chỉ admin mới có thể thực hiện hành động này.');
-      return;
-    }
-
-    const args = ctx.message?.text.split(/\s+/);
-    if (!args || args.length < 2) {
-      await ctx.reply('❌ Vui lòng cung cấp ID chiến dịch để nhân bản.\nVí dụ: /xcamp 12345 3 20 0.5');
-      return;
-    }
-
-    const campaignId = args[1];
-    const quantity = Math.max(1, parseInt(args[2]) || 1);
-    const budget = parseOptionalPositiveNumberArg(args[3]);
-    const bid = parseOptionalPositiveNumberArg(args[4]);
-    const chatId = ctx.chat?.id;
-
-    if (Number.isNaN(budget) || Number.isNaN(bid)) {
-      await ctx.reply('❌ Ngân sách và giá thầu phải là số lớn hơn 0.\nVí dụ: /xcamp 12345 3 20 0.5');
-      return;
-    }
-
-    const position = (isDuplicatingCampaigns ? 1 : 0) + xcampQueue.length + 1;
-    const waitMessage = await ctx.reply(
-      position === 1
-        ? `⏳ Đã nhận lệnh nhân bản <b>${quantity}</b> chiến dịch từ gốc <code>${escapeHtml(campaignId)}</code>.`
-        : `⏳ Đã thêm vào hàng đợi /xcamp.\nVị trí chờ: <b>${position}</b>\nCamp gốc: <code>${escapeHtml(campaignId)}</code> · Số lượng: <b>${quantity}</b>`,
-      { parse_mode: 'HTML' }
-    );
-
-    xcampQueue.push({
-      ctx,
-      waitMessageId: waitMessage.message_id,
-      chatId,
-      campaignId,
-      quantity,
-      budget,
-      bid,
-    });
-
-    void processXcampQueue();
   });
 
   bot.on('text', (ctx) => {

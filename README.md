@@ -139,8 +139,13 @@ After starting the bot, you can interact with it using these commands:
 - `/balance` - Check account balances
 - `/campaigns` - View campaigns with spend today
 - `/sales` - View sales data
-- `/duplicate <campaign_id>` - Duplicate a campaign
-- `/toggle <campaign_id>` - Toggle campaign status (enable/disable)
+- `/xcamp <campaign_id> [số lượng] [ngân sách] [giá thầu]` - Xem trước rồi xác nhận mới nhân bản. Tên bản sao giữ quy tắc `<tên> - API`, không thêm `COPIED_`. Bản sao tạo ở trạng thái DISABLE.
+- `/duplicate` - Cùng luồng với `/xcamp`
+- `/budget <campaign_id> <số tiền> [ngày|trọn|dynamic]` - Đổi ngân sách sau khi xác nhận (admin)
+- `/bid <campaign_id> <giá thầu>` - Đổi giá thầu sau khi xác nhận (admin)
+- `/xcamp_resume <campaign_gốc> <campaign_mới> [adgroup_id]` - Tiếp tục bản Smart+ tạo dở
+- `/xcamp_xoa <campaign_id>` - Xóa bản Smart+ đang tắt tạo dở
+- `/on <campaign_id>` và `/off <campaign_id>` - Bật hoặc tắt campaign (admin)
 - `/setalert <metric> <threshold>` - Set alert thresholds (admin only)
 - `/alerts` - View recent alerts (admin only)
 - `/help` - Show help information

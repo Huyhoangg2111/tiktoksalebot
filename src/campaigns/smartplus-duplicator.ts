@@ -1,6 +1,13 @@
 import axios from 'axios';
 import { getTikTokConfig } from '../tiktok/config.js';
 
+/**
+ * FALLBACK: Playwright signer (web nội bộ TikTok).
+ * Chỉ dùng khi campaign Upgraded Smart+ nằm ngoài phạm vi recreate chính thức
+ * (catalog, search ads, instant form, ...) và SMARTPLUS_SIGNER_FALLBACK khác '0'.
+ * Lead gen DM và web conversion đi qua Marketing API, không đi qua file này.
+ */
+
 const DEFAULT_SIGNER_URL = 'http://127.0.0.1:8092';
 const DEFAULT_SIGNER_TIMEOUT_MS = 30_000;         // timeout mỗi request API (30s)
 const SIGNER_STATUS_POLL_INTERVAL_MS = 2_000;     // poll login status mỗi 2s
