@@ -108,7 +108,7 @@ async function handleDuplicateCommand(ctx: Context): Promise<void> {
       summary: lines,
       payload: { campaignId, quantity, budget, bid, campaignName: preview.campaignName },
     });
-    await replyPreview(ctx, 'Xác nhận nhân bản', `${lines}\n\nBấm Xác nhận để tạo. Bản sao đang tắt. Bật sau bằng /on.`, 'xok', 'xno', token);
+    await replyPreview(ctx, 'Xác nhận nhân bản', `${lines}\n\nBấm Xác nhận để tạo.`, 'xok', 'xno', token);
   } catch (error) {
     await ctx.reply(`Không đọc được campaign:\n${escapeHtml(describeMoneyError(error))}`, { parse_mode: 'HTML' });
   }
@@ -282,7 +282,7 @@ export function setupCampaignEditHandlers(bot: Telegraf): void {
     try {
       if (pending.kind === 'duplicate' && action === 'xok') {
         const payload = pending.payload as DuplicateConfirmPayload;
-        const wait = await ctx.reply(`Đã xác nhận. Đang xếp hàng nhân bản ${payload.quantity} bản từ ${payload.campaignId}. Bản sao sẽ DISABLE.`);
+        const wait = await ctx.reply(`Đã xác nhận. Đang xếp hàng nhân bản ${payload.quantity} bản từ ${payload.campaignId}.`);
         enqueueXcampJob({
           ctx,
           waitMessageId: wait.message_id,
@@ -324,7 +324,7 @@ export function setupCampaignEditHandlers(bot: Telegraf): void {
         } catch (recordError) {
           console.error('Không ghi được bộ đếm nhân bản campaign:', recordError);
         }
-        await ctx.reply(`Đã tiếp tục campaign ${result.campaignId}. Trạng thái vẫn DISABLE cho đến khi /on.`);
+        await ctx.reply(`Đã tiếp tục campaign ${result.campaignId}. Campaign, nhóm và quảng cáo được bật khi tạo xong.`);
         return;
       }
       await ctx.reply('Nút xác nhận không khớp thao tác. Không có gì được ghi.');

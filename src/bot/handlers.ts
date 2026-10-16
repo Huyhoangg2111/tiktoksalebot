@@ -2197,7 +2197,12 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
       finalMsg += `\n❌ <b>Lỗi:</b>\n${escapeHtml(outcome.error)}`;
     }
     if (outcome.created.length > 0) {
-      finalMsg += '\n\nBản sao đang <b>DISABLE</b>. Dùng /on &lt;id&gt; khi muốn bật.';
+      const stillOff = outcome.created.some(result =>
+        (result.overrideWarnings || []).some(warning => /vẫn đang tắt|chỉ tạo vỏ|KHÔNG được sao chép/.test(warning))
+      );
+      finalMsg += stillOff
+        ? '\n\nCó bản sao chưa được bật. Xem cảnh báo phía trên.'
+        : '\n\nBản sao đã được bật.';
     }
 
     await updateXcampQueueMessage(job, finalMsg);

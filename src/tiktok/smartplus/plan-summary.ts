@@ -204,14 +204,15 @@ function operatorNotes(summary: PlanSummary): string[] {
 }
 
 /** Short Vietnamese preview for Telegram and the dashboard. Field paths stay out of this text. */
-export function formatOperatorSummary(plan: RecreatePlan): string {
+export function formatOperatorSummary(plan: RecreatePlan, opts: { willEnable?: boolean } = {}): string {
   const summary = summarizePlan(plan);
+  const shownStatus = (status: string) => opts.willEnable ? 'Đang bật' : statusLabel(status);
   const lines = [
     `Campaign gốc: ${summary.source_campaign_name || summary.source_campaign_id}`,
     `ID: ${summary.source_campaign_id}`,
     '',
     `Bản sao: ${summary.campaign_name}`,
-    `Trạng thái: ${statusLabel(summary.operation_status)}`,
+    `Trạng thái: ${shownStatus(summary.operation_status)}`,
     `Mục tiêu: ${objectiveLabel(summary.objective_type)}`,
     `Ngân sách: ${budgetLabel(summary)}`,
     `Sao chép: ${summary.totals.adgroups} nhóm quảng cáo, ${summary.totals.ads} quảng cáo, ${summary.totals.creatives} video/ảnh`,
@@ -227,7 +228,7 @@ export function formatOperatorSummary(plan: RecreatePlan): string {
     lines.push(
       '',
       `Nhóm ${index + 1}: ${group.name || 'Không tên'}`,
-      `Trạng thái: ${statusLabel(group.operation_status)}`,
+      `Trạng thái: ${shownStatus(group.operation_status)}`,
       `Đích: ${locationLabel(group.promotion_type)}`,
       `Tối ưu: ${goalLabel(group.optimization_goal)}`,
       `Giá thầu: ${bidLabel(group)}`,
@@ -246,6 +247,8 @@ export function formatOperatorSummary(plan: RecreatePlan): string {
   if (blockers.length) {
     lines.push('', 'Không tạo được');
     for (const blocker of blockers) lines.push(`• ${blocker}`);
+  } else if (opts.willEnable) {
+    lines.push('', 'Sau khi tạo xong, campaign, nhóm quảng cáo và quảng cáo đều được bật.');
   }
 
   return lines.join('\n');

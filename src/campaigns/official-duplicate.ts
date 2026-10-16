@@ -13,7 +13,7 @@ import { TikTokClient } from '../tiktok/smartplus/client.js';
 import { looksLikeAllowlistOrPermissionDenied, TikTokApiError } from '../tiktok/smartplus/errors.js';
 import { cloneCampaignByRecreate, fetchAll, isDeleted } from '../tiktok/smartplus/clone-by-recreate.js';
 import { formatOperatorSummary } from '../tiktok/smartplus/plan-summary.js';
-import { setCampaignStatus } from '../tiktok/smartplus/status.js';
+import { enableCampaignTree, setCampaignStatus } from '../tiktok/smartplus/status.js';
 import { SafetyError, generateRequestId } from '../tiktok/smartplus/util.js';
 import type { CopyCampaignInput } from '../tiktok/smartplus/schemas.js';
 
@@ -47,7 +47,7 @@ export interface DuplicatePreview {
   canConfirm: boolean;
 }
 
-const PAUSED_NOTE = 'Bản sao được tạo ở trạng thái tắt. Bật bằng /on <id> sau khi kiểm tra.';
+const PAUSED_NOTE = 'Bản vỏ không có quảng cáo nên vẫn tắt. Bản sao đủ nhóm và quảng cáo sẽ được bật.';
 
 function clip(text: string, max = 3200): string {
   return text.length <= max ? text : `${text.slice(0, max)}\n…`;
@@ -154,7 +154,7 @@ async function previewSmartPlus(
       method: signer
         ? 'FALLBACK: Playwright signer (ngoài phạm vi recreate)'
         : 'GET /smart_plus/*/get/ rồi POST /smart_plus/campaign|adgroup|ad/create/',
-      summary: clip(formatOperatorSummary(dry.plan)),
+      summary: clip(formatOperatorSummary(dry.plan, { willEnable: blockers.length === 0 && !signer })),
       blockers: signer ? [] : blockers.map(humanizeBlocker),
       warnings: [
         ...(signer ? ['Loại này không tạo lại được bằng API. Xác nhận sẽ dùng trình duyệt.'] : []),
@@ -238,21 +238,25 @@ async function executeSmartPlus(
     if (created.status !== 'SUCCESS' || !created.campaign_id) {
       throw new Error(created.create?.error?.message || `Nhân bản Smart+ không thành công (${created.status}).`);
     }
+    const enableWarning = await enableCreatedSmartPlus(client, advertiserId, created.campaign_id, created.create?.ids, actor);
     await writeCampaignAudit({
       actor,
       action: options.resume ? 'duplicate.smart_plus.resume' : 'duplicate.smart_plus',
       advertiserId,
       campaignId: created.campaign_id,
       before: { sourceCampaignId: campaignId },
-      after: { campaignId: created.campaign_id, campaignName, method: 'CLONE_BY_RECREATE' },
+      after: { campaignId: created.campaign_id, campaignName, method: 'CLONE_BY_RECREATE', enabled: !enableWarning },
       ok: true,
-      detail: created.plan.warnings.slice(0, 8).join('\n'),
+      detail: [enableWarning, ...created.plan.warnings].filter(Boolean).slice(0, 8).join('\n'),
     });
     return {
       campaignId: created.campaign_id,
       advertiserId,
       campaignName,
-      overrideWarnings: created.plan.warnings.filter(item => /bid override|budget/i.test(item)).slice(0, 6),
+      overrideWarnings: [
+        ...(enableWarning ? [enableWarning] : []),
+        ...created.plan.warnings.filter(item => /bid override|budget/i.test(item)),
+      ].slice(0, 6),
     };
   } catch (error) {
     const partialId = error instanceof PartialDuplicateError ? error.partialCampaignId : undefined;
@@ -271,6 +275,25 @@ async function executeSmartPlus(
       return runSignerFallback(advertiserId, campaignId, campaignName, options, actor, message);
     }
     throw error;
+  }
+}
+
+async function enableCreatedSmartPlus(
+  client: TikTokClient,
+  advertiserId: string,
+  campaignId: string,
+  ids: { adgroup_ids: string[]; smart_plus_ad_ids: string[] } | undefined,
+  actor: string
+): Promise<string | undefined> {
+  try {
+    await enableCampaignTree(client, advertiserId, {
+      campaign_id: campaignId,
+      adgroup_ids: ids?.adgroup_ids ?? [],
+      smart_plus_ad_ids: ids?.smart_plus_ad_ids ?? [],
+    }, { allowEnable: true, actor });
+    return undefined;
+  } catch (error) {
+    return `Đã tạo campaign ${campaignId} nhưng chưa bật được campaign, nhóm hoặc quảng cáo: ${describeMoneyError(error)}. Chúng vẫn đang tắt.`;
   }
 }
 
@@ -350,7 +373,7 @@ async function executeManualCopy(
     campaign_id: campaignId,
     request_id: generateRequestId(),
     campaign_name: campaignName,
-    operation_status: 'DISABLE',
+    operation_status: 'ENABLE',
     deep_copy_mode: 'DEFAULT',
   };
   if (options.overrideBudget != null) body.budget = options.overrideBudget;

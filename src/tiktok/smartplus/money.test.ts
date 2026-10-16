@@ -170,6 +170,12 @@ test('operator preview is Vietnamese and hides field paths', () => {
   assert.match(text, /Campaign gốc: Youtho - VN - tongkhomyphamtw/);
   assert.match(text, /Bản sao: Youtho - VN - tongkhomyphamtw - API/);
   assert.match(text, /Trạng thái: Tắt/);
+  const blocked = formatOperatorSummary(plan, { willEnable: true });
+  assert.match(blocked, /Không tạo được/);
+  assert.equal(blocked.includes('đều được bật'), false);
+  const ready = formatOperatorSummary({ ...plan, errors: [] }, { willEnable: true });
+  assert.match(ready, /Trạng thái: Đang bật/);
+  assert.match(ready, /đều được bật/);
   assert.match(text, /Ngân sách: 20 mỗi ngày/);
   assert.match(text, /Giá thầu: 0\.7 mỗi kết quả/);
   assert.match(text, /22 video\/ảnh, có tin nhắn chào/);

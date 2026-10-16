@@ -290,7 +290,7 @@ export async function handleCampaignAdmin(req: IncomingMessage, res: ServerRespo
         } catch (recordError) {
           console.error('Không ghi được bộ đếm nhân bản campaign:', recordError);
         }
-        sendJson(res, 200, { summary: `Đã tiếp tục ${result.campaignId}. Bản sao vẫn DISABLE.` });
+        sendJson(res, 200, { summary: `Đã tiếp tục ${result.campaignId}. Campaign, nhóm và quảng cáo được bật khi tạo xong.` });
         return true;
       }
       if (pending.kind === 'delete-partial') {
