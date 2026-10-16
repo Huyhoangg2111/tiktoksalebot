@@ -184,6 +184,8 @@ test('operator preview is Vietnamese and hides field paths', () => {
   assert.equal(text.includes('catalog_id'), false);
   assert.equal(text.includes('BLOCKERS'), false);
   assert.equal(text.includes('search_result_enabled'), false);
+  assert.equal(text.includes('Lưu ý'), false);
+  assert.equal(text.includes('Video do TikTok'), false);
 });
 
 test('result warnings collapse the budget-increase note', () => {

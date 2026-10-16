@@ -188,21 +188,6 @@ function humanBlocker(raw: string): string {
   return 'Có phần bot chưa hỗ trợ sao chép. Kiểm tra lại campaign trên TikTok.';
 }
 
-function operatorNotes(summary: PlanSummary): string[] {
-  const notes: string[] = [];
-  const blob = [...summary.warnings, ...summary.relaxed].join('\n');
-  if (/Automatically added creatives/i.test(blob)) {
-    notes.push('Video do TikTok tự thêm (bài của creator, ảnh remix) không được sao chép.');
-  }
-  if (/targeting_spec/i.test(blob)) {
-    notes.push('Targeting tự động: bot gửi vị trí, độ tuổi, giới tính và nhóm đối tượng. TikTok tự điền phần còn lại.');
-  }
-  if (/attribution settings not sent/i.test(blob)) {
-    notes.push('Không gửi lại cửa sổ ghi nhận chuyển đổi. TikTok dùng mặc định.');
-  }
-  return notes;
-}
-
 /** Turns repeated English plan warnings into a few Vietnamese notes for the result message. */
 export function formatResultWarnings(warnings: string[]): string[] {
   const notes = new Set<string>();
@@ -256,12 +241,6 @@ export function formatOperatorSummary(plan: RecreatePlan, opts: { willEnable?: b
       `Quảng cáo: ${group.ads}, gồm ${group.creatives} video/ảnh${group.welcome_message_ids.length ? ', có tin nhắn chào' : ''}`,
     );
   });
-
-  const notes = operatorNotes(summary);
-  if (notes.length) {
-    lines.push('', 'Lưu ý');
-    for (const note of notes) lines.push(`• ${note}`);
-  }
 
   const blockers = [...new Set(summary.blockers.map(humanBlocker))];
   if (blockers.length) {
