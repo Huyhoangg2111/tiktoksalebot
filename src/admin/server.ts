@@ -184,6 +184,7 @@ input[type=checkbox]{width:15px;height:15px;accent-color:var(--primary);cursor:p
 .chip.active{background:var(--primary);border-color:var(--primary);color:#fff}
 .search-count{font-size:12px;color:var(--muted);white-space:nowrap}
 .prod-toolbar .spacer{flex:1}
+.chip-sep{width:1px;align-self:stretch;background:var(--border-2);margin:2px 4px}
 .group-row td{padding:2px 4px;border-bottom:0}
 .group-bar{display:flex;align-items:center;gap:8px;padding:7px 8px;background:#f7f9fc;border:1px solid var(--border);border-radius:8px;cursor:pointer;user-select:none}
 .group-row:hover .group-bar{background:#eef3fb;border-color:#d5e0f0}
@@ -280,6 +281,7 @@ function cleanRuleNote(value){return String(value||'').replace(/\\s*\\[(pause|en
 function groupRulerRows(data){const groups=[],singles=[];data.forEach(row=>{if(row.action!=='pause'&&row.action!=='enable'){singles.push(row);return}const note=cleanRuleNote(row.note);let group=groups.find(item=>item.entity===row.entity&&item.name_contains===row.name_contains&&item.metric===row.metric&&item.enabled===Boolean(row.enabled)&&item.note===note&&!item[row.action]);if(!group){group={entity:row.entity||'campaign',name_contains:row.name_contains||'',metric:row.metric||'spend',enabled:Boolean(row.enabled),note,pause:null,enable:null};groups.push(group)}group[row.action]={...row}});return {groups,singles}}
 function ruleField(groupIndex,side,key,value){const choiceKey=key;const options=choices[choiceKey];const attrs=' data-rule-group="'+groupIndex+'" data-rule-side="'+side+'" data-rule-key="'+key+'"';if(options)return '<select'+attrs+'>'+options.map(option=>'<option value="'+option[0]+'" '+(String(value)===option[0]?'selected':'')+'>'+option[1]+'</option>').join('')+'</select>';return '<input'+attrs+' value="'+esc(value)+'">'}
 let rulerFilter='all';
+let rulerEntity='all';
 const rulerExpanded=new Set();
 const ENT_LABELS={campaign:'Chiến dịch',material:'Material',ad:'Quảng cáo'};
 const OP_SHORT={gt:'>',gte:'≥',lt:'<',lte:'≤',eq:'=',between:'trong khoảng'};
@@ -347,7 +349,8 @@ function drawRulerAuto(){
   const scrollY=window.scrollY;
   const state=getRulerState();
   const q=normText(String(search.value||'').trim());
-  const filtering=Boolean(q)||rulerFilter!=='all';
+  const filtering=Boolean(q)||rulerFilter!=='all'||rulerEntity!=='all';
+  const entityOk=entity=>rulerEntity==='all'||String(entity||'campaign')===rulerEntity;
   const warnings=rulerWarnings(state);
   let visibleCount=0;const totalCount=state.groups.length+state.singles.length;
   let cards='';
@@ -355,6 +358,7 @@ function drawRulerAuto(){
     if(rulerFilter==='notify')return;
     if(rulerFilter==='on'&&!group.enabled)return;
     if(rulerFilter==='off'&&group.enabled)return;
+    if(!entityOk(group.entity))return;
     const pause=group.pause||blankSide('pause'),enable=group.enable||blankSide('enable');
     const pauseSentence=sideSentence(group.metric,pause),enableSentence=sideSentence(group.metric,enable);
     const hay=normText([rulerTitle(group),pauseSentence,enableSentence,group.note,group.enabled?'đang dùng':'đang tắt'].join(' '));
@@ -376,6 +380,7 @@ function drawRulerAuto(){
     if(rulerFilter==='on'&&isOn(single.enabled)!==1)return;
     if(rulerFilter==='off'&&isOn(single.enabled)===1)return;
     if(rulerFilter!=='notify'&&rulerFilter!=='all')return;
+    if(!entityOk(single.entity))return;
     const th=String(single.metric_threshold??'').trim();
     const title=(ENT_LABELS[single.entity]||single.entity||'?')+(single.name_contains?' chứa “'+single.name_contains+'”':' — mọi chiến dịch');
     const summary=th?'THÔNG BÁO khi '+(METRIC_LABELS[single.metric]||single.metric)+' '+(OP_SHORT[single.metric_operator]||single.metric_operator)+' '+th+(String(single.conversions_threshold??'').trim()?' & Đơn '+(CONV_OP_SHORT[single.conversions_operator]||single.conversions_operator)+' '+single.conversions_threshold:''):'THÔNG BÁO (chưa có mức)';
@@ -397,11 +402,14 @@ function drawRulerAuto(){
   });
   const stats='<div class="stats-strip"><b>'+state.groups.length+'</b> quy tắc tắt/bật · <b>'+state.singles.length+'</b> quy tắc thông báo · <b>'+state.groups.filter(group=>group.enabled).length+'</b> đang dùng'+(warnings.length?' · <span class="warn">⚠ '+warnings.length+' cảnh báo</span>':'')+'</div>';
   const chipLabels={all:'Tất cả',on:'Đang dùng',off:'Đã tắt',notify:'Chỉ thông báo'};
-  const toolbar='<div class="prod-toolbar">'+['all','on','off','notify'].map(val=>'<button class="chip'+(rulerFilter===val?' active':'')+'" data-filter="'+val+'">'+chipLabels[val]+'</button>').join('')+'<span class="search-count">'+(filtering?visibleCount+'/'+totalCount+' khớp':totalCount+' quy tắc')+'</span><span class="spacer"></span><button class="btn small" id="expand-all">Mở tất cả</button><button class="btn small" id="collapse-all">Thu gọn tất cả</button></div>';
+  const entityLabels={all:'Mọi loại',campaign:'Campaign',material:'Material'};
+  const entityChips='<span class="chip-sep"></span>'+['all','campaign','material'].map(val=>'<button class="chip'+(rulerEntity===val?' active':'')+'" data-entity="'+val+'">'+entityLabels[val]+'</button>').join('');
+  const toolbar='<div class="prod-toolbar">'+['all','on','off','notify'].map(val=>'<button class="chip'+(rulerFilter===val?' active':'')+'" data-filter="'+val+'">'+chipLabels[val]+'</button>').join('')+'<span class="search-count">'+(filtering?visibleCount+'/'+totalCount+' khớp':totalCount+' quy tắc')+'</span>'+entityChips+'<span class="spacer"></span><button class="btn small" id="expand-all">Mở tất cả</button><button class="btn small" id="collapse-all">Thu gọn tất cả</button></div>';
   const warnHtml=warnings.length?'<div class="callout">'+iconInfo+'<div><b>Cảnh báo cấu hình:</b> '+warnings.slice(0,4).map(item=>esc(item)).join(' &nbsp;·&nbsp; ')+(warnings.length>4?' &nbsp;·&nbsp; <b>+'+(warnings.length-4)+' nữa</b>':'')+'</div></div>':'';
-  content.innerHTML=warnHtml+stats+toolbar+'<div class="rule-list">'+cards+'</div>'+(cards?'':'<div class="card empty">Chưa có quy tắc nào</div>');
+  content.innerHTML=warnHtml+stats+toolbar+'<div class="rule-list">'+cards+'</div>'+(cards?'':'<div class="card empty">'+(filtering?'Không có quy tắc khớp bộ lọc':'Chưa có quy tắc nào')+'</div>');
   window.scrollTo(0,scrollY);
   document.querySelectorAll('.chip[data-filter]').forEach(chip=>chip.onclick=()=>{rows=flushRulerState(state);rulerFilter=chip.dataset.filter;drawRulerAuto()});
+  document.querySelectorAll('.chip[data-entity]').forEach(chip=>chip.onclick=()=>{rows=flushRulerState(state);rulerEntity=chip.dataset.entity;drawRulerAuto()});
   el('expand-all').onclick=()=>{rows=flushRulerState(state);rulerExpanded.clear();drawRulerAuto()};
   el('collapse-all').onclick=()=>{rows=flushRulerState(state);state.groups.forEach((group,index)=>rulerExpanded.add(index));drawRulerAuto()};
   document.querySelectorAll('[data-rexpand]').forEach(head=>{head.onclick=event=>{if(event.target.closest('button'))return;rows=flushRulerState(state);const index=Number(head.dataset.rexpand);if(rulerExpanded.has(index))rulerExpanded.delete(index);else rulerExpanded.add(index);drawRulerAuto()}});
