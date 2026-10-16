@@ -88,7 +88,7 @@ async function handleDuplicateCommand(ctx: Context): Promise<void> {
     return;
   }
 
-  await ctx.reply('Đang đọc campaign trên Marketing API (chưa tạo gì)...');
+  await ctx.reply('Đang lấy thông tin chiến dịch');
   try {
     const preview = await previewOfficialDuplicate(campaignId, { overrideBudget: budget, overrideBid: bid, actor: actorOf(ctx) });
     const lines = [
