@@ -111,6 +111,146 @@ export function summarizePlan(plan: RecreatePlan): PlanSummary {
   };
 }
 
+function statusLabel(status: string): string {
+  if (status === 'DISABLE') return 'Tắt';
+  if (status === 'ENABLE') return 'Đang bật';
+  return 'Không rõ';
+}
+
+function objectiveLabel(objective: string): string {
+  if (objective === 'LEAD_GENERATION') return 'Tìm khách hàng tiềm năng';
+  if (objective === 'WEB_CONVERSIONS') return 'Chuyển đổi trên website';
+  return objective || 'Không rõ';
+}
+
+function locationLabel(promotionType: string): string {
+  if (promotionType === 'LEAD_GEN_CLICK_TO_TT_DIRECT_MESSAGE') return 'Tin nhắn TikTok';
+  if (promotionType === 'WEBSITE') return 'Website';
+  return 'Đích khác';
+}
+
+function goalLabel(goal: string): string {
+  if (goal.includes('CONVERSATION')) return 'Hội thoại, khách nhắn tin';
+  if (goal.includes('CLICK')) return 'Lượt nhấp';
+  if (goal.includes('CONVERT')) return 'Chuyển đổi';
+  if (goal.includes('VALUE')) return 'Giá trị đơn hàng';
+  return 'Theo campaign gốc';
+}
+
+function budgetLabel(summary: PlanSummary): string {
+  const shared = summary.budget_strategy.includes('Campaign') ? 'dùng chung cả campaign' : 'đặt trên từng nhóm quảng cáo';
+  if (summary.budget_mode === 'BUDGET_MODE_INFINITE') return `Không giới hạn, ${shared}`;
+  const amount = summary.budget !== undefined ? String(summary.budget) : 'giữ như campaign gốc';
+  const period = summary.budget_mode === 'BUDGET_MODE_TOTAL' ? 'trọn đời' : 'mỗi ngày';
+  const increase = summary.goal_based_budget_increase ? '. Có tăng theo mục tiêu, số này là mức ban đầu' : '';
+  return `${amount} ${period}, ${shared}${increase}`;
+}
+
+function bidLabel(group: AdGroupSummary): string {
+  if (group.bid_strategy.includes('NO_BID')) return 'Để TikTok tự đặt giá';
+  if (group.target_cost !== undefined) return `${group.target_cost} mỗi kết quả`;
+  if (group.bid_strategy.includes('CUSTOM')) return 'Có đặt giá, chưa đọc được số tiền';
+  return 'Theo campaign gốc';
+}
+
+function vnDate(isoDay: string): string {
+  const [year, month, day] = isoDay.split('-');
+  if (!year || !month || !day) return isoDay;
+  return `${day}/${month}/${year}`;
+}
+
+function scheduleLabel(raw: string): string {
+  const from = raw.match(/from (\d{4}-\d{2}-\d{2})/);
+  const to = raw.match(/to (\d{4}-\d{2}-\d{2})/);
+  const start = from ? vnDate(from[1]) : '';
+  const endYear = to ? Number(to[1].slice(0, 4)) : 0;
+  const farEnd = endYear >= new Date().getUTCFullYear() + 5;
+  if (raw.includes('SCHEDULE_FROM_NOW')) {
+    if (to && !farEnd) return `Chạy từ ${start} đến ${vnDate(to[1])}`;
+    return start ? `Chạy liên tục từ ${start}` : 'Chạy liên tục';
+  }
+  if (from && to) return `Chạy từ ${vnDate(from[1])} đến ${vnDate(to[1])}`;
+  return start ? `Bắt đầu ${start}` : 'Theo lịch campaign gốc';
+}
+
+function humanBlocker(raw: string): string {
+  if (/[àáạảãâăèéêìíòóôơùúưỳýđ]/i.test(raw)) {
+    return raw.replace(/^(campaign|adgroup\[[^\]]+\]|ad\[[^\]]+\])\s*:\s*/i, '');
+  }
+  if (/catalog/i.test(raw)) return 'Nhóm quảng cáo đang dùng catalog. Bot không sao chép catalog.';
+  if (/search ads|is_search_campaign/i.test(raw)) return 'Đây là chiến dịch Search Ads. Bot không sao chép loại này.';
+  if (/objective_type/i.test(raw)) return 'Mục tiêu campaign không thuộc loại bot đang hỗ trợ.';
+  if (/promotion_type|optimization location|instant form|phone call|multiple destinations|messaging_app/i.test(raw)) {
+    return 'Đích của nhóm quảng cáo không phải tin nhắn TikTok hoặc website.';
+  }
+  if (/auto_message|welcome message/i.test(raw)) return 'Thiếu tin nhắn chào. Quảng cáo tin nhắn TikTok cần tin nhắn chào.';
+  if (/RESUME:/i.test(raw)) return 'Không tiếp tục được bản dở. Bản đã tạo phải đang tắt và không phải campaign gốc.';
+  return 'Có phần bot chưa hỗ trợ sao chép. Kiểm tra lại campaign trên TikTok.';
+}
+
+function operatorNotes(summary: PlanSummary): string[] {
+  const notes: string[] = [];
+  const blob = [...summary.warnings, ...summary.relaxed].join('\n');
+  if (/Automatically added creatives/i.test(blob)) {
+    notes.push('Video do TikTok tự thêm (bài của creator, ảnh remix) không được sao chép.');
+  }
+  if (/targeting_spec/i.test(blob)) {
+    notes.push('Targeting tự động: bot gửi vị trí, độ tuổi, giới tính và nhóm đối tượng. TikTok tự điền phần còn lại.');
+  }
+  if (/attribution settings not sent/i.test(blob)) {
+    notes.push('Không gửi lại cửa sổ ghi nhận chuyển đổi. TikTok dùng mặc định.');
+  }
+  return notes;
+}
+
+/** Short Vietnamese preview for Telegram and the dashboard. Field paths stay out of this text. */
+export function formatOperatorSummary(plan: RecreatePlan): string {
+  const summary = summarizePlan(plan);
+  const lines = [
+    `Campaign gốc: ${summary.source_campaign_name || summary.source_campaign_id}`,
+    `ID: ${summary.source_campaign_id}`,
+    '',
+    `Bản sao: ${summary.campaign_name}`,
+    `Trạng thái: ${statusLabel(summary.operation_status)}`,
+    `Mục tiêu: ${objectiveLabel(summary.objective_type)}`,
+    `Ngân sách: ${budgetLabel(summary)}`,
+    `Sao chép: ${summary.totals.adgroups} nhóm quảng cáo, ${summary.totals.ads} quảng cáo, ${summary.totals.creatives} video/ảnh`,
+  ];
+
+  if (plan.resume) {
+    const resume = plan.resume;
+    lines.push('', `Tiếp tục bản đã tạo: ${resume.campaign_id}${resume.campaign_name ? ` (${resume.campaign_name})` : ''}`);
+    lines.push(`Phần còn thiếu: ${resume.to_create.adgroups} nhóm quảng cáo, ${resume.to_create.ads} quảng cáo`);
+  }
+
+  summary.adgroups.forEach((group, index) => {
+    lines.push(
+      '',
+      `Nhóm ${index + 1}: ${group.name || 'Không tên'}`,
+      `Trạng thái: ${statusLabel(group.operation_status)}`,
+      `Đích: ${locationLabel(group.promotion_type)}`,
+      `Tối ưu: ${goalLabel(group.optimization_goal)}`,
+      `Giá thầu: ${bidLabel(group)}`,
+      `Lịch: ${scheduleLabel(group.schedule)}`,
+      `Quảng cáo: ${group.ads}, gồm ${group.creatives} video/ảnh${group.welcome_message_ids.length ? ', có tin nhắn chào' : ''}`,
+    );
+  });
+
+  const notes = operatorNotes(summary);
+  if (notes.length) {
+    lines.push('', 'Lưu ý');
+    for (const note of notes) lines.push(`• ${note}`);
+  }
+
+  const blockers = [...new Set(summary.blockers.map(humanBlocker))];
+  if (blockers.length) {
+    lines.push('', 'Không tạo được');
+    for (const blocker of blockers) lines.push(`• ${blocker}`);
+  }
+
+  return lines.join('\n');
+}
+
 /** Plain-text rendering of summarizePlan (no secrets are ever present in a plan). */
 export function formatPlanSummary(plan: RecreatePlan, opts: { maxDropped?: number; fromScratch?: boolean } = {}): string {
   const s = summarizePlan(plan);

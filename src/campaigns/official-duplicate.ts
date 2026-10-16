@@ -12,7 +12,7 @@ import {
 import { TikTokClient } from '../tiktok/smartplus/client.js';
 import { looksLikeAllowlistOrPermissionDenied, TikTokApiError } from '../tiktok/smartplus/errors.js';
 import { cloneCampaignByRecreate, fetchAll, isDeleted } from '../tiktok/smartplus/clone-by-recreate.js';
-import { formatPlanSummary } from '../tiktok/smartplus/plan-summary.js';
+import { formatOperatorSummary } from '../tiktok/smartplus/plan-summary.js';
 import { setCampaignStatus } from '../tiktok/smartplus/status.js';
 import { SafetyError, generateRequestId } from '../tiktok/smartplus/util.js';
 import type { CopyCampaignInput } from '../tiktok/smartplus/schemas.js';
@@ -47,10 +47,24 @@ export interface DuplicatePreview {
   canConfirm: boolean;
 }
 
-const PAUSED_NOTE = 'Bản sao được tạo ở trạng thái DISABLE. Bật bằng /on <id> sau khi kiểm tra.';
+const PAUSED_NOTE = 'Bản sao được tạo ở trạng thái tắt. Bật bằng /on <id> sau khi kiểm tra.';
 
 function clip(text: string, max = 3200): string {
   return text.length <= max ? text : `${text.slice(0, max)}\n…`;
+}
+
+function humanizeBlocker(raw: string): string {
+  if (/[àáạảãâăèéêìíòóôơùúưỳýđ]/i.test(raw)) {
+    return raw.replace(/^(campaign|adgroup\[[^\]]+\]|ad\[[^\]]+\])\s*:\s*/i, '');
+  }
+  if (/catalog/i.test(raw)) return 'Nhóm quảng cáo đang dùng catalog. Bot không sao chép catalog.';
+  if (/search ads|is_search_campaign/i.test(raw)) return 'Đây là chiến dịch Search Ads. Bot không sao chép loại này.';
+  if (/objective_type/i.test(raw)) return 'Mục tiêu campaign không thuộc loại bot đang hỗ trợ.';
+  if (/auto_message|welcome message/i.test(raw)) return 'Thiếu tin nhắn chào. Quảng cáo tin nhắn TikTok cần tin nhắn chào.';
+  if (/promotion_type|optimization location|instant form|phone call|multiple destinations|messaging_app/i.test(raw)) {
+    return 'Đích của nhóm quảng cáo không phải tin nhắn TikTok hoặc website.';
+  }
+  return 'Có phần bot chưa hỗ trợ sao chép. Kiểm tra lại campaign trên TikTok.';
 }
 
 function copyInput(advertiserId: string, campaignId: string, campaignName: string, budget?: number): CopyCampaignInput {
@@ -140,13 +154,11 @@ async function previewSmartPlus(
       method: signer
         ? 'FALLBACK: Playwright signer (ngoài phạm vi recreate)'
         : 'GET /smart_plus/*/get/ rồi POST /smart_plus/campaign|adgroup|ad/create/',
-      summary: clip(formatPlanSummary(dry.plan)),
-      blockers: signer ? [] : blockers,
+      summary: clip(formatOperatorSummary(dry.plan)),
+      blockers: signer ? [] : blockers.map(humanizeBlocker),
       warnings: [
-        ...dry.plan.warnings,
-        ...(signer ? ['Loại này không recreate được. Xác nhận sẽ dùng Playwright signer.'] : []),
-        ...(!signer && unsupported ? ['Signer tắt. Đặt SMARTPLUS_SIGNER_FALLBACK=1 nếu muốn dùng fallback trình duyệt.'] : []),
-        PAUSED_NOTE,
+        ...(signer ? ['Loại này không tạo lại được bằng API. Xác nhận sẽ dùng trình duyệt.'] : []),
+        ...(!signer && unsupported ? ['Signer tắt. Đặt SMARTPLUS_SIGNER_FALLBACK=1 nếu muốn dùng trình duyệt.'] : []),
       ],
       canConfirm: signer || blockers.length === 0,
     };

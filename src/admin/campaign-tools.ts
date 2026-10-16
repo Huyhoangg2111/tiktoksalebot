@@ -149,7 +149,7 @@ export async function handleCampaignAdmin(req: IncomingMessage, res: ServerRespo
         const budget = optionalMoney(body.budget, 'Ngân sách');
         const bid = optionalMoney(body.bid, 'Giá thầu');
         const preview = await previewOfficialDuplicate(campaignId, { overrideBudget: budget, overrideBid: bid, actor: ACTOR });
-        const summary = [preview.summary, '', `Cách làm: ${preview.method}`, `Số lượng: ${quantity}`, ...preview.warnings, ...preview.blockers].join('\n');
+        const summary = [preview.summary, '', `Số lượng: ${quantity}`, ...preview.warnings].join('\n');
         const token = preview.canConfirm
           ? createConfirmation({ kind: 'duplicate', actor: ACTOR, summary, payload: { campaignId, quantity, budget, bid, campaignName: preview.campaignName } })
           : undefined;

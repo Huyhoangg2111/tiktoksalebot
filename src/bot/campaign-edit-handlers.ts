@@ -94,11 +94,9 @@ async function handleDuplicateCommand(ctx: Context): Promise<void> {
     const lines = [
       preview.summary,
       '',
-      `Cách làm: ${preview.method}`,
-      `Tên bản sao: ${preview.campaignName}`,
       `Số lượng: ${quantity}`,
-      preview.warnings.length ? `Cảnh báo:\n${preview.warnings.slice(0, 6).join('\n')}` : '',
-      preview.blockers.length ? `Chặn:\n${preview.blockers.slice(0, 6).join('\n')}` : '',
+      preview.warnings.length ? preview.warnings.slice(0, 4).join('\n') : '',
+      preview.blockers.length && !preview.summary.includes('Không tạo được') ? preview.blockers.slice(0, 4).join('\n') : '',
     ].filter(Boolean).join('\n');
     if (!preview.canConfirm) {
       await replyPreview(ctx, 'Không nhân bản được', lines, 'xok', 'xno', undefined);
@@ -110,7 +108,7 @@ async function handleDuplicateCommand(ctx: Context): Promise<void> {
       summary: lines,
       payload: { campaignId, quantity, budget, bid, campaignName: preview.campaignName },
     });
-    await replyPreview(ctx, 'Xác nhận nhân bản', `${lines}\n\nBấm Xác nhận để tạo. Bản sao ở trạng thái DISABLE.`, 'xok', 'xno', token);
+    await replyPreview(ctx, 'Xác nhận nhân bản', `${lines}\n\nBấm Xác nhận để tạo. Bản sao đang tắt. Bật sau bằng /on.`, 'xok', 'xno', token);
   } catch (error) {
     await ctx.reply(`Không đọc được campaign:\n${escapeHtml(describeMoneyError(error))}`, { parse_mode: 'HTML' });
   }

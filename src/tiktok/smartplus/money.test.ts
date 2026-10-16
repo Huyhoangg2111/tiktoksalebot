@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { analyzeScope, applyBidOverride, bidOverrideDecision, budgetModeAllowsAmount } from './clone-by-recreate.js';
 import { redact } from './redact.js';
+import type { RecreatePlan } from './clone-by-recreate.js';
 import { hashMoneyState, parsePositiveMoney, planBidChange, planBudgetChange, type MoneySnapshot } from './money.js';
+import { formatOperatorSummary } from './plan-summary.js';
 
 const smartCampaign: MoneySnapshot = {
   kind: 'smart_plus',
@@ -123,6 +125,59 @@ test('create-time bid override keeps a single price field', () => {
     () => applyBidOverride({ optimization_goal: 'CLICK', bid_type: 'BID_TYPE_NO_BID' }, 0.3, 'adgroup', warnings),
     /không ghi đè giá thầu/
   );
+});
+
+test('operator preview is Vietnamese and hides field paths', () => {
+  const plan = {
+    source_campaign_id: '1879234971990193',
+    payloads: {
+      campaign: {
+        campaign_name: 'Youtho - VN - tongkhomyphamtw - API',
+        objective_type: 'LEAD_GENERATION',
+        operation_status: 'DISABLE',
+        budget_optimize_on: true,
+        budget_mode: 'BUDGET_MODE_DYNAMIC_DAILY_BUDGET',
+        budget: 20,
+        budget_auto_adjust_strategy: 'AUTO_BUDGET_INCREASE',
+      },
+      adgroups: [{
+        adgroup: {
+          adgroup_name: 'Youtho - VN - tongkhomyphamtw',
+          operation_status: 'DISABLE',
+          promotion_type: 'LEAD_GEN_CLICK_TO_TT_DIRECT_MESSAGE',
+          optimization_goal: 'CONVERSATION',
+          bid_type: 'BID_TYPE_CUSTOM',
+          conversion_bid_price: 0.7,
+          schedule_type: 'SCHEDULE_FROM_NOW',
+          schedule_start_time: '2026-10-16 19:31:19',
+          schedule_end_time: '2036-10-13 19:16:10',
+        },
+        ads: [{ creative_list: Array.from({ length: 22 }, () => ({})), auto_message_list: [{ auto_message_id: '7697' }] }],
+      }],
+    },
+    dropped: Array.from({ length: 118 }, (_, index) => `adgroup[1].field_${index}`),
+    warnings: [
+      'Automatically added creatives (creator content, authorized posts, remixed images) are not returned by /smart_plus/ad/get/ and are not cloned.',
+      '[relaxed] adgroup[1] search_result_enabled=true is the default TikTok incl. search results placement',
+      'adgroup[1].targeting_spec: AUTOMATIC targeting only accepts location_ids',
+    ],
+    errors: ['UNSUPPORTED: adgroup[1879] catalog_id=123 (catalog)'],
+    unsupported: [],
+    source: { campaign_name: 'Youtho - VN - tongkhomyphamtw', current_budget: 20 },
+  } as RecreatePlan;
+
+  const text = formatOperatorSummary(plan);
+  assert.match(text, /Campaign gốc: Youtho - VN - tongkhomyphamtw/);
+  assert.match(text, /Bản sao: Youtho - VN - tongkhomyphamtw - API/);
+  assert.match(text, /Trạng thái: Tắt/);
+  assert.match(text, /Ngân sách: 20 mỗi ngày/);
+  assert.match(text, /Giá thầu: 0\.7 mỗi kết quả/);
+  assert.match(text, /22 video\/ảnh, có tin nhắn chào/);
+  assert.match(text, /Không tạo được/);
+  assert.equal(text.includes('Dropped fields'), false);
+  assert.equal(text.includes('catalog_id'), false);
+  assert.equal(text.includes('BLOCKERS'), false);
+  assert.equal(text.includes('search_result_enabled'), false);
 });
 
 test('catalog_id 0 from a DM ad group is unset and does not block the clone', () => {
