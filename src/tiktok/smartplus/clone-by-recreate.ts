@@ -824,6 +824,11 @@ export function analyzeScope(src: Obj, groups: Obj[], ads: Obj[]): ScopeAnalysis
   const hard: string[] = [];
   const warn: string[] = [];
   const nonEmpty = (v: unknown) => Array.isArray(v) && v.length > 0;
+  // GET returns catalog_id "0" when the ad group has no catalog. That string is truthy, but it is not a catalog.
+  const isRealId = (v: unknown) => {
+    const text = String(v ?? '').trim();
+    return text !== '' && text !== '0';
+  };
   const objective = String(src.objective_type);
   if (objective !== 'WEB_CONVERSIONS' && objective !== 'LEAD_GENERATION') {
     hard.push(`objective_type=${objective}`);
@@ -837,7 +842,7 @@ export function analyzeScope(src: Obj, groups: Obj[], ads: Obj[]): ScopeAnalysis
 
   for (const g of groups) {
     const id = `adgroup[${String(g.adgroup_id)}]`;
-    if (g.catalog_id) out.push(`${id} catalog_id=${String(g.catalog_id)} (catalog)`);
+    if (isRealId(g.catalog_id)) out.push(`${id} catalog_id=${String(g.catalog_id)} (catalog)`);
     if (g.search_result_enabled === true) {
       warn.push(`${RELAXED}${id} search_result_enabled=true is the default "TikTok incl. search results" placement, not a Search Ads campaign; read-only (create has no such parameter), not sent - TikTok decides it on create`);
     }

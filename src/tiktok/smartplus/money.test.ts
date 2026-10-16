@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyBidOverride, bidOverrideDecision, budgetModeAllowsAmount } from './clone-by-recreate.js';
+import { analyzeScope, applyBidOverride, bidOverrideDecision, budgetModeAllowsAmount } from './clone-by-recreate.js';
 import { redact } from './redact.js';
 import { hashMoneyState, parsePositiveMoney, planBidChange, planBudgetChange, type MoneySnapshot } from './money.js';
 
@@ -123,6 +123,22 @@ test('create-time bid override keeps a single price field', () => {
     () => applyBidOverride({ optimization_goal: 'CLICK', bid_type: 'BID_TYPE_NO_BID' }, 0.3, 'adgroup', warnings),
     /không ghi đè giá thầu/
   );
+});
+
+test('catalog_id 0 from a DM ad group is unset and does not block the clone', () => {
+  const empty = analyzeScope(
+    { objective_type: 'LEAD_GENERATION' },
+    [{ adgroup_id: '1879234983564930', promotion_type: 'LEAD_GEN_CLICK_TO_TT_DIRECT_MESSAGE', catalog_id: '0' }],
+    []
+  );
+  assert.equal(empty.blockers.some(item => item.includes('catalog')), false);
+
+  const catalog = analyzeScope(
+    { objective_type: 'LEAD_GENERATION' },
+    [{ adgroup_id: '1879234983564930', promotion_type: 'LEAD_GEN_CLICK_TO_TT_DIRECT_MESSAGE', catalog_id: '12345' }],
+    []
+  );
+  assert.equal(catalog.blockers.some(item => item.includes('catalog_id=12345')), true);
 });
 
 test('an infinite budget mode does not take an amount override', () => {
