@@ -203,6 +203,26 @@ function operatorNotes(summary: PlanSummary): string[] {
   return notes;
 }
 
+/** Turns repeated English plan warnings into a few Vietnamese notes for the result message. */
+export function formatResultWarnings(warnings: string[]): string[] {
+  const notes = new Set<string>();
+  for (const raw of warnings) {
+    if (/AUTO_BUDGET_INCREASE|Goal-based budget increase/i.test(raw)) {
+      const amount = raw.match(/INITIAL budget \(([^)]+)\)/i)?.[1];
+      notes.add(
+        amount && amount !== 'n/a'
+          ? `Đang bật tăng ngân sách theo mục tiêu. ${amount} là mức ban đầu, TikTok có thể tăng thêm.`
+          : 'Đang bật tăng ngân sách theo mục tiêu. Số ngân sách là mức ban đầu, TikTok có thể tăng thêm.'
+      );
+      continue;
+    }
+    if (/vẫn đang tắt|chỉ tạo vỏ|không được sao chép/i.test(raw)) {
+      notes.add(raw);
+    }
+  }
+  return [...notes];
+}
+
 /** Short Vietnamese preview for Telegram and the dashboard. Field paths stay out of this text. */
 export function formatOperatorSummary(plan: RecreatePlan, opts: { willEnable?: boolean } = {}): string {
   const summary = summarizePlan(plan);

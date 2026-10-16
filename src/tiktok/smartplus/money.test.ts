@@ -4,7 +4,7 @@ import { analyzeScope, applyBidOverride, bidOverrideDecision, budgetModeAllowsAm
 import { redact } from './redact.js';
 import type { RecreatePlan } from './clone-by-recreate.js';
 import { hashMoneyState, parsePositiveMoney, planBidChange, planBudgetChange, type MoneySnapshot } from './money.js';
-import { formatOperatorSummary } from './plan-summary.js';
+import { formatOperatorSummary, formatResultWarnings } from './plan-summary.js';
 
 const smartCampaign: MoneySnapshot = {
   kind: 'smart_plus',
@@ -184,6 +184,14 @@ test('operator preview is Vietnamese and hides field paths', () => {
   assert.equal(text.includes('catalog_id'), false);
   assert.equal(text.includes('BLOCKERS'), false);
   assert.equal(text.includes('search_result_enabled'), false);
+});
+
+test('result warnings collapse the budget-increase note', () => {
+  const notes = formatResultWarnings([
+    'campaign: Goal-based budget increase (AUTO_BUDGET_INCREASE) is kept. "budget" is the INITIAL budget (20); source current_budget 20 is not sent. Allowlist-only feature.',
+    'campaign: Goal-based budget increase (AUTO_BUDGET_INCREASE) is kept. "budget" is the INITIAL budget (20); source current_budget 20 is not sent. Allowlist-only feature.',
+  ]);
+  assert.deepEqual(notes, ['Đang bật tăng ngân sách theo mục tiêu. 20 là mức ban đầu, TikTok có thể tăng thêm.']);
 });
 
 test('catalog_id 0 from a DM ad group is unset and does not block the clone', () => {

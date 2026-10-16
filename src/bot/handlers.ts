@@ -26,6 +26,7 @@ import {
 import { duplicateCampaign } from '../campaigns/manager.js';
 import { recordCampaignClone } from '../campaigns/clone-tracking.js';
 import { runCopyLoop } from '../campaigns/duplicate-safety.js';
+import { formatResultWarnings } from '../tiktok/smartplus/plan-summary.js';
 import {
   getAdvertiserPermissions,
   getBusinessCenterId,
@@ -2186,12 +2187,11 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
       finalMsg += `\nCampaign tạo dở:\n${outcome.partialIds.map(id => `<code>${escapeHtml(id)}</code>`).join('\n')}\n`;
       finalMsg += 'Tiếp tục bằng /xcamp_resume hoặc xóa bằng /xcamp_xoa nếu tên kết thúc bằng " - API".\n';
     }
-    const overrideWarnings = outcome.created
-      .flatMap(result => result.overrideWarnings || [])
-      .filter(Boolean);
+    const overrideWarnings = formatResultWarnings(
+      outcome.created.flatMap(result => result.overrideWarnings || [])
+    );
     if (overrideWarnings.length > 0) {
-      finalMsg += `\n⚠️ <b>Cảnh báo:</b>\n${escapeHtml(overrideWarnings[0])}`;
-      if (overrideWarnings.length > 1) finalMsg += ` (và ${overrideWarnings.length - 1} cảnh báo khác)`;
+      finalMsg += `\nLưu ý:\n${overrideWarnings.map(warning => escapeHtml(warning)).join('\n')}`;
     }
     if (outcome.error) {
       finalMsg += `\n❌ <b>Lỗi:</b>\n${escapeHtml(outcome.error)}`;
