@@ -1943,7 +1943,6 @@ export async function duplicateCampaign(
     overrideBudget?: number;
     overrideBid?: number;
     forceSignerFallback?: boolean;
-    resume?: { campaignId: string; adgroupId?: string };
     actor?: string;
   }
 ): Promise<TikTokDuplicateCampaignResult | null> {

@@ -1,7 +1,6 @@
 import { buildDuplicateCampaignName } from './naming.js';
 import { writeCampaignAudit } from './change-log.js';
-import { isCampaignCloneLogged } from './clone-tracking.js';
-import { buildPausedShellBody, canDeletePartialClone, isSignerFallbackEnabled, PartialDuplicateError } from './duplicate-safety.js';
+import { buildPausedShellBody, isSignerFallbackEnabled, PartialDuplicateError } from './duplicate-safety.js';
 import {
   classifyCampaign,
   commitBidChange,
@@ -11,9 +10,9 @@ import {
 } from './money-edit.js';
 import { TikTokClient } from '../tiktok/smartplus/client.js';
 import { looksLikeAllowlistOrPermissionDenied, TikTokApiError } from '../tiktok/smartplus/errors.js';
-import { cloneCampaignByRecreate, fetchAll, isDeleted } from '../tiktok/smartplus/clone-by-recreate.js';
+import { cloneCampaignByRecreate } from '../tiktok/smartplus/clone-by-recreate.js';
 import { formatOperatorSummary } from '../tiktok/smartplus/plan-summary.js';
-import { enableCampaignTree, setCampaignStatus } from '../tiktok/smartplus/status.js';
+import { enableCampaignTree } from '../tiktok/smartplus/status.js';
 import { SafetyError, generateRequestId } from '../tiktok/smartplus/util.js';
 import type { CopyCampaignInput } from '../tiktok/smartplus/schemas.js';
 
@@ -23,7 +22,6 @@ export interface OfficialDuplicateOptions {
   overrideBid?: number;
   /** Skip the official recreate and use the Playwright signer. Upgraded Smart+ only. */
   forceSignerFallback?: boolean;
-  resume?: { campaignId: string; adgroupId?: string };
   actor?: string;
 }
 
@@ -142,11 +140,10 @@ async function previewSmartPlus(
       forceChildrenDisabled: true,
       rollbackOnFailure: false,
       overrideBid: options.overrideBid,
-      resume: options.resume ? { campaign_id: options.resume.campaignId, adgroup_id: options.resume.adgroupId } : undefined,
       actor: options.actor,
     });
     const unsupported = dry.plan.unsupported.length > 0;
-    const signer = unsupported && isSignerFallbackEnabled(options.forceSignerFallback) && !options.resume;
+    const signer = unsupported && isSignerFallbackEnabled(options.forceSignerFallback);
     const blockers = dry.plan.errors;
     return {
       ...base,
@@ -164,7 +161,7 @@ async function previewSmartPlus(
     };
   } catch (error) {
     if (error instanceof SafetyError) {
-      const signer = isSignerFallbackEnabled(options.forceSignerFallback) && !options.resume;
+      const signer = isSignerFallbackEnabled(options.forceSignerFallback);
       return {
         ...base,
         kind: 'unsupported_smart_plus',
@@ -212,9 +209,6 @@ async function executeSmartPlus(
   actor: string
 ): Promise<OfficialDuplicateResult> {
   if (options.forceSignerFallback) {
-    if (options.resume) {
-      throw new Error('Không dùng signer khi resume một campaign đã có.');
-    }
     return runSignerFallback(advertiserId, campaignId, campaignName, options, actor, 'forceSignerFallback');
   }
 
@@ -226,14 +220,13 @@ async function executeSmartPlus(
     rollbackOnFailure: false,
     overrideBid: options.overrideBid,
     actor,
-    resume: options.resume ? { campaign_id: options.resume.campaignId, adgroup_id: options.resume.adgroupId } : undefined,
   };
 
   try {
     const created = await cloneCampaignByRecreate(client, input, recreateOptions);
     const createdId = created.campaign_id || created.create?.campaign_id || '';
     if (created.status === 'PARTIAL' || (created.status !== 'SUCCESS' && createdId)) {
-      throw partialError(campaignId, createdId, created.create?.error?.message || created.status);
+      throw partialError(createdId, created.create?.error?.message || created.status);
     }
     if (created.status !== 'SUCCESS' || !created.campaign_id) {
       throw new Error(created.create?.error?.message || `Nhân bản Smart+ không thành công (${created.status}).`);
@@ -241,7 +234,7 @@ async function executeSmartPlus(
     const enableWarning = await enableCreatedSmartPlus(client, advertiserId, created.campaign_id, created.create?.ids, actor);
     await writeCampaignAudit({
       actor,
-      action: options.resume ? 'duplicate.smart_plus.resume' : 'duplicate.smart_plus',
+      action: 'duplicate.smart_plus',
       advertiserId,
       campaignId: created.campaign_id,
       before: { sourceCampaignId: campaignId },
@@ -271,7 +264,7 @@ async function executeSmartPlus(
       ok: false,
       detail: message,
     });
-    if (!partialId && error instanceof SafetyError && isSignerFallbackEnabled(options.forceSignerFallback) && !options.resume) {
+    if (!partialId && error instanceof SafetyError && isSignerFallbackEnabled(options.forceSignerFallback)) {
       return runSignerFallback(advertiserId, campaignId, campaignName, options, actor, message);
     }
     throw error;
@@ -297,14 +290,12 @@ async function enableCreatedSmartPlus(
   }
 }
 
-function partialError(sourceId: string, newId: string, detail: string): PartialDuplicateError {
+function partialError(newId: string, detail: string): PartialDuplicateError {
   const partialCampaignId = /^\d+$/.test(newId) ? newId : undefined;
   return new PartialDuplicateError(
     [
       `Nhân bản dừng giữa chừng. Campaign ${partialCampaignId || '(chưa có id)'} đã được tạo ở trạng thái DISABLE nhưng chưa đủ ad group/ad.`,
       detail,
-      partialCampaignId ? `Tiếp tục phần còn thiếu: /xcamp_resume ${sourceId} ${partialCampaignId}` : '',
-      partialCampaignId ? `Xóa bản dở khi campaign đang tắt: /xcamp_xoa ${partialCampaignId}` : '',
       'Không tạo thêm một campaign mới cho cùng lần lỗi này.',
     ].filter(Boolean).join('\n'),
     partialCampaignId
@@ -511,78 +502,6 @@ async function createShell(
     });
     throw error;
   }
-}
-
-export interface DeletePartialPreview {
-  campaignId: string;
-  advertiserId: string;
-  campaignName: string;
-  operationStatus: string;
-  adgroupCount: number;
-  adCount: number;
-  canConfirm: boolean;
-  summary: string;
-}
-
-export async function previewDeletePartial(campaignId: string): Promise<DeletePartialPreview> {
-  const client = await createWriteClient();
-  const found = await findCampaignRow(client, campaignId);
-  if (classifyCampaign(found.row) !== 'smart_plus') {
-    throw new Error('Lệnh xóa bản dở chỉ dùng cho Upgraded Smart+. Campaign thường không bị xóa bằng lệnh này.');
-  }
-  const camps = await fetchAll(client, '/smart_plus/campaign/get/', found.advertiserId, { campaign_ids: [campaignId] }, 20);
-  const camp = camps.find(row => String(row.campaign_id) === campaignId);
-  if (!camp || isDeleted(camp)) {
-    throw new Error(`Không tìm thấy campaign Smart+ ${campaignId} (hoặc đã xóa).`);
-  }
-  const [groups, ads] = await Promise.all([
-    fetchAll(client, '/smart_plus/adgroup/get/', found.advertiserId, { campaign_ids: [campaignId] }, 100),
-    fetchAll(client, '/smart_plus/ad/get/', found.advertiserId, { campaign_ids: [campaignId] }, 100),
-  ]);
-  const liveGroups = groups.filter(row => !isDeleted(row));
-  const liveAds = ads.filter(row => !isDeleted(row));
-  const status = String(camp.operation_status || '');
-  const campaignName = String(camp.campaign_name || campaignId);
-  const logged = await isCampaignCloneLogged(campaignId);
-  const decision = canDeletePartialClone({
-    campaignName,
-    operationStatus: status,
-    adCount: liveAds.length,
-    loggedAsClone: logged,
-  });
-  return {
-    campaignId,
-    advertiserId: found.advertiserId,
-    campaignName,
-    operationStatus: status || 'không rõ',
-    adgroupCount: liveGroups.length,
-    adCount: liveAds.length,
-    canConfirm: decision.ok,
-    summary: [
-      `Campaign ${campaignId} "${campaignName}"`,
-      `Trạng thái: ${status || 'không rõ'} · ${liveGroups.length} ad group · ${liveAds.length} ad`,
-      decision.reason,
-      decision.ok ? 'Gõ lại đúng campaign id để xóa. DELETE không hoàn tác.' : '',
-    ].filter(Boolean).join('\n'),
-  };
-}
-
-export async function deletePartialCampaign(campaignId: string, actor: string): Promise<void> {
-  const preview = await previewDeletePartial(campaignId);
-  if (!preview.canConfirm) {
-    throw new Error(preview.summary);
-  }
-  const client = await createWriteClient();
-  await setCampaignStatus(client, preview.advertiserId, [campaignId], 'DELETE', { actor });
-  await writeCampaignAudit({
-    actor,
-    action: 'duplicate.delete_partial',
-    advertiserId: preview.advertiserId,
-    campaignId,
-    before: { operationStatus: preview.operationStatus, name: preview.campaignName },
-    after: { operationStatus: 'DELETE' },
-    ok: true,
-  });
 }
 
 function sleep(ms: number): Promise<void> {

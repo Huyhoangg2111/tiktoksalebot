@@ -88,8 +88,6 @@ const COMMAND_MENU_ADMIN = [
   { command: 'xcamp', description: '🚀 Nhân bản chiến dịch' },
   { command: 'budget', description: '💰 Đổi ngân sách campaign' },
   { command: 'bid', description: '🎯 Đổi giá thầu' },
-  { command: 'xcamp_resume', description: '↩️ Tiếp tục bản sao dở' },
-  { command: 'xcamp_xoa', description: '🗑 Xóa bản sao Smart+ dở' },
 ] as const;
 
 let isReloading = false;
@@ -2184,8 +2182,7 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
       ).join('\n')}\n`;
     }
     if (outcome.partialIds.length > 0) {
-      finalMsg += `\nCampaign tạo dở:\n${outcome.partialIds.map(id => `<code>${escapeHtml(id)}</code>`).join('\n')}\n`;
-      finalMsg += 'Tiếp tục bằng /xcamp_resume hoặc xóa bằng /xcamp_xoa nếu tên kết thúc bằng " - API".\n';
+      finalMsg += `\nCampaign tạo dở, đang tắt:\n${outcome.partialIds.map(id => `<code>${escapeHtml(id)}</code>`).join('\n')}\n`;
     }
     const overrideWarnings = formatResultWarnings(
       outcome.created.flatMap(result => result.overrideWarnings || [])

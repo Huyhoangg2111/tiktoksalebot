@@ -1,25 +1,17 @@
 import { Markup, Telegraf, type Context } from 'telegraf';
 import { enqueueXcampJob } from './handlers.js';
-import { duplicateCampaign } from '../campaigns/manager.js';
-import { countLoggedClones, recordCampaignClone } from '../campaigns/clone-tracking.js';
+import { countLoggedClones } from '../campaigns/clone-tracking.js';
 import { assertCopyQuantity } from '../campaigns/duplicate-safety.js';
 import {
   cancelConfirmation,
   consumeConfirmation,
   createConfirmation,
-  findConfirmation,
   peekConfirmation,
   type BidConfirmPayload,
   type BudgetConfirmPayload,
-  type DeleteConfirmPayload,
   type DuplicateConfirmPayload,
-  type ResumeConfirmPayload,
 } from '../campaigns/confirmations.js';
-import {
-  deletePartialCampaign,
-  previewDeletePartial,
-  previewOfficialDuplicate,
-} from '../campaigns/official-duplicate.js';
+import { previewOfficialDuplicate } from '../campaigns/official-duplicate.js';
 import { commitBidChange, commitBudgetChange, describeMoneyError, previewBidChange, previewBudgetChange } from '../campaigns/money-edit.js';
 import { hashMoneyState, parseBudgetMode, parsePositiveMoney } from '../tiktok/smartplus/money.js';
 
@@ -169,82 +161,13 @@ async function handleBidCommand(ctx: Context): Promise<void> {
   }
 }
 
-async function handleResumeCommand(ctx: Context): Promise<void> {
-  if (!isAdmin(ctx)) {
-    await ctx.reply('Chỉ admin mới tiếp tục bản sao dở.');
-    return;
-  }
-  const args = argsOf(ctx);
-  const sourceCampaignId = args[1];
-  const newCampaignId = args[2];
-  const adgroupId = args[3];
-  if (!sourceCampaignId || !newCampaignId) {
-    await ctx.reply('Dùng: /xcamp_resume <campaign_gốc> <campaign_mới> [adgroup_id]');
-    return;
-  }
-  await ctx.reply('Đang đối chiếu phần đã tạo (chưa ghi thêm)...');
-  try {
-    const preview = await previewOfficialDuplicate(sourceCampaignId, {
-      resume: { campaignId: newCampaignId, adgroupId },
-      actor: actorOf(ctx),
-    });
-    if (!preview.canConfirm) {
-      await replyPreview(ctx, 'Không tiếp tục được', preview.summary, 'rok', 'rno', undefined);
-      return;
-    }
-    const token = createConfirmation({
-      kind: 'resume',
-      actor: actorOf(ctx),
-      summary: preview.summary,
-      payload: { sourceCampaignId, newCampaignId, adgroupId },
-    });
-    await replyPreview(ctx, 'Xác nhận tiếp tục bản dở', `${preview.summary}\n\nCampaign gốc không bị tạo lại.`, 'rok', 'rno', token);
-  } catch (error) {
-    await ctx.reply(describeMoneyError(error));
-  }
-}
-
-async function handleDeleteCommand(ctx: Context): Promise<void> {
-  if (!isAdmin(ctx)) {
-    await ctx.reply('Chỉ admin mới xóa bản sao dở.');
-    return;
-  }
-  const campaignId = argsOf(ctx)[1];
-  if (!campaignId) {
-    await ctx.reply('Dùng: /xcamp_xoa <campaign_id>');
-    return;
-  }
-  try {
-    const preview = await previewDeletePartial(campaignId);
-    if (!preview.canConfirm) {
-      await replyPreview(ctx, 'Không xóa', preview.summary, 'dok', 'dno', undefined);
-      return;
-    }
-    createConfirmation({
-      kind: 'delete-partial',
-      actor: actorOf(ctx),
-      summary: preview.summary,
-      payload: { campaignId },
-    });
-    await ctx.reply(
-      `<b>Xác nhận xóa</b>\n<pre>${escapeHtml(preview.summary).slice(0, 3500)}</pre>\nGõ lại đúng campaign id <code>${escapeHtml(campaignId)}</code> để xóa. Gõ nội dung khác (không phải lệnh) để hủy.`,
-      { parse_mode: 'HTML' }
-    );
-  } catch (error) {
-    await ctx.reply(describeMoneyError(error));
-  }
-}
-
 export function setupCampaignEditHandlers(bot: Telegraf): void {
   bot.command('xcamp', ctx => void handleDuplicateCommand(ctx));
   bot.command('duplicate', ctx => void handleDuplicateCommand(ctx));
   bot.command('budget', ctx => void handleBudgetCommand(ctx));
   bot.command('bid', ctx => void handleBidCommand(ctx));
-  bot.command('xcamp_resume', ctx => void handleResumeCommand(ctx));
-  bot.command('xcamp_xoa', ctx => void handleDeleteCommand(ctx));
-  bot.command('xcamp_delete', ctx => void handleDeleteCommand(ctx));
 
-  bot.action(/^(xok|xno|bok|bno|iok|ino|rok|rno|dok|dno):([0-9a-f]{32})$/, async ctx => {
+  bot.action(/^(xok|xno|bok|bno|iok|ino):([0-9a-f]{32})$/, async ctx => {
     if (!isAdmin(ctx)) {
       await ctx.answerCbQuery('Không có quyền.');
       return;
@@ -252,11 +175,6 @@ export function setupCampaignEditHandlers(bot: Telegraf): void {
     const action = ctx.match[1] || '';
     const token = ctx.match[2] || '';
     const actor = actorOf(ctx);
-    if (action === 'dok') {
-      await ctx.answerCbQuery('Gõ lại campaign id');
-      await ctx.reply('Xóa chỉ thực hiện khi gõ lại đúng campaign id trong chat.');
-      return;
-    }
     const peeked = peekConfirmation(token);
     if (!peeked) {
       await ctx.answerCbQuery('Phiên xác nhận đã hết hạn hoặc đã dùng.');
@@ -313,45 +231,9 @@ export function setupCampaignEditHandlers(bot: Telegraf): void {
         await ctx.reply(`Đã cập nhật giá thầu ${payload.campaignId}.\n${plan.after}`);
         return;
       }
-      if (pending.kind === 'resume' && action === 'rok') {
-        const payload = pending.payload as ResumeConfirmPayload;
-        const result = await duplicateCampaign(payload.sourceCampaignId, {
-          resume: { campaignId: payload.newCampaignId, adgroupId: payload.adgroupId },
-          actor: pending.actor,
-        });
-        try {
-          await recordCampaignClone(payload.sourceCampaignId, result);
-        } catch (recordError) {
-          console.error('Không ghi được bộ đếm nhân bản campaign:', recordError);
-        }
-        await ctx.reply(`Đã tiếp tục campaign ${result.campaignId}. Campaign, nhóm và quảng cáo được bật khi tạo xong.`);
-        return;
-      }
       await ctx.reply('Nút xác nhận không khớp thao tác. Không có gì được ghi.');
     } catch (error) {
       await ctx.reply(`Không thực hiện được:\n${describeMoneyError(error)}`);
     }
-  });
-
-  bot.on('text', async (ctx, next) => {
-    if (!isAdmin(ctx)) return next();
-    const text = ctx.message && 'text' in ctx.message ? ctx.message.text.trim() : '';
-    if (!text || text.startsWith('/')) return next();
-    const actor = actorOf(ctx);
-    const found = findConfirmation(item => item.kind === 'delete-partial' && item.actor === actor);
-    if (!found) return next();
-    const payload = found.item.payload as DeleteConfirmPayload;
-    if (text === payload.campaignId) {
-      consumeConfirmation(found.token);
-      try {
-        await deletePartialCampaign(payload.campaignId, actor);
-        await ctx.reply(`Đã xóa campaign Smart+ ${payload.campaignId}.`);
-      } catch (error) {
-        await ctx.reply(`Không xóa được:\n${describeMoneyError(error)}`);
-      }
-      return;
-    }
-    cancelConfirmation(found.token);
-    await ctx.reply(`Id không khớp ${payload.campaignId}. Không xóa.`);
   });
 }

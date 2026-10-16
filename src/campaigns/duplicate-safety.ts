@@ -1,5 +1,5 @@
 /**
- * Pure guards for duplication, delete, and the signer fallback.
+ * Pure guards for duplication and the signer fallback.
  * Network code calls these so the rules can be tested without TikTok.
  */
 
@@ -38,32 +38,6 @@ export function assertCopyQuantity(quantity: number, successfulClones: number): 
 export function isSignerFallbackEnabled(explicit = false): boolean {
   if (explicit) return true;
   return process.env.SMARTPLUS_SIGNER_FALLBACK === '1';
-}
-
-export function canDeletePartialClone(input: {
-  campaignName: string;
-  operationStatus: string;
-  adCount: number;
-  loggedAsClone: boolean;
-}): { ok: boolean; reason: string } {
-  if (input.operationStatus === 'ENABLE') {
-    return { ok: false, reason: 'Campaign đang ENABLE. Lệnh này không xóa campaign đang chạy.' };
-  }
-  if (!input.campaignName.endsWith(' - API')) {
-    return { ok: false, reason: 'Chỉ xóa campaign có tên kết thúc bằng " - API". Campaign tắt hợp lệ không bị xóa chỉ vì đang DISABLE.' };
-  }
-  if (!input.loggedAsClone && input.adCount > 0) {
-    return {
-      ok: false,
-      reason: 'Campaign có ad và không nằm trong campaign_clone_log. Không xóa một campaign đã tắt nếu bot không ghi nhận đó là bản sao.',
-    };
-  }
-  return {
-    ok: true,
-    reason: input.loggedAsClone
-      ? 'Tên kết thúc bằng " - API" và id có trong campaign_clone_log.'
-      : 'Tên kết thúc bằng " - API" và campaign chưa có ad.',
-  };
 }
 
 export interface CopyLoopOutcome<T> {
@@ -106,8 +80,7 @@ export function formatCopyLoop(outcome: CopyLoopOutcome<{ campaignId: string; ca
     for (const item of outcome.created) lines.push(`- ${item.campaignId}${item.campaignName ? ` ${item.campaignName}` : ''}`);
   }
   if (outcome.partialIds.length) {
-    lines.push(`Campaign tạo dở: ${outcome.partialIds.join(', ')}`);
-    lines.push('Tiếp tục bằng /xcamp_resume hoặc xóa bằng /xcamp_xoa nếu tên kết thúc bằng " - API".');
+    lines.push(`Campaign tạo dở, đang tắt: ${outcome.partialIds.join(', ')}`);
   }
   if (outcome.error) lines.push(outcome.error);
   return lines.join('\n');

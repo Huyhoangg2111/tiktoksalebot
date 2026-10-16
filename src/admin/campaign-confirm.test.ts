@@ -24,23 +24,18 @@ function response(): ServerResponse & { statusCode: number; payload: string } {
   return res as unknown as ServerResponse & { statusCode: number; payload: string };
 }
 
-test('dashboard delete keeps the confirm token when the retyped id does not match', async () => {
-  const token = createConfirmation({
-    kind: 'delete-partial',
-    actor: 'dashboard',
-    summary: 'xóa',
-    payload: { campaignId: '12345' },
-  });
-  const res = response();
-  const handled = await handleCampaignAdmin(
-    Object.assign(request({ token, confirmId: '99999' }), { method: 'POST' }),
-    res,
-    new URL('http://127.0.0.1/admin/api/campaigns/confirm')
-  );
-  assert.equal(handled, true);
-  assert.equal(res.statusCode, 400);
-  assert.match(res.payload, /Gõ lại đúng campaign id/);
-  assert.ok(peekConfirmation(token));
+test('dashboard rejects resume and delete actions', async () => {
+  for (const action of ['resume', 'delete']) {
+    const res = response();
+    const handled = await handleCampaignAdmin(
+      Object.assign(request({ action, campaignId: '12345', newCampaignId: '67890' }), { method: 'POST' }),
+      res,
+      new URL('http://127.0.0.1/admin/api/campaigns/preview')
+    );
+    assert.equal(handled, true);
+    assert.equal(res.statusCode, 400);
+    assert.match(res.payload, /không hợp lệ/);
+  }
 });
 
 test('dashboard confirm does not consume a token that belongs to another actor', async () => {

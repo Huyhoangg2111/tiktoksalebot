@@ -4,43 +4,10 @@ import {
   PartialDuplicateError,
   assertCopyQuantity,
   buildPausedShellBody,
-  canDeletePartialClone,
+  formatCopyLoop,
   isSignerFallbackEnabled,
   runCopyLoop,
 } from './duplicate-safety.js';
-
-test('delete is limited to API-named clones or empty copies', () => {
-  assert.equal(canDeletePartialClone({
-    campaignName: 'Lead - API',
-    operationStatus: 'DISABLE',
-    adCount: 2,
-    loggedAsClone: true,
-  }).ok, true);
-  assert.equal(canDeletePartialClone({
-    campaignName: 'Lead - API',
-    operationStatus: 'DISABLE',
-    adCount: 0,
-    loggedAsClone: false,
-  }).ok, true);
-  assert.equal(canDeletePartialClone({
-    campaignName: 'Lead - API',
-    operationStatus: 'ENABLE',
-    adCount: 0,
-    loggedAsClone: true,
-  }).ok, false);
-  assert.equal(canDeletePartialClone({
-    campaignName: 'Lead thật',
-    operationStatus: 'DISABLE',
-    adCount: 0,
-    loggedAsClone: true,
-  }).ok, false);
-  assert.equal(canDeletePartialClone({
-    campaignName: 'Lead - API',
-    operationStatus: 'DISABLE',
-    adCount: 1,
-    loggedAsClone: false,
-  }).ok, false);
-});
 
 test('signer fallback is off unless explicitly enabled', () => {
   const previous = process.env.SMARTPLUS_SIGNER_FALLBACK;
@@ -75,6 +42,9 @@ test('copy loop stops at the first error and keeps partial ids', async () => {
   assert.deepEqual(outcome.partialIds, ['222']);
   assert.equal(outcome.stopped, true);
   assert.match(outcome.error || '', /40002/);
+  const text = formatCopyLoop(outcome, 3);
+  assert.match(text, /222/);
+  assert.doesNotMatch(text, /xcamp_resume|xcamp_xoa/);
 });
 
 test('paused shell create carries a numeric request id', () => {

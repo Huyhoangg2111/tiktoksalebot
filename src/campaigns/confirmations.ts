@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 
-export type ConfirmationKind = 'duplicate' | 'budget' | 'bid' | 'delete-partial' | 'resume';
+export type ConfirmationKind = 'duplicate' | 'budget' | 'bid';
 
 export interface DuplicateConfirmPayload {
   campaignId: string;
@@ -23,24 +23,10 @@ export interface BidConfirmPayload {
   stateHash: string;
 }
 
-export interface DeleteConfirmPayload {
-  campaignId: string;
-}
-
-export interface ResumeConfirmPayload {
-  sourceCampaignId: string;
-  newCampaignId: string;
-  adgroupId?: string;
-  budget?: number;
-  bid?: number;
-}
-
 export type ConfirmationPayload =
   | DuplicateConfirmPayload
   | BudgetConfirmPayload
-  | BidConfirmPayload
-  | DeleteConfirmPayload
-  | ResumeConfirmPayload;
+  | BidConfirmPayload;
 
 export interface PendingConfirmation {
   kind: ConfirmationKind;

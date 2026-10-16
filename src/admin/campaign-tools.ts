@@ -9,11 +9,9 @@ import {
   peekConfirmation,
   type BidConfirmPayload,
   type BudgetConfirmPayload,
-  type DeleteConfirmPayload,
   type DuplicateConfirmPayload,
-  type ResumeConfirmPayload,
 } from '../campaigns/confirmations.js';
-import { deletePartialCampaign, previewDeletePartial, previewOfficialDuplicate } from '../campaigns/official-duplicate.js';
+import { previewOfficialDuplicate } from '../campaigns/official-duplicate.js';
 import { commitBidChange, commitBudgetChange, describeMoneyError, previewBidChange, previewBudgetChange } from '../campaigns/money-edit.js';
 import { hashMoneyState, parseBudgetMode, parsePositiveMoney, type BudgetMode } from '../tiktok/smartplus/money.js';
 
@@ -53,8 +51,6 @@ const PAGE = `<!doctype html>
           <option value="duplicate">Nhân bản</option>
           <option value="budget">Đổi ngân sách</option>
           <option value="bid">Đổi giá thầu</option>
-          <option value="resume">Tiếp tục bản dở</option>
-          <option value="delete">Xóa bản Smart+ dở</option>
         </select>
       </label>
       <label>Campaign ID<input name="campaignId" required inputmode="numeric"></label>
@@ -69,8 +65,6 @@ const PAGE = `<!doctype html>
           <option value="dynamic">Dynamic daily</option>
         </select>
       </label>
-      <label>Campaign mới (resume)<input name="newCampaignId" placeholder="chỉ khi tiếp tục bản dở"></label>
-      <label>Ad group ID (resume)<input name="adgroupId"></label>
     </div>
     <p><button type="submit">Xem trước</button></p>
     <p>Xem trước chỉ đọc dữ liệu. Campaign chỉ được tạo hoặc sửa sau khi bấm xác nhận.</p>
@@ -89,15 +83,13 @@ document.getElementById('form').onsubmit = async (event) => {
   const response = await fetch('/admin/api/campaigns/preview', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) });
   const data = await response.json();
   if (!response.ok) { show('<p class="err">'+escapeHtml(data.error||'Lỗi')+'</p>'); return; }
-  const typed = data.requireTypedId ? '<p><label>Gõ lại campaign id<input id="confirmId" inputmode="numeric" autocomplete="off"></label></p>' : '';
-  const confirm = data.canConfirm ? typed + '<p><button type="button" id="go">Xác nhận ghi lên TikTok</button> <button type="button" class="ghost" id="stop">Hủy</button></p>' : '<p class="err">Chưa thể xác nhận.</p>';
+  const confirm = data.canConfirm ? '<p><button type="button" id="go">Xác nhận ghi lên TikTok</button> <button type="button" class="ghost" id="stop">Hủy</button></p>' : '<p class="err">Chưa thể xác nhận.</p>';
   show('<pre>'+escapeHtml(data.summary||'')+'</pre>'+confirm);
   const go = document.getElementById('go');
   const stop = document.getElementById('stop');
   if (go) go.onclick = async () => {
     go.disabled = true;
-    const confirmId = (document.getElementById('confirmId') || {}).value || '';
-    const done = await fetch('/admin/api/campaigns/confirm', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ token: data.token, confirmId }) });
+    const done = await fetch('/admin/api/campaigns/confirm', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ token: data.token }) });
     const payload = await done.json();
     show('<pre>'+escapeHtml(payload.summary || payload.error || JSON.stringify(payload))+'</pre>');
   };
@@ -183,30 +175,6 @@ export async function handleCampaignAdmin(req: IncomingMessage, res: ServerRespo
         sendJson(res, 200, { summary, canConfirm: true, token });
         return true;
       }
-      if (action === 'resume') {
-        const newCampaignId = String(body.newCampaignId || '').trim();
-        const adgroupId = String(body.adgroupId || '').trim() || undefined;
-        if (!/^\d+$/.test(newCampaignId)) throw new Error('Cần campaign id của bản dở.');
-        const preview = await previewOfficialDuplicate(campaignId, { resume: { campaignId: newCampaignId, adgroupId }, actor: ACTOR });
-        const token = preview.canConfirm
-          ? createConfirmation({
-            kind: 'resume',
-            actor: ACTOR,
-            summary: preview.summary,
-            payload: { sourceCampaignId: campaignId, newCampaignId, adgroupId },
-          })
-          : undefined;
-        sendJson(res, 200, { summary: preview.summary, canConfirm: preview.canConfirm, token });
-        return true;
-      }
-      if (action === 'delete') {
-        const preview = await previewDeletePartial(campaignId);
-        const token = preview.canConfirm
-          ? createConfirmation({ kind: 'delete-partial', actor: ACTOR, summary: preview.summary, payload: { campaignId } })
-          : undefined;
-        sendJson(res, 200, { summary: preview.summary, canConfirm: preview.canConfirm, token, requireTypedId: preview.canConfirm });
-        return true;
-      }
       throw new Error('Thao tác không hợp lệ.');
     } catch (error) {
       sendJson(res, 400, { error: describeMoneyError(error) });
@@ -227,14 +195,6 @@ export async function handleCampaignAdmin(req: IncomingMessage, res: ServerRespo
       if (!peeked || peeked.actor !== ACTOR) {
         sendJson(res, 400, { error: 'Phiên xác nhận không còn hiệu lực.' });
         return true;
-      }
-      if (peeked.kind === 'delete-partial') {
-        const typedId = String(body.confirmId || '').trim();
-        const expectedId = (peeked.payload as DeleteConfirmPayload).campaignId;
-        if (typedId !== expectedId) {
-          sendJson(res, 400, { error: 'Gõ lại đúng campaign id để xóa. Phiên xác nhận vẫn còn.' });
-          return true;
-        }
       }
       const pending = consumeConfirmation(token);
       if (!pending || pending.actor !== ACTOR) {
@@ -277,26 +237,6 @@ export async function handleCampaignAdmin(req: IncomingMessage, res: ServerRespo
         const payload = pending.payload as BidConfirmPayload;
         const plan = await commitBidChange(payload.campaignId, payload.bid, ACTOR, payload.stateHash);
         sendJson(res, 200, { summary: plan.after });
-        return true;
-      }
-      if (pending.kind === 'resume') {
-        const payload = pending.payload as ResumeConfirmPayload;
-        const result = await duplicateCampaign(payload.sourceCampaignId, {
-          resume: { campaignId: payload.newCampaignId, adgroupId: payload.adgroupId },
-          actor: ACTOR,
-        });
-        try {
-          await recordCampaignClone(payload.sourceCampaignId, result);
-        } catch (recordError) {
-          console.error('Không ghi được bộ đếm nhân bản campaign:', recordError);
-        }
-        sendJson(res, 200, { summary: `Đã tiếp tục ${result.campaignId}. Campaign, nhóm và quảng cáo được bật khi tạo xong.` });
-        return true;
-      }
-      if (pending.kind === 'delete-partial') {
-        const payload = pending.payload as DeleteConfirmPayload;
-        await deletePartialCampaign(payload.campaignId, ACTOR);
-        sendJson(res, 200, { summary: `Đã xóa ${payload.campaignId}.` });
         return true;
       }
       sendJson(res, 400, { error: 'Không nhận ra thao tác đã xác nhận.' });
