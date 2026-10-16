@@ -14,11 +14,13 @@ export interface BudgetConfirmPayload {
   campaignId: string;
   budget: number;
   mode?: string;
+  stateHash: string;
 }
 
 export interface BidConfirmPayload {
   campaignId: string;
   bid: number;
+  stateHash: string;
 }
 
 export interface DeleteConfirmPayload {
@@ -59,7 +61,7 @@ function purgeExpired(now = Date.now()): void {
 
 export function createConfirmation(input: Omit<PendingConfirmation, 'createdAt'>): string {
   purgeExpired();
-  const token = randomBytes(4).toString('hex');
+  const token = randomBytes(16).toString('hex');
   pending.set(token, { ...input, createdAt: Date.now() });
   return token;
 }
@@ -81,4 +83,14 @@ export function consumeConfirmation(token: string): PendingConfirmation | undefi
 export function cancelConfirmation(token: string): boolean {
   purgeExpired();
   return pending.delete(token);
+}
+
+export function findConfirmation(
+  predicate: (item: PendingConfirmation, token: string) => boolean
+): { token: string; item: PendingConfirmation } | undefined {
+  purgeExpired();
+  for (const [token, item] of pending) {
+    if (predicate(item, token)) return { token, item };
+  }
+  return undefined;
 }

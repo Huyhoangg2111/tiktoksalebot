@@ -448,11 +448,13 @@ export async function buildRecreatePlan(client: TikTokClient, input: ParsedCopyI
       `campaign: Goal-based budget increase (AUTO_BUDGET_INCREASE) is kept. "budget" is the INITIAL budget (${String(src.budget)}); source current_budget ${String(src.current_budget ?? 'n/a')} is not sent. Allowlist-only feature.`,
     );
   }
-  if (input.budget !== undefined) {
-    if (cbo && cBody.budget_mode !== 'BUDGET_MODE_INFINITE') {
+    if (input.budget !== undefined) {
+    if (cbo && budgetModeAllowsAmount(cBody.budget_mode)) {
       cBody.budget = input.budget;
+    } else if (cbo) {
+      errors.push(`campaign: không ghi ngân sách ${input.budget} vì budget_mode=${String(cBody.budget_mode || 'trống')} không phải ngày hoặc trọn đời.`);
     } else {
-      warnings.push(`override budget ${input.budget} is applied on each ad group because campaign-level budget is not used (CBO off or BUDGET_MODE_INFINITE)`);
+      warnings.push(`override budget ${input.budget} is applied on each ad group only when that ad group's budget_mode is daily or total`);
     }
   }
   cBody.advertiser_id = advertiser_id;
@@ -516,8 +518,8 @@ export async function buildRecreatePlan(client: TikTokClient, input: ParsedCopyI
 
     // overrides (same semantics as the official copy API)
     if (sel?.adgroup_name) body.adgroup_name = sel.adgroup_name;
-    if (!cbo && input.budget !== undefined) body.budget = input.budget;
-    if (sel?.budget !== undefined && !cbo) body.budget = sel.budget;
+    if (!cbo && input.budget !== undefined) applyGroupBudgetOverride(body, input.budget, path, errors, 'ngân sách');
+    if (sel?.budget !== undefined && !cbo) applyGroupBudgetOverride(body, sel.budget, path, errors, 'ngân sách ad group');
     if (sel?.min_budget !== undefined) body.min_budget = sel.min_budget;
     if (sel?.targeting_spec) body.targeting_spec = { ...(body.targeting_spec as Obj), ...sel.targeting_spec };
     if (input.schedule_type) {
@@ -530,7 +532,9 @@ export async function buildRecreatePlan(client: TikTokClient, input: ParsedCopyI
     }
     if (input.dayparting) body.dayparting = input.dayparting;
     if (opts.overrideBid != null && Number.isFinite(opts.overrideBid) && opts.overrideBid > 0) {
-      applyBidOverride(body, opts.overrideBid, path, warnings);
+      const decision = bidOverrideDecision(body);
+      if (!decision.ok) errors.push(`${path}: ${decision.reason}`);
+      else applyBidOverride(body, opts.overrideBid, path, warnings);
     }
 
     body.operation_status = sel?.operation_status ?? (forceChildrenDisabled ? 'DISABLE' : (g.operation_status === 'ENABLE' ? 'ENABLE' : 'DISABLE'));
@@ -720,19 +724,51 @@ export async function planResume(
   return out;
 }
 
+export function budgetModeAllowsAmount(mode: unknown): boolean {
+  const value = String(mode || '');
+  return value === 'BUDGET_MODE_DAY' || value === 'BUDGET_MODE_DYNAMIC_DAILY_BUDGET' || value === 'BUDGET_MODE_TOTAL';
+}
+
+function applyGroupBudgetOverride(body: Obj, amount: number, path: string, errors: string[], label: string): void {
+  if (budgetModeAllowsAmount(body.budget_mode)) {
+    body.budget = amount;
+    return;
+  }
+  errors.push(`${path}: không ghi ${label} ${amount} vì budget_mode=${String(body.budget_mode || 'trống')} không phải ngày hoặc trọn đời. INFINITE sẽ bị 40002.`);
+}
+
+export type BidPriceField = 'bid_price' | 'conversion_bid_price' | 'roas_bid';
+
+/** CUSTOM sources can take a new price. CONVERSATION with a daily budget may switch to CUSTOM. Anything else is a preview blocker. */
+export function bidOverrideDecision(body: Obj): { ok: true; field: BidPriceField; setCustom: boolean } | { ok: false; reason: string } {
+  const goal = String(body.optimization_goal || '');
+  const bidType = String(body.bid_type || '');
+  const budgetMode = String(body.budget_mode || '');
+  const daily = budgetMode === 'BUDGET_MODE_DAY' || budgetMode === 'BUDGET_MODE_DYNAMIC_DAILY_BUDGET';
+  const alreadyCustom = bidType === 'BID_TYPE_CUSTOM';
+  if (!alreadyCustom && !(goal === 'CONVERSATION' && daily)) {
+    return {
+      ok: false,
+      reason: `không ghi đè giá thầu khi bid_type=${bidType || 'trống'}, goal=${goal || 'trống'}, budget_mode=${budgetMode || 'trống'}. Chỉ khi nguồn đã BID_TYPE_CUSTOM, hoặc CONVERSATION với ngân sách ngày.`,
+    };
+  }
+  const field: BidPriceField = goal === 'CLICK' ? 'bid_price' : goal === 'VALUE' ? 'roas_bid' : 'conversion_bid_price';
+  return { ok: true, field, setCustom: !alreadyCustom };
+}
+
 /** Writes one bid field. Sending both bid_price and conversion_bid_price can make TikTok reject the whole request (40002). */
 export function applyBidOverride(body: Obj, bid: number, path: string, warnings: string[]): void {
-  const goal = String(body.optimization_goal || '');
-  const useClickPrice = goal === 'CLICK';
-  body.bid_type = 'BID_TYPE_CUSTOM';
-  if (useClickPrice) {
-    body.bid_price = bid;
-    delete body.conversion_bid_price;
-  } else {
-    body.conversion_bid_price = bid;
-    delete body.bid_price;
+  const decision = bidOverrideDecision(body);
+  if (!decision.ok) throw new Error(`${path}: ${decision.reason}`);
+  if (decision.setCustom) body.bid_type = 'BID_TYPE_CUSTOM';
+  delete body.bid_price;
+  delete body.conversion_bid_price;
+  delete body.roas_bid;
+  body[decision.field] = bid;
+  if (body.min_budget !== undefined && body.bid_type !== 'BID_TYPE_NO_BID') {
+    delete body.min_budget;
   }
-  warnings.push(`${path}: bid override ${bid} via ${useClickPrice ? 'bid_price' : 'conversion_bid_price'} (bid_type=BID_TYPE_CUSTOM)`);
+  warnings.push(`${path}: bid override ${bid} via ${decision.field}${decision.setCustom ? ' (bid_type=BID_TYPE_CUSTOM)' : ''}`);
 }
 
 /* ------------------------------------------------------------------ helpers */

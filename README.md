@@ -139,12 +139,12 @@ After starting the bot, you can interact with it using these commands:
 - `/balance` - Check account balances
 - `/campaigns` - View campaigns with spend today
 - `/sales` - View sales data
-- `/xcamp <campaign_id> [số lượng] [ngân sách] [giá thầu]` - Xem trước rồi xác nhận mới nhân bản. Tên bản sao giữ quy tắc `<tên> - API`, không thêm `COPIED_`. Bản sao tạo ở trạng thái DISABLE.
+- `/xcamp <campaign_id> [số lượng] [ngân sách] [giá thầu]` - Xem trước rồi xác nhận mới nhân bản. Tên bản sao giữ quy tắc `<tên> - API`, không thêm `COPIED_`. Bản sao tạo ở trạng thái DISABLE. Tối đa 3 bản khi `campaign_clone_log` còn trống, sau đó tối đa 10. Dừng ở lỗi đầu tiên và liệt kê id đã tạo cùng id tạo dở.
 - `/duplicate` - Cùng luồng với `/xcamp`
 - `/budget <campaign_id> <số tiền> [ngày|trọn|dynamic]` - Đổi ngân sách sau khi xác nhận (admin)
 - `/bid <campaign_id> <giá thầu>` - Đổi giá thầu sau khi xác nhận (admin)
 - `/xcamp_resume <campaign_gốc> <campaign_mới> [adgroup_id]` - Tiếp tục bản Smart+ tạo dở
-- `/xcamp_xoa <campaign_id>` - Xóa bản Smart+ đang tắt tạo dở
+- `/xcamp_xoa <campaign_id>` - Xóa bản Smart+ đang tắt khi tên kết thúc bằng ` - API` và id có trong `campaign_clone_log` hoặc campaign chưa có ad. Phải gõ lại đúng id.
 - `/on <campaign_id>` và `/off <campaign_id>` - Bật hoặc tắt campaign (admin)
 - `/setalert <metric> <threshold>` - Set alert thresholds (admin only)
 - `/alerts` - View recent alerts (admin only)

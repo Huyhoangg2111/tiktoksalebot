@@ -4,7 +4,8 @@ import { getTikTokConfig } from '../tiktok/config.js';
 /**
  * FALLBACK: Playwright signer (web nội bộ TikTok).
  * Chỉ dùng khi campaign Upgraded Smart+ nằm ngoài phạm vi recreate chính thức
- * (catalog, search ads, instant form, ...) và SMARTPLUS_SIGNER_FALLBACK khác '0'.
+ * (catalog, search ads, instant form, ...) và SMARTPLUS_SIGNER_FALLBACK=1.
+ * Mặc định tắt. Không gọi file này khi resume hoặc khi đã có campaign id.
  * Lead gen DM và web conversion đi qua Marketing API, không đi qua file này.
  */
 

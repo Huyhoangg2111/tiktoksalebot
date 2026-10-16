@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * Budget / bid write plans for the official Marketing API.
  *
@@ -223,12 +225,29 @@ export function planBudgetChange(snapshot: MoneySnapshot, budget: number, reques
 
 export function bidFieldForGroup(group: AdGroupMoney): 'bid_price' | 'conversion_bid_price' | 'roas_bid' {
   const goal = String(group.optimizationGoal || '');
-  const strategy = `${group.bidType || ''} ${goal}`;
-  if (/ROAS|VALUE/i.test(strategy) && (group.roasBid != null || /VALUE/i.test(goal))) {
-    return 'roas_bid';
-  }
+  if (goal === 'VALUE') return 'roas_bid';
   if (goal === 'CLICK') return 'bid_price';
   return 'conversion_bid_price';
+}
+
+export function hashMoneyState(snapshot: MoneySnapshot, plan: MoneyPlan): string {
+  return createHash('sha256').update(JSON.stringify({
+    campaignId: snapshot.campaignId,
+    kind: snapshot.kind,
+    budget: snapshot.budget,
+    budgetMode: snapshot.budgetMode,
+    budgetLevel: snapshot.budgetLevel,
+    adgroups: snapshot.adgroups.map(group => ({
+      id: group.adgroupId,
+      bidType: group.bidType,
+      goal: group.optimizationGoal,
+      budget: group.budget,
+      bidPrice: group.bidPrice,
+      conversionBidPrice: group.conversionBidPrice,
+      roasBid: group.roasBid,
+    })),
+    bodies: plan.writes.map(write => write.body),
+  })).digest('hex');
 }
 
 export function planBidChange(snapshot: MoneySnapshot, bid: number): MoneyPlan {
@@ -241,34 +260,45 @@ export function planBidChange(snapshot: MoneySnapshot, bid: number): MoneyPlan {
   }
 
   if (snapshot.kind === 'smart_plus') {
-    for (const group of snapshot.adgroups) {
-      const field = bidFieldForGroup(group);
-      if (group.bidType && group.bidType !== 'BID_TYPE_CUSTOM' && field !== 'roas_bid') {
-        limitations.push(
-          `Ad group ${group.adgroupId} đang ${group.bidType}. Body /smart_plus/adgroup/update/ không có bid_type, nên TikTok có thể từ chối khi chiến lược hiện tại không phải giá thầu tùy chỉnh.`
-        );
-      }
-      writes.push({
-        endpoint: '/smart_plus/adgroup/update/',
-        body: {
-          advertiser_id: snapshot.advertiserId,
-          adgroup_id: group.adgroupId,
-          [field]: bid,
-        },
-        summary: `${group.adgroupName || group.adgroupId}: ${field} ${formatAmount(currentBid(group).value)} → ${bid}`,
-      });
+    const blocked = snapshot.adgroups.filter(group => group.bidType !== 'BID_TYPE_CUSTOM');
+    if (blocked.length) {
+      throw new Error(
+        `Không đổi giá thầu Smart+: ${blocked.map(group => `${group.adgroupId} đang ${group.bidType || 'không rõ bid_type'}`).join(', ')}. Body /smart_plus/adgroup/update/ không có bid_type.`
+      );
     }
-  } else if (snapshot.kind === 'spc' && snapshot.adgroups.length === 0) {
+    const group = snapshot.adgroups[0];
+    if (!group) throw new Error('Không tìm thấy ad group để cập nhật giá thầu.');
+    const field = bidFieldForGroup(group);
+    const budgets = [snapshot.budget, ...snapshot.adgroups.map(item => item.budget)].filter((value): value is number => value != null && value > 0);
+    if (field !== 'roas_bid') {
+      if (budgets.length === 0) {
+        limitations.push('Không có ngân sách dương để kiểm tra giá thầu nhỏ hơn ngân sách.');
+      } else if (bid >= Math.min(...budgets)) {
+        throw new Error(`Giá thầu ${bid} phải nhỏ hơn ngân sách ${Math.min(...budgets)}.`);
+      }
+    }
+    if (group.optimizationGoal === 'CONVERSATION' || group.optimizationGoal === 'CLICK') {
+      limitations.push('Cập nhật giá thầu mục tiêu tin nhắn (DM) trên /smart_plus/adgroup/update/ chưa được kiểm chứng. Hãy thử trên campaign thử nghiệm trước.');
+    }
+    if (field === 'roas_bid') {
+      limitations.push('Field roas_bid cho mục tiêu VALUE trên endpoint update chưa được kiểm chứng.');
+    }
+    limitations.push(
+      snapshot.adgroups.length > 1
+        ? `Chỉ gửi một lần cho ad group ${group.adgroupId}. Các ad group còn lại không được gọi riêng; khi CBO bật giá phải giống nhau.`
+        : 'Gửi một lần cho ad group này.'
+    );
     writes.push({
-      endpoint: '/campaign/spc/update/',
+      endpoint: '/smart_plus/adgroup/update/',
       body: {
         advertiser_id: snapshot.advertiserId,
-        campaign_id: snapshot.campaignId,
-        conversion_bid_price: bid,
+        adgroup_id: group.adgroupId,
+        [field]: bid,
       },
-      summary: `Giá thầu SPC conversion_bid_price → ${bid}`,
+      summary: `${group.adgroupName || group.adgroupId}: ${field} ${formatAmount(currentBid(group).value)} → ${bid}`,
     });
-    limitations.push('SPC không có ad group riêng; gửi conversion_bid_price qua /campaign/spc/update/.');
+  } else if (snapshot.kind === 'spc' && snapshot.adgroups.length === 0) {
+    throw new Error('Chưa kiểm chứng được cách đổi giá thầu SPC qua /campaign/spc/update/. Bot không gửi field này.');
   } else {
     const endpoint = snapshot.kind === 'spc' ? '/adgroup/update/' : '/adgroup/update/';
     for (const group of snapshot.adgroups) {
@@ -283,6 +313,10 @@ export function planBidChange(snapshot: MoneySnapshot, bid: number): MoneyPlan {
         summary: `${group.adgroupName || group.adgroupId}: ${field} ${formatAmount(currentBid(group).value)} → ${bid}`,
       });
     }
+  }
+
+  if (writes.length > 1) {
+    limitations.push('Nhiều lệnh ghi không nằm trong một transaction. Nếu lệnh sau lỗi, lệnh trước không được hoàn tác.');
   }
 
   return {

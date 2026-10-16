@@ -1,10 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { duplicateCampaign } from '../campaigns/manager.js';
-import { recordCampaignClone } from '../campaigns/clone-tracking.js';
+import { countLoggedClones, recordCampaignClone } from '../campaigns/clone-tracking.js';
+import { assertCopyQuantity, formatCopyLoop, runCopyLoop } from '../campaigns/duplicate-safety.js';
 import {
   consumeConfirmation,
   createConfirmation,
   cancelConfirmation,
+  peekConfirmation,
   type BidConfirmPayload,
   type BudgetConfirmPayload,
   type DeleteConfirmPayload,
@@ -13,7 +15,7 @@ import {
 } from '../campaigns/confirmations.js';
 import { deletePartialCampaign, previewDeletePartial, previewOfficialDuplicate } from '../campaigns/official-duplicate.js';
 import { commitBidChange, commitBudgetChange, describeMoneyError, previewBidChange, previewBudgetChange } from '../campaigns/money-edit.js';
-import { parseBudgetMode, parsePositiveMoney, type BudgetMode } from '../tiktok/smartplus/money.js';
+import { hashMoneyState, parseBudgetMode, parsePositiveMoney, type BudgetMode } from '../tiktok/smartplus/money.js';
 
 const ACTOR = 'dashboard';
 
@@ -87,15 +89,17 @@ document.getElementById('form').onsubmit = async (event) => {
   const response = await fetch('/admin/api/campaigns/preview', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) });
   const data = await response.json();
   if (!response.ok) { show('<p class="err">'+escapeHtml(data.error||'Lỗi')+'</p>'); return; }
-  const confirm = data.canConfirm ? '<p><button type="button" id="go">Xác nhận ghi lên TikTok</button> <button type="button" class="ghost" id="stop">Hủy</button></p>' : '<p class="err">Chưa thể xác nhận.</p>';
+  const typed = data.requireTypedId ? '<p><label>Gõ lại campaign id<input id="confirmId" inputmode="numeric" autocomplete="off"></label></p>' : '';
+  const confirm = data.canConfirm ? typed + '<p><button type="button" id="go">Xác nhận ghi lên TikTok</button> <button type="button" class="ghost" id="stop">Hủy</button></p>' : '<p class="err">Chưa thể xác nhận.</p>';
   show('<pre>'+escapeHtml(data.summary||'')+'</pre>'+confirm);
   const go = document.getElementById('go');
   const stop = document.getElementById('stop');
   if (go) go.onclick = async () => {
     go.disabled = true;
-    const done = await fetch('/admin/api/campaigns/confirm', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ token: data.token }) });
+    const confirmId = (document.getElementById('confirmId') || {}).value || '';
+    const done = await fetch('/admin/api/campaigns/confirm', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ token: data.token, confirmId }) });
     const payload = await done.json();
-    show('<pre>'+escapeHtml(payload.error || payload.summary || JSON.stringify(payload))+'</pre>');
+    show('<pre>'+escapeHtml(payload.summary || payload.error || JSON.stringify(payload))+'</pre>');
   };
   if (stop) stop.onclick = async () => {
     await fetch('/admin/api/campaigns/cancel', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ token: data.token }) });
@@ -141,7 +145,7 @@ export async function handleCampaignAdmin(req: IncomingMessage, res: ServerRespo
       const campaignId = String(body.campaignId || '').trim();
       if (!/^\d+$/.test(campaignId)) throw new Error('Campaign ID phải là chuỗi số.');
       if (action === 'duplicate') {
-        const quantity = Math.max(1, Math.min(5, parseInt(String(body.quantity || '1'), 10) || 1));
+        const quantity = assertCopyQuantity(parseInt(String(body.quantity || '1'), 10), await countLoggedClones());
         const budget = optionalMoney(body.budget, 'Ngân sách');
         const bid = optionalMoney(body.bid, 'Giá thầu');
         const preview = await previewOfficialDuplicate(campaignId, { overrideBudget: budget, overrideBid: bid, actor: ACTOR });
@@ -155,17 +159,27 @@ export async function handleCampaignAdmin(req: IncomingMessage, res: ServerRespo
       if (action === 'budget') {
         const budget = parsePositiveMoney(body.budget, 'Ngân sách');
         const mode = parseBudgetMode(String(body.mode || '')) as BudgetMode | undefined;
-        const { plan } = await previewBudgetChange(campaignId, budget, mode);
+        const { snapshot, plan } = await previewBudgetChange(campaignId, budget, mode);
         const summary = [plan.before, '', plan.after, ...plan.writes.map(write => `${write.endpoint}: ${write.summary}`), ...plan.limitations].join('\n');
-        const token = createConfirmation({ kind: 'budget', actor: ACTOR, summary, payload: { campaignId, budget, mode } });
+        const token = createConfirmation({
+          kind: 'budget',
+          actor: ACTOR,
+          summary,
+          payload: { campaignId, budget, mode, stateHash: hashMoneyState(snapshot, plan) },
+        });
         sendJson(res, 200, { summary, canConfirm: true, token });
         return true;
       }
       if (action === 'bid') {
         const bid = parsePositiveMoney(body.bid, 'Giá thầu');
-        const { plan } = await previewBidChange(campaignId, bid);
+        const { snapshot, plan } = await previewBidChange(campaignId, bid);
         const summary = [plan.before, '', plan.after, ...plan.limitations].join('\n');
-        const token = createConfirmation({ kind: 'bid', actor: ACTOR, summary, payload: { campaignId, bid } });
+        const token = createConfirmation({
+          kind: 'bid',
+          actor: ACTOR,
+          summary,
+          payload: { campaignId, bid, stateHash: hashMoneyState(snapshot, plan) },
+        });
         sendJson(res, 200, { summary, canConfirm: true, token });
         return true;
       }
@@ -190,7 +204,7 @@ export async function handleCampaignAdmin(req: IncomingMessage, res: ServerRespo
         const token = preview.canConfirm
           ? createConfirmation({ kind: 'delete-partial', actor: ACTOR, summary: preview.summary, payload: { campaignId } })
           : undefined;
-        sendJson(res, 200, { summary: preview.summary, canConfirm: preview.canConfirm, token });
+        sendJson(res, 200, { summary: preview.summary, canConfirm: preview.canConfirm, token, requireTypedId: preview.canConfirm });
         return true;
       }
       throw new Error('Thao tác không hợp lệ.');
@@ -208,35 +222,60 @@ export async function handleCampaignAdmin(req: IncomingMessage, res: ServerRespo
   if (url.pathname === '/admin/api/campaigns/confirm' && req.method === 'POST') {
     try {
       const body = await readJson(req);
-      const pending = consumeConfirmation(String(body.token || ''));
+      const token = String(body.token || '');
+      const peeked = peekConfirmation(token);
+      if (!peeked || peeked.actor !== ACTOR) {
+        sendJson(res, 400, { error: 'Phiên xác nhận không còn hiệu lực.' });
+        return true;
+      }
+      if (peeked.kind === 'delete-partial') {
+        const typedId = String(body.confirmId || '').trim();
+        const expectedId = (peeked.payload as DeleteConfirmPayload).campaignId;
+        if (typedId !== expectedId) {
+          sendJson(res, 400, { error: 'Gõ lại đúng campaign id để xóa. Phiên xác nhận vẫn còn.' });
+          return true;
+        }
+      }
+      const pending = consumeConfirmation(token);
       if (!pending || pending.actor !== ACTOR) {
         sendJson(res, 400, { error: 'Phiên xác nhận không còn hiệu lực.' });
         return true;
       }
       if (pending.kind === 'duplicate') {
         const payload = pending.payload as DuplicateConfirmPayload;
-        const created = [];
-        for (let index = 0; index < payload.quantity; index += 1) {
+        const outcome = await runCopyLoop(payload.quantity, async () => {
           const result = await duplicateCampaign(payload.campaignId, {
             overrideBudget: payload.budget,
             overrideBid: payload.bid,
             actor: ACTOR,
           });
-          await recordCampaignClone(payload.campaignId, result);
-          created.push(`${result.campaignName || payload.campaignName} · ${result.campaignId}`);
-        }
-        sendJson(res, 200, { summary: `Đã tạo ${created.length} bản DISABLE:\n${created.join('\n')}` });
+          try {
+            await recordCampaignClone(payload.campaignId, result);
+          } catch (recordError) {
+            console.error('Không ghi được bộ đếm nhân bản campaign:', recordError);
+          }
+          return { campaignId: result.campaignId, campaignName: result.campaignName || payload.campaignName };
+        });
+        const summary = formatCopyLoop(outcome, payload.quantity);
+        const kept = outcome.created.length > 0 || outcome.partialIds.length > 0;
+        sendJson(res, kept ? 200 : 400, kept ? { summary, error: outcome.error } : { error: summary, summary });
         return true;
       }
       if (pending.kind === 'budget') {
         const payload = pending.payload as BudgetConfirmPayload;
-        const plan = await commitBudgetChange(payload.campaignId, payload.budget, payload.mode ? parseBudgetMode(payload.mode) : undefined, ACTOR);
+        const plan = await commitBudgetChange(
+          payload.campaignId,
+          payload.budget,
+          payload.mode ? parseBudgetMode(payload.mode) : undefined,
+          ACTOR,
+          payload.stateHash
+        );
         sendJson(res, 200, { summary: plan.after });
         return true;
       }
       if (pending.kind === 'bid') {
         const payload = pending.payload as BidConfirmPayload;
-        const plan = await commitBidChange(payload.campaignId, payload.bid, ACTOR);
+        const plan = await commitBidChange(payload.campaignId, payload.bid, ACTOR, payload.stateHash);
         sendJson(res, 200, { summary: plan.after });
         return true;
       }
@@ -246,7 +285,11 @@ export async function handleCampaignAdmin(req: IncomingMessage, res: ServerRespo
           resume: { campaignId: payload.newCampaignId, adgroupId: payload.adgroupId },
           actor: ACTOR,
         });
-        await recordCampaignClone(payload.sourceCampaignId, result);
+        try {
+          await recordCampaignClone(payload.sourceCampaignId, result);
+        } catch (recordError) {
+          console.error('Không ghi được bộ đếm nhân bản campaign:', recordError);
+        }
         sendJson(res, 200, { summary: `Đã tiếp tục ${result.campaignId}. Bản sao vẫn DISABLE.` });
         return true;
       }

@@ -2,6 +2,7 @@ import { assertAdvertiserAllowed, getAllowedAdvertiserIds, getTikTokWriteAccessT
 import { TikTokClient } from '../tiktok/smartplus/client.js';
 import { TikTokApiError } from '../tiktok/smartplus/errors.js';
 import {
+  hashMoneyState,
   planBidChange,
   planBudgetChange,
   type AdGroupMoney,
@@ -98,7 +99,15 @@ async function fetchRows(client: TikTokClient, path: string, advertiserId: strin
     page: 1,
     page_size: 100,
   });
-  return listOf(response.data).filter(row => !isDeleted(row));
+  const data = (response.data && typeof response.data === 'object' ? response.data : {}) as Row;
+  const raw = listOf(data);
+  const pageInfo = data.page_info && typeof data.page_info === 'object' ? data.page_info as Row : undefined;
+  const totalNumber = num(pageInfo?.total_number);
+  const totalPage = num(pageInfo?.total_page);
+  if ((totalPage != null && totalPage > 1) || (totalNumber != null && totalNumber > raw.length)) {
+    throw new Error(`Campaign có hơn ${raw.length} mục (${path}). Bot không sửa khi chưa đọc hết.`);
+  }
+  return raw.filter(row => !isDeleted(row));
 }
 
 export async function loadMoneySnapshot(campaignId: string, client?: TikTokClient): Promise<MoneySnapshot> {
@@ -190,18 +199,33 @@ export async function previewBidChange(campaignId: string, bid: number): Promise
   return { snapshot, plan: planBidChange(snapshot, bid) };
 }
 
-export async function commitBudgetChange(campaignId: string, budget: number, mode: BudgetMode | undefined, actor: string): Promise<MoneyPlan> {
+function assertMoneyState(snapshot: MoneySnapshot, plan: MoneyPlan, expectedHash?: string): void {
+  if (!expectedHash) return;
+  if (hashMoneyState(snapshot, plan) !== expectedHash) {
+    throw new Error('Campaign đã đổi so với bản xem trước. Hãy xem trước lại rồi xác nhận.');
+  }
+}
+
+export async function commitBudgetChange(
+  campaignId: string,
+  budget: number,
+  mode: BudgetMode | undefined,
+  actor: string,
+  expectedHash?: string
+): Promise<MoneyPlan> {
   const client = await createWriteClient();
   const snapshot = await loadMoneySnapshot(campaignId, client);
   const plan = planBudgetChange(snapshot, budget, mode);
+  assertMoneyState(snapshot, plan, expectedHash);
   await applyMoneyPlan(plan, actor, client, snapshot.campaignId);
   return plan;
 }
 
-export async function commitBidChange(campaignId: string, bid: number, actor: string): Promise<MoneyPlan> {
+export async function commitBidChange(campaignId: string, bid: number, actor: string, expectedHash?: string): Promise<MoneyPlan> {
   const client = await createWriteClient();
   const snapshot = await loadMoneySnapshot(campaignId, client);
   const plan = planBidChange(snapshot, bid);
+  assertMoneyState(snapshot, plan, expectedHash);
   await applyMoneyPlan(plan, actor, client, snapshot.campaignId);
   return plan;
 }

@@ -8,6 +8,12 @@ test('duplicate name keeps the historical - API suffix and drops a repeated suff
   assert.equal(buildDuplicateCampaignName('Mặt nạ mắt - api'), 'Mặt nạ mắt - API');
 });
 
+test('a very long source name still ends with the API suffix', () => {
+  const name = buildDuplicateCampaignName('a'.repeat(600));
+  assert.equal(name.endsWith(' - API'), true);
+  assert.ok(name.length <= 512);
+});
+
 test('duplicate name does not add a Copy or COPIED_ prefix', () => {
   const name = buildDuplicateCampaignName('Lead DM');
   assert.equal(name, 'Lead DM - API');

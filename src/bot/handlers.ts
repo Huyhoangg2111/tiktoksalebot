@@ -25,6 +25,7 @@ import {
 } from '../tiktok/api.js';
 import { duplicateCampaign } from '../campaigns/manager.js';
 import { recordCampaignClone } from '../campaigns/clone-tracking.js';
+import { runCopyLoop } from '../campaigns/duplicate-safety.js';
 import {
   getAdvertiserPermissions,
   getBusinessCenterId,
@@ -169,6 +170,7 @@ type XcampQueueJob = {
   quantity: number;
   budget?: number;
   bid?: number;
+  actor?: string;
 };
 
 type ActiveCampaignProductSummary = {
@@ -2150,27 +2152,19 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
   }
 
   try {
-    const duplicatedCampaigns: DuplicatedCampaignResult[] = [];
-    const errors: string[] = [];
-
-    for (let i = 0; i < job.quantity; i++) {
+    const outcome = await runCopyLoop(job.quantity, async () => {
+      const result = await duplicateCampaign(job.campaignId, {
+        overrideBudget: job.budget,
+        overrideBid: job.bid,
+        actor: job.actor,
+      });
       try {
-        const result = await duplicateCampaign(job.campaignId, {
-          overrideBudget: job.budget,
-          overrideBid: job.bid,
-        });
-        if (result) {
-          duplicatedCampaigns.push(result);
-          try {
-            await recordCampaignClone(job.campaignId, result);
-          } catch (recordError) {
-            console.error('Không ghi được bộ đếm nhân bản campaign:', recordError);
-          }
-        }
-      } catch (err) {
-        errors.push(err instanceof Error ? err.message : String(err));
+        await recordCampaignClone(job.campaignId, result);
+      } catch (recordError) {
+        console.error('Không ghi được bộ đếm nhân bản campaign:', recordError);
       }
-    }
+      return result;
+    });
 
     let advertiserPermissions: AdvertiserPermission[] = [];
     try {
@@ -2180,24 +2174,29 @@ async function runXcampQueueJob(job: XcampQueueJob): Promise<void> {
     }
     const permissionByAdvertiserId = buildAdvertiserPermissionMap(advertiserPermissions);
 
-    let finalMsg = `✅ <b>Kết quả nhân bản (${duplicatedCampaigns.length}/${job.quantity}):</b>\n\n`;
-    if (duplicatedCampaigns.length > 0) {
-      finalMsg += `Các camp mới:\n${duplicatedCampaigns.map(result =>
+    let finalMsg = outcome.stopped
+      ? `⚠️ <b>Dừng ở lỗi đầu (${outcome.created.length}/${job.quantity}).</b>\nCác bản còn lại không được tạo.\n\n`
+      : `✅ <b>Kết quả nhân bản (${outcome.created.length}/${job.quantity}):</b>\n\n`;
+    if (outcome.created.length > 0) {
+      finalMsg += `Các camp mới:\n${outcome.created.map(result =>
         formatDuplicatedCampaignResultLine(result, permissionByAdvertiserId)
       ).join('\n')}\n`;
     }
-    const overrideWarnings = duplicatedCampaigns
+    if (outcome.partialIds.length > 0) {
+      finalMsg += `\nCampaign tạo dở:\n${outcome.partialIds.map(id => `<code>${escapeHtml(id)}</code>`).join('\n')}\n`;
+      finalMsg += 'Tiếp tục bằng /xcamp_resume hoặc xóa bằng /xcamp_xoa nếu tên kết thúc bằng " - API".\n';
+    }
+    const overrideWarnings = outcome.created
       .flatMap(result => result.overrideWarnings || [])
       .filter(Boolean);
     if (overrideWarnings.length > 0) {
       finalMsg += `\n⚠️ <b>Cảnh báo:</b>\n${escapeHtml(overrideWarnings[0])}`;
       if (overrideWarnings.length > 1) finalMsg += ` (và ${overrideWarnings.length - 1} cảnh báo khác)`;
     }
-    if (errors.length > 0) {
-      finalMsg += `\n❌ <b>Lỗi:</b>\n${escapeHtml(errors[0])}`;
-      if (errors.length > 1) finalMsg += ` (và ${errors.length - 1} lỗi khác)`;
+    if (outcome.error) {
+      finalMsg += `\n❌ <b>Lỗi:</b>\n${escapeHtml(outcome.error)}`;
     }
-    if (duplicatedCampaigns.length > 0) {
+    if (outcome.created.length > 0) {
       finalMsg += '\n\nBản sao đang <b>DISABLE</b>. Dùng /on &lt;id&gt; khi muốn bật.';
     }
 

@@ -38,6 +38,25 @@ export async function recordCampaignClone(
   );
 }
 
+export async function isCampaignCloneLogged(campaignId: string): Promise<boolean> {
+  const id = String(campaignId || '').trim();
+  if (!id) return false;
+  const row = await db.get<{ cloned_campaign_id: string }>(
+    'SELECT cloned_campaign_id FROM campaign_clone_log WHERE cloned_campaign_id = ?',
+    [id]
+  );
+  return Boolean(row?.cloned_campaign_id);
+}
+
+export async function countLoggedClones(): Promise<number> {
+  try {
+    const row = await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM campaign_clone_log');
+    return Number(row?.n || 0);
+  } catch {
+    return 0;
+  }
+}
+
 export async function getCampaignCloneCountMap(
   campaignIds: string[]
 ): Promise<Map<string, number>> {

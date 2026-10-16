@@ -4,7 +4,7 @@
  */
 export const REDACTED = '[REDACTED]';
 
-const SENSITIVE_KEY = /^(secret|app_secret|client_secret|access_token|refresh_token|auth_code|access-token|authorization|password|token)$/i;
+const SENSITIVE_KEY = /(secret|token|password|authorization|credential)/i;
 const QUERYISH = /\b(secret|app_secret|client_secret|access_token|refresh_token|auth_code)=([^&\s"']+)/gi;
 
 /** Replace known secret values and `key=value` secrets inside a string. */

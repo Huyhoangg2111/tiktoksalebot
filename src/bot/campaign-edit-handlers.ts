@@ -1,11 +1,14 @@
 import { Markup, Telegraf, type Context } from 'telegraf';
 import { enqueueXcampJob } from './handlers.js';
 import { duplicateCampaign } from '../campaigns/manager.js';
-import { recordCampaignClone } from '../campaigns/clone-tracking.js';
+import { countLoggedClones, recordCampaignClone } from '../campaigns/clone-tracking.js';
+import { assertCopyQuantity } from '../campaigns/duplicate-safety.js';
 import {
   cancelConfirmation,
   consumeConfirmation,
   createConfirmation,
+  findConfirmation,
+  peekConfirmation,
   type BidConfirmPayload,
   type BudgetConfirmPayload,
   type DeleteConfirmPayload,
@@ -18,7 +21,7 @@ import {
   previewOfficialDuplicate,
 } from '../campaigns/official-duplicate.js';
 import { commitBidChange, commitBudgetChange, describeMoneyError, previewBidChange, previewBudgetChange } from '../campaigns/money-edit.js';
-import { parseBudgetMode, parsePositiveMoney } from '../tiktok/smartplus/money.js';
+import { hashMoneyState, parseBudgetMode, parsePositiveMoney } from '../tiktok/smartplus/money.js';
 
 function isAdmin(ctx: Context): boolean {
   const adminChatId = process.env.ADMIN_CHAT_ID;
@@ -33,7 +36,7 @@ function escapeHtml(value: string): string {
 }
 
 function actorOf(ctx: Context): string {
-  return `telegram:${ctx.chat?.id ?? 'unknown'}`;
+  return `telegram:${ctx.chat?.id ?? 'unknown'}:${ctx.from?.id ?? 'unknown'}`;
 }
 
 function argsOf(ctx: Context): string[] {
@@ -68,9 +71,11 @@ async function handleDuplicateCommand(ctx: Context): Promise<void> {
     await ctx.reply('Dùng: /xcamp <campaign_id> [số lượng] [ngân sách] [giá thầu]\nVí dụ: /xcamp 12345 1 20 0.5');
     return;
   }
-  const quantity = Math.max(1, parseInt(args[2] || '1', 10) || 1);
-  if (quantity > 20) {
-    await ctx.reply('Số lượng tối đa mỗi lần là 20.');
+  let quantity: number;
+  try {
+    quantity = assertCopyQuantity(parseInt(args[2] || '1', 10), await countLoggedClones());
+  } catch (error) {
+    await ctx.reply(error instanceof Error ? error.message : String(error));
     return;
   }
   let budget: number | undefined;
@@ -125,13 +130,13 @@ async function handleBudgetCommand(ctx: Context): Promise<void> {
   try {
     const budget = parsePositiveMoney(args[2], 'Ngân sách');
     const mode = parseBudgetMode(args[3]);
-    const { plan } = await previewBudgetChange(campaignId, budget, mode);
+    const { snapshot, plan } = await previewBudgetChange(campaignId, budget, mode);
     const body = [plan.before, '', 'Sau khi xác nhận:', plan.after, '', ...plan.writes.map(write => `${write.endpoint}\n${write.summary}`), ...plan.limitations].join('\n');
     const token = createConfirmation({
       kind: 'budget',
       actor: actorOf(ctx),
       summary: body,
-      payload: { campaignId, budget, mode },
+      payload: { campaignId, budget, mode, stateHash: hashMoneyState(snapshot, plan) },
     });
     await replyPreview(ctx, 'Xác nhận đổi ngân sách', body, 'bok', 'bno', token);
   } catch (error) {
@@ -152,13 +157,13 @@ async function handleBidCommand(ctx: Context): Promise<void> {
   }
   try {
     const bid = parsePositiveMoney(args[2], 'Giá thầu');
-    const { plan } = await previewBidChange(campaignId, bid);
+    const { snapshot, plan } = await previewBidChange(campaignId, bid);
     const body = [plan.before, '', 'Sau khi xác nhận:', plan.after, '', ...plan.limitations].join('\n');
     const token = createConfirmation({
       kind: 'bid',
       actor: actorOf(ctx),
       summary: body,
-      payload: { campaignId, bid },
+      payload: { campaignId, bid, stateHash: hashMoneyState(snapshot, plan) },
     });
     await replyPreview(ctx, 'Xác nhận đổi giá thầu', body, 'iok', 'ino', token);
   } catch (error) {
@@ -217,13 +222,16 @@ async function handleDeleteCommand(ctx: Context): Promise<void> {
       await replyPreview(ctx, 'Không xóa', preview.summary, 'dok', 'dno', undefined);
       return;
     }
-    const token = createConfirmation({
+    createConfirmation({
       kind: 'delete-partial',
       actor: actorOf(ctx),
       summary: preview.summary,
       payload: { campaignId },
     });
-    await replyPreview(ctx, 'Xác nhận xóa bản dở', preview.summary, 'dok', 'dno', token);
+    await ctx.reply(
+      `<b>Xác nhận xóa</b>\n<pre>${escapeHtml(preview.summary).slice(0, 3500)}</pre>\nGõ lại đúng campaign id <code>${escapeHtml(campaignId)}</code> để xóa. Gõ nội dung khác (không phải lệnh) để hủy.`,
+      { parse_mode: 'HTML' }
+    );
   } catch (error) {
     await ctx.reply(describeMoneyError(error));
   }
@@ -238,13 +246,28 @@ export function setupCampaignEditHandlers(bot: Telegraf): void {
   bot.command('xcamp_xoa', ctx => void handleDeleteCommand(ctx));
   bot.command('xcamp_delete', ctx => void handleDeleteCommand(ctx));
 
-  bot.action(/^(xok|xno|bok|bno|iok|ino|rok|rno|dok|dno):([0-9a-f]{8})$/, async ctx => {
+  bot.action(/^(xok|xno|bok|bno|iok|ino|rok|rno|dok|dno):([0-9a-f]{32})$/, async ctx => {
     if (!isAdmin(ctx)) {
       await ctx.answerCbQuery('Không có quyền.');
       return;
     }
     const action = ctx.match[1] || '';
     const token = ctx.match[2] || '';
+    const actor = actorOf(ctx);
+    if (action === 'dok') {
+      await ctx.answerCbQuery('Gõ lại campaign id');
+      await ctx.reply('Xóa chỉ thực hiện khi gõ lại đúng campaign id trong chat.');
+      return;
+    }
+    const peeked = peekConfirmation(token);
+    if (!peeked) {
+      await ctx.answerCbQuery('Phiên xác nhận đã hết hạn hoặc đã dùng.');
+      return;
+    }
+    if (peeked.actor !== actor) {
+      await ctx.answerCbQuery('Phiên này thuộc người khác.');
+      return;
+    }
     const cancel = action.endsWith('no');
     if (cancel) {
       cancelConfirmation(token);
@@ -270,18 +293,25 @@ export function setupCampaignEditHandlers(bot: Telegraf): void {
           quantity: payload.quantity,
           budget: payload.budget,
           bid: payload.bid,
+          actor: pending.actor,
         });
         return;
       }
       if (pending.kind === 'budget' && action === 'bok') {
         const payload = pending.payload as BudgetConfirmPayload;
-        const plan = await commitBudgetChange(payload.campaignId, payload.budget, payload.mode ? parseBudgetMode(payload.mode) : undefined, pending.actor);
+        const plan = await commitBudgetChange(
+          payload.campaignId,
+          payload.budget,
+          payload.mode ? parseBudgetMode(payload.mode) : undefined,
+          pending.actor,
+          payload.stateHash
+        );
         await ctx.reply(`Đã cập nhật ngân sách ${payload.campaignId}.\n${plan.after}`);
         return;
       }
       if (pending.kind === 'bid' && action === 'iok') {
         const payload = pending.payload as BidConfirmPayload;
-        const plan = await commitBidChange(payload.campaignId, payload.bid, pending.actor);
+        const plan = await commitBidChange(payload.campaignId, payload.bid, pending.actor, payload.stateHash);
         await ctx.reply(`Đã cập nhật giá thầu ${payload.campaignId}.\n${plan.after}`);
         return;
       }
@@ -299,15 +329,31 @@ export function setupCampaignEditHandlers(bot: Telegraf): void {
         await ctx.reply(`Đã tiếp tục campaign ${result.campaignId}. Trạng thái vẫn DISABLE cho đến khi /on.`);
         return;
       }
-      if (pending.kind === 'delete-partial' && action === 'dok') {
-        const payload = pending.payload as DeleteConfirmPayload;
-        await deletePartialCampaign(payload.campaignId, pending.actor);
-        await ctx.reply(`Đã xóa campaign Smart+ ${payload.campaignId}.`);
-        return;
-      }
       await ctx.reply('Nút xác nhận không khớp thao tác. Không có gì được ghi.');
     } catch (error) {
       await ctx.reply(`Không thực hiện được:\n${describeMoneyError(error)}`);
     }
+  });
+
+  bot.on('text', async (ctx, next) => {
+    if (!isAdmin(ctx)) return next();
+    const text = ctx.message && 'text' in ctx.message ? ctx.message.text.trim() : '';
+    if (!text || text.startsWith('/')) return next();
+    const actor = actorOf(ctx);
+    const found = findConfirmation(item => item.kind === 'delete-partial' && item.actor === actor);
+    if (!found) return next();
+    const payload = found.item.payload as DeleteConfirmPayload;
+    if (text === payload.campaignId) {
+      consumeConfirmation(found.token);
+      try {
+        await deletePartialCampaign(payload.campaignId, actor);
+        await ctx.reply(`Đã xóa campaign Smart+ ${payload.campaignId}.`);
+      } catch (error) {
+        await ctx.reply(`Không xóa được:\n${describeMoneyError(error)}`);
+      }
+      return;
+    }
+    cancelConfirmation(found.token);
+    await ctx.reply(`Id không khớp ${payload.campaignId}. Không xóa.`);
   });
 }
