@@ -283,6 +283,7 @@ function ruleField(groupIndex,side,key,value){const choiceKey=key;const options=
 let rulerFilter='all';
 let rulerEntity='all';
 const rulerExpanded=new Set();
+const rulerNotifyExpanded=new Set();
 const ENT_LABELS={campaign:'Chiến dịch',material:'Material',ad:'Quảng cáo'};
 const OP_SHORT={gt:'>',gte:'≥',lt:'<',lte:'≤',eq:'=',between:'trong khoảng'};
 const CONV_OP_SHORT={gt:'>',gte:'≥',lt:'<',lte:'≤',eq:'='};
@@ -387,7 +388,9 @@ function drawRulerAuto(){
     const hay=normText([title,summary,single.note,isOn(single.enabled)?'đang dùng':'đang tắt'].join(' '));
     if(q&&!hay.includes(q))return;
     visibleCount++;
-    cards+='<div class="rule-card"><div class="rule-card-head static"><span class="chev open">▼</span><b>'+esc(title)+'</b><span class="badge warn-badge">Chỉ thông báo</span><span class="group-meta">'+esc(summary)+'</span><span class="group-meta">'+(isOn(single.enabled)?'Đang dùng':'Đã tắt')+'</span><span class="group-actions"><button class="btn small delete-single" data-index="'+si+'">Xóa</button></span></div><div class="rule-card-body">'
+    const notifyOpen=rulerNotifyExpanded.has(si);
+    cards+='<div class="rule-card"><div class="rule-card-head" data-nexpand="'+si+'"><span class="chev'+(notifyOpen?' open':'')+'">▶</span><b>'+esc(title)+'</b><span class="badge warn-badge">Chỉ thông báo</span><span class="group-meta">'+esc(summary)+'</span><span class="group-meta">'+(isOn(single.enabled)?'Đang dùng':'Đã tắt')+'</span><span class="group-actions"><button class="btn small delete-single" data-index="'+si+'">Xóa</button></span></div>'
+      +(notifyOpen?'<div class="rule-card-body">'
       +'<label class="f"><span>Đối tượng</span>'+field('entity',single.entity,'ruler_auto',si)+'</label>'
       +'<label class="f grow"><span>Tên chiến dịch chứa</span>'+field('name_contains',single.name_contains,'ruler_auto',si)+'</label>'
       +'<label class="f"><span>Chỉ số</span>'+field('metric',single.metric,'ruler_auto',si)+'</label>'
@@ -398,7 +401,7 @@ function drawRulerAuto(){
       +'<label class="f"><span>Số đơn</span>'+field('conversions_threshold',single.conversions_threshold,'ruler_auto',si)+'</label>'
       +'<label class="f chk"><span>Đang dùng</span>'+field('enabled',single.enabled,'ruler_auto',si)+'</label>'
       +'<label class="f grow"><span>Ghi chú</span>'+field('note',single.note,'ruler_auto',si)+'</label>'
-      +'</div></div>';
+      +'</div>':'')+'</div>';
   });
   const stats='<div class="stats-strip"><b>'+state.groups.length+'</b> quy tắc tắt/bật · <b>'+state.singles.length+'</b> quy tắc thông báo · <b>'+state.groups.filter(group=>group.enabled).length+'</b> đang dùng'+(warnings.length?' · <span class="warn">⚠ '+warnings.length+' cảnh báo</span>':'')+'</div>';
   const chipLabels={all:'Tất cả',on:'Đang dùng',off:'Đã tắt',notify:'Chỉ thông báo'};
@@ -410,9 +413,10 @@ function drawRulerAuto(){
   window.scrollTo(0,scrollY);
   document.querySelectorAll('.chip[data-filter]').forEach(chip=>chip.onclick=()=>{rows=flushRulerState(state);rulerFilter=chip.dataset.filter;drawRulerAuto()});
   document.querySelectorAll('.chip[data-entity]').forEach(chip=>chip.onclick=()=>{rows=flushRulerState(state);rulerEntity=chip.dataset.entity;drawRulerAuto()});
-  el('expand-all').onclick=()=>{rows=flushRulerState(state);rulerExpanded.clear();drawRulerAuto()};
-  el('collapse-all').onclick=()=>{rows=flushRulerState(state);state.groups.forEach((group,index)=>rulerExpanded.add(index));drawRulerAuto()};
+  el('expand-all').onclick=()=>{rows=flushRulerState(state);state.groups.forEach((group,index)=>rulerExpanded.add(index));state.singles.forEach((single,index)=>rulerNotifyExpanded.add(index));drawRulerAuto()};
+  el('collapse-all').onclick=()=>{rows=flushRulerState(state);rulerExpanded.clear();rulerNotifyExpanded.clear();drawRulerAuto()};
   document.querySelectorAll('[data-rexpand]').forEach(head=>{head.onclick=event=>{if(event.target.closest('button'))return;rows=flushRulerState(state);const index=Number(head.dataset.rexpand);if(rulerExpanded.has(index))rulerExpanded.delete(index);else rulerExpanded.add(index);drawRulerAuto()}});
+  document.querySelectorAll('[data-nexpand]').forEach(head=>{head.onclick=event=>{if(event.target.closest('button'))return;rows=flushRulerState(state);const index=Number(head.dataset.nexpand);if(rulerNotifyExpanded.has(index))rulerNotifyExpanded.delete(index);else rulerNotifyExpanded.add(index);drawRulerAuto()}});
   document.querySelectorAll('[data-rule-group]').forEach(input=>input.onchange=()=>{const group=state.groups[Number(input.dataset.ruleGroup)];if(!group)return;const value=input.type==='checkbox'?input.checked:input.value;if(input.dataset.ruleKey==='enabled')group.enabled=value;else if(input.dataset.ruleSide==='common')group[input.dataset.ruleKey]=value;else{group[input.dataset.ruleSide]??=blankSide(input.dataset.ruleSide==='pause'?'pause':'enable');group[input.dataset.ruleSide][input.dataset.ruleKey]=value}});
   document.querySelectorAll('.delete-rule').forEach(button=>button.onclick=()=>{rows=flushRulerState(state);state.groups.splice(Number(button.dataset.index),1);rows=flattenRulerGroups(state);drawRulerAuto();toast('Đã xóa quy tắc, nhấn “Lưu thay đổi” để áp dụng')});
   document.querySelectorAll('.delete-single').forEach(button=>button.onclick=()=>{rows=flushRulerState(state);state.singles.splice(Number(button.dataset.index),1);rows=flattenRulerGroups(state);drawRulerAuto();toast('Đã xóa quy tắc thông báo, nhấn “Lưu thay đổi” để áp dụng')});
