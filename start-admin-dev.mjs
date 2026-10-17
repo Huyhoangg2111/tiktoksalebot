@@ -1,5 +1,5 @@
 /* Dev-only: chạy riêng Admin dashboard để xem trước giao diện local (không cần bot Telegram).
-   OTP sẽ in ra console. Dữ liệu demo được gieo vào runtime/dev_dashboard.db lần đầu chạy. */
+   Bỏ qua đăng nhập OTP (ADMIN_DEV_SKIP_AUTH=1, chỉ có ở script này). Dữ liệu demo được gieo vào runtime/dev_dashboard.db lần đầu chạy. */
 import { config } from 'dotenv';
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -11,6 +11,7 @@ const DB_PATH = resolve('./runtime/dev_dashboard.db');
 process.env.DATABASE_PATH = DB_PATH;
 process.env.ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || '1';
 process.env.ADMIN_WEB_PORT = process.env.ADMIN_WEB_PORT || '8080';
+process.env.ADMIN_DEV_SKIP_AUTH = '1'; // dev-only: dashboard không hỏi OTP
 
 const dbModule = await import('./dist/db/index.js');
 const adminModule = await import('./dist/admin/server.js');
@@ -20,6 +21,24 @@ const { startAdminServer } = adminModule;
 
 const seedDemoData = async () => {
   const db = dbModule.db;
+  // Rule demo "Cả hai (Campaign + Material)" — gieo cả khi DB đã có rule cũ.
+  const hasBoth = await db.get(`SELECT COUNT(*) as c FROM alert_action_rules WHERE note = 'Demo Cả hai'`);
+  if (Number(hasBoth?.c || 0) === 0) {
+    await db.run(`DELETE FROM alert_action_rules WHERE note = 'Demo Cả hai'`);
+    const bothRules = [
+      { threshold: 20, action: 'pause', name: 'Mặt nạ mắt demo' },
+      { threshold: 5, action: 'enable', name: 'Mặt nạ mắt demo' },
+      { threshold: 30, action: 'notify', name: 'Son kem demo' },
+    ];
+    for (const rule of bothRules) {
+      await db.run(`INSERT INTO alert_action_rules
+        (entity,trigger_kind,run_time,period,name_contains,metric,metric_operator,metric_threshold,
+         conversions_operator,conversions_threshold,action,is_active,note)
+        VALUES('both','scheduled','06:30','last_7_days',?,'spend','gt',?,'gt',0,?,1,'Demo Cả hai')`,
+        [rule.name, rule.threshold, rule.action]);
+    }
+    console.log('Đã gieo 3 rule demo "Cả hai" (TẮT >$20 · BẬT >$5 · THÔNG BÁO >$30)');
+  }
   await db.exec('CREATE TABLE IF NOT EXISTS admin_config_rows(id INTEGER PRIMARY KEY AUTOINCREMENT,section TEXT NOT NULL,data_json TEXT NOT NULL,position INTEGER NOT NULL DEFAULT 0,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)');
   const existing = await db.get('SELECT COUNT(*) as c FROM alert_action_rules');
   if (Number(existing?.c || 0) > 0) return;
