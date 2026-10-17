@@ -40,7 +40,7 @@ ensure_env_file() {
 }
 
 ensure_runtime_dirs() {
-  mkdir -p "${RUNTIME_DIR}/playwright-signer"
+  mkdir -p "${RUNTIME_DIR}"
 }
 
 ensure_curl() {

@@ -1,20 +1,18 @@
 # TikTok Sales Bot - Huong Dan Cai Dat Tren VPS Ubuntu Moi
 
-Tai lieu nay huong dan tu dau cho mot VPS Ubuntu trang moi tao, bo qua phan mua/tao VPS. Muc tieu la sau khi lam xong, bot Telegram va signer headless se chay cung nhau trong Docker tren VPS.
+Tai lieu nay huong dan tu dau cho mot VPS Ubuntu trang moi tao, bo qua phan mua/tao VPS. Muc tieu la sau khi lam xong, bot Telegram se chay trong Docker tren VPS.
 
 ## 1. Tong quan
 
 Mo hinh chay hien tai:
 
 - Bot Telegram chay trong container Docker
-- Playwright signer chay headless cung container
-- SQLite va session signer duoc luu o thu muc `runtime/`
+- SQLite cua bot duoc luu o thu muc `runtime/`
 - Chi can chay 1 lenh cai dat: `bash install-vps.sh`
 
 Khong can:
 
 - cai Node.js tren VPS
-- cai Chromium thu cong
 - mo giao dien desktop
 - mo port public cho bot
 
@@ -34,17 +32,11 @@ Can chuan bi san tren he thong ngoai:
 - Google Sheet cau hinh da share cho service account
 - Google Service Account email + private key
 - TikTok token trong Google Sheet tab `Token`
-- `ACCOUNT_BOT` trong Google Sheet tab `Token`
 
 Luu y:
 
 - Khong dat `TIKTOK_READ_ACCESS_TOKEN` va `TIKTOK_WRITE_ACCESS_TOKEN` trong `.env`
-- Hai token nay duoc doc tu Google Sheet tab `Token`
-- `ACCOUNT_BOT` trong Google Sheet phai dung format:
-
-```text
-email|password|totp_secret
-```
+- Hai token nay duoc doc tu Google Sheet tab `Token` (hoac nhap truc tiep trong dashboard)
 
 ## 3. Kiem tra noi dung `.env`
 
@@ -80,12 +72,7 @@ SALES_REVENUE_THRESHOLD=...
 
 DATABASE_PATH=./bot_data.db
 
-PW_SIGNER_PORT=8092
-PW_SIGNER_HEADLESS=true
-PW_SIGNER_ENTRY_URL=https://ads.tiktok.com/i18n/manage/campaign
-PW_SIGNER_STATE_PATH=artifacts/playwright-signer/session.json
-
-OMO_CAPTCHA_API_KEY=...
+DATA_RETENTION_DAYS=45
 ```
 
 ### 3.2. Bien can tap trung kiem tra truoc khi deploy
@@ -99,16 +86,11 @@ CONFIG_GOOGLE_SHEET_ID=...
 GOOGLE_SERVICE_ACCOUNT_EMAIL=...
 GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
 TARGET_MKT_CODE=...
-PW_SIGNER_HEADLESS=true
-PW_SIGNER_PORT=8092
-PW_SIGNER_ENTRY_URL=https://ads.tiktok.com/i18n/manage/campaign
-OMO_CAPTCHA_API_KEY=...
 ```
 
 Ghi chu:
 
-- `OMO_CAPTCHA_API_KEY` la khuyen nghi manh, khong phai luc nao cung bat buoc
-- `PW_SIGNER_HEADLESS=true` la bat buoc thuc te cho VPS khong co giao dien
+- `DATA_RETENTION_DAYS` la tuy chon, mac dinh 45, cho phep 1-365. Bot tu don du lieu cu (lich canh bao, log thay doi/clone, audit log, OTP/session het han...) trong mot job hang ngay chay khoang 00:35 gio VN
 - `CONFIG_GOOGLE_SHEET_ID` la bien dang duoc code uu tien doc
 
 ### 3.3. Bien co trong `.env` nhung ban co the de nguyen
@@ -136,19 +118,16 @@ Ghi chu:
 Neu ban thac mac vi sao huong dan cu co nhac cac bien nay, do la vi `docker-compose.yml` dang tu inject luc runtime:
 
 ```env
-PW_SIGNER_INTERNAL_ENABLED=true
-PW_SIGNER_HOST=127.0.0.1
-PW_SIGNER_AUTO_LOGIN_ON_STARTUP=true
-PW_SIGNER_CHROMIUM_ARGS=--disable-dev-shm-usage,--no-zygote
 DATABASE_PATH=/app/runtime/bot_data.db
-PW_SIGNER_STATE_PATH=/app/runtime/playwright-signer/session.json
+ADMIN_WEB_PORT=8080
+HTTP_TIMEOUT_MS=30000
+HTTP_MAX_RETRIES=2
 ```
 
 Nghia la:
 
 - ban khong can buoc phai them cac bien nay vao `.env`
 - `DATABASE_PATH` trong `.env` local se bi Docker override bang duong dan trong container
-- `PW_SIGNER_STATE_PATH` trong `.env` local cung se bi Docker override bang duong dan trong `runtime/`
 
 ## 4. Kiem tra Google Sheet truoc khi deploy
 
@@ -161,7 +140,6 @@ Can co cac dong:
 ```text
 TIKTOK_READ_ACCESS_TOKEN | <read_token>
 TIKTOK_WRITE_ACCESS_TOKEN | <write_token>
-ACCOUNT_BOT | email|password|totp_secret
 ```
 
 ### Tab `Permissions`
@@ -331,7 +309,7 @@ Xem log realtime:
 sudo docker compose logs -f
 ```
 
-Neu on, ban se thay log khoi dong bot, scheduler, va signer.
+Neu on, ban se thay log khoi dong bot va scheduler.
 
 Sau do vao Telegram thu:
 
@@ -346,12 +324,10 @@ Sau do vao Telegram thu:
 Sau khi deploy, cac file quan trong duoc giu lai tai:
 
 - `runtime/bot_data.db`
-- `runtime/playwright-signer/session.json`
 
 Y nghia:
 
 - `bot_data.db`: du lieu SQLite cua bot
-- `session.json`: session login TikTok de restart VPS/container khong phai login lai tu dau
 
 Khong nen xoa thu muc `runtime/` neu bot dang chay on dinh.
 
@@ -409,41 +385,26 @@ Xu ly:
 - share sheet cho dung email do
 - dam bao private key giu nguyen format `\n`
 
-### Loi: signer khong login duoc TikTok
+### Loi: duplicate qua official TikTok API khong chay
 
 Nguyen nhan thuong gap:
 
-- `ACCOUNT_BOT` chua co trong tab `Token`
-- format `ACCOUNT_BOT` sai
-- TOTP secret sai
-- TikTok yeu cau captcha va chua co `OMO_CAPTCHA_API_KEY`
+- thieu `TIKTOK_WRITE_ACCESS_TOKEN` hoac token ghi het han/sai quyen
+- campaign ID khong thuoc Business Center dang cau hinh
+- campaign hoac material khong dung trang thai de nhan ban
 
 Xu ly:
 
-- kiem tra lai dong `ACCOUNT_BOT`
-- kiem tra lai TOTP secret
-- neu can captcha solver thi cau hinh `OMO_CAPTCHA_API_KEY`
-- xem log bang `sudo docker compose logs -f`
-
-### Loi: duplicate Smart+ khong chay
-
-Nguyen nhan:
-
-- signer chua dang nhap thanh cong
-- session het han
-
-Xu ly:
-
-- xem log signer
-- restart container
-- neu can thi dang nhap lai thong qua `ACCOUNT_BOT`
+- kiem tra lai token ghi trong Google Sheet tab `Token` (hoac dashboard)
+- kiem tra campaign ID dung chinh xac va gan voi Business Center dung
+- xem log bang `sudo docker compose logs -f`, luong duplicate se dung o loi dau tien va bao lai cac id da tao duoc
 
 ## 14. Ghi chu van hanh
 
 - Bot nay khong can mo cong web public de Telegram goi webhook
 - Bot dang chay theo polling, chi can VPS co internet outbound
-- Lan build dau tien co the mat vai phut vi Docker can tai Chromium qua Playwright
 - Sau khi VPS reboot, container se tu len lai theo `restart: unless-stopped`
+- Moi ngay khoang 00:35 gio VN, bot tu don du lieu cu hon `DATA_RETENTION_DAYS` ngay (mac dinh 45 ngay)
 
 ## 15. Checklist nhanh
 
@@ -452,9 +413,8 @@ Xu ly:
 3. Google Sheet da share cho service account
 4. Tab `Token` co `TIKTOK_READ_ACCESS_TOKEN`
 5. Tab `Token` co `TIKTOK_WRITE_ACCESS_TOKEN`
-6. Tab `Token` co `ACCOUNT_BOT`
-7. Chay `bash install-vps.sh`
-8. Xem `sudo docker compose logs -f`
-9. Thu lenh Telegram `/start`
+6. Chay `bash install-vps.sh`
+7. Xem `sudo docker compose logs -f`
+8. Thu lenh Telegram `/start`
 
-Neu ban lam dung 9 buoc tren, bot se co the chay tren VPS Ubuntu moi tao ma khong can giao dien desktop.
+Neu ban lam dung 8 buoc tren, bot se co the chay tren VPS Ubuntu moi tao ma khong can giao dien desktop.

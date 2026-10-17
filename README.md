@@ -7,7 +7,8 @@ A Telegram bot for aggregating and reporting TikTok advertising campaign informa
 - **TikTok Advertising Integration**: Fetch campaign data, performance metrics, and account balances
 - **Sales Data Tracking**: Integrate with Google Sheets to track sales data
 - **Automated Alerts**: Monitor key metrics and receive alerts when thresholds are exceeded
-- **Campaign Management**: Duplicate and toggle campaign statuses directly from Telegram
+- **Automated Rules (Quy tắc)**: Configure rules in the dashboard tab "Quy tắc" — run continuously or on a schedule (HH:mm), over today/yesterday/month-to-date/last N days, applied to campaigns or materials, with actions TẮT (pause), BẬT (enable), or THÔNG BÁO (notify)
+- **Campaign Management**: Duplicate (official TikTok API, with Smart+ copy using the copy API and a clone-by-recreate fallback) and toggle campaign statuses directly from Telegram
 - **Periodic Updates**: Automatic data synchronization every 5 minutes
 - **Multi-Language Support**: Vietnamese language interface
 
@@ -53,6 +54,11 @@ CTR_THRESHOLD=2 # Click Through Rate threshold in percentage
 
 # Database
 DATABASE_PATH=./bot_data.db
+
+# Data retention (optional, default 45, allowed 1-365)
+# Data older than this many days (alert history, change/clone logs, audit log, ...)
+# is cleaned up daily around 00:35 Vietnam time; latest 50 config snapshots per section are kept.
+DATA_RETENTION_DAYS=45
 ```
 
 ## Installation
@@ -94,30 +100,7 @@ npm start
 
 ### VPS / Docker Mode
 
-For Ubuntu VPS or Docker without GUI, run the signer in headless mode and embed it into the main bot process:
-
-```env
-PW_SIGNER_INTERNAL_ENABLED=true
-PW_SIGNER_HEADLESS=true
-PW_SIGNER_HOST=127.0.0.1
-PW_SIGNER_PORT=8092
-PW_SIGNER_AUTO_LOGIN_ON_STARTUP=true
-PW_SIGNER_STATE_PATH=artifacts/playwright-signer/session.json
-```
-
-Optional tuning for containers:
-
-```env
-PW_SIGNER_CHROMIUM_ARGS=--disable-dev-shm-usage,--no-zygote
-```
-
-Notes:
-
-- If `PW_SIGNER_HEADLESS=false` on Linux without `DISPLAY`, the signer now automatically falls back to headless mode.
-- `PW_SIGNER_INTERNAL_ENABLED=true` makes `npm start` boot both the Telegram bot and the Playwright signer in one Node.js process.
-- The included `Dockerfile` installs Chromium through Playwright and is suitable for headless VPS deployments.
-
-One-command install on Ubuntu VPS after uploading the repo and `.env`:
+For Ubuntu VPS or Docker without GUI, use the one-command install script after uploading the repo and `.env`:
 
 ```bash
 bash install-vps.sh
@@ -127,9 +110,9 @@ The script will:
 
 - install Docker if missing
 - install Docker Compose plugin if missing
-- build the image
+- build the image (no browser download involved, so builds are fast)
 - start the bot in background with restart policy `unless-stopped`
-- persist SQLite/session data in `./runtime`
+- persist SQLite data in `./runtime`
 
 ## Available Commands
 
@@ -141,6 +124,7 @@ After starting the bot, you can interact with it using these commands:
 - `/sales` - View sales data
 - `/xcamp <campaign_id> [số lượng] [ngân sách] [giá thầu]` - Xem trước rồi xác nhận mới nhân bản. Tên bản sao giữ quy tắc `<tên> - API`, không thêm `COPIED_`. Sau khi tạo xong, campaign, nhóm quảng cáo và quảng cáo được bật. Tối đa 3 bản khi `campaign_clone_log` còn trống, sau đó tối đa 10. Dừng ở lỗi đầu tiên và liệt kê id đã tạo cùng id tạo dở.
 - `/duplicate` - Cùng luồng với `/xcamp`
+- `/materialruler` - Chạy ngay toàn bộ quy tắc đã cấu hình trong tab `Quy tắc` của dashboard (luồng "Liên tục" vẫn chạy định kỳ riêng; lệnh này chạy thử ngay không chờ tới giờ hẹn)
 - `/budget <campaign_id> <số tiền> [ngày|trọn|dynamic]` - Đổi ngân sách sau khi xác nhận (admin)
 - `/bid <campaign_id> <giá thầu>` - Đổi giá thầu sau khi xác nhận (admin)
 - `/on <campaign_id>` và `/off <campaign_id>` - Bật hoặc tắt campaign (admin)
