@@ -360,12 +360,6 @@ export interface TikTokTokenConfig {
   writeAccessToken?: string;
 }
 
-export interface AccountBotCredentials {
-  email: string;
-  password: string;
-  totpSecret: string;
-}
-
 function parseAdvertiserPermissionRows(rows: any[][], options: MktScopeOptions = {}): AdvertiserPermission[] {
   const targetMktCode = options.targetMktCode?.trim();
 
@@ -383,50 +377,6 @@ function parseAdvertiserPermissionRows(rows: any[][], options: MktScopeOptions =
       permission.advertiserId &&
       (!targetMktCode || normalizeKey(permission.mktCode) === normalizeKey(targetMktCode))
     );
-}
-
-function parseTokenRows(rows: any[][]): TikTokTokenConfig {
-  const values = new Map<string, string>();
-
-  for (const row of rows) {
-    const key = normalizeKey(row[0]);
-    const value = String(row[1] || '').trim();
-
-    if (!key || !value) {
-      continue;
-    }
-
-    values.set(key, value);
-  }
-
-  return {
-    readAccessToken: values.get('TIKTOK_READ_ACCESS_TOKEN'),
-    writeAccessToken: values.get('TIKTOK_WRITE_ACCESS_TOKEN'),
-  };
-}
-
-function parseAccountBotRow(rows: any[][]): AccountBotCredentials | undefined {
-  for (const row of rows) {
-    const key = normalizeKey(row[0]);
-    if (key !== 'ACCOUNT_BOT') continue;
-
-    const rawValue = String(row[1] || '').trim();
-    if (!rawValue) return undefined;
-
-    const parts = rawValue.split('|');
-    if (parts.length < 3) {
-      console.warn('ACCOUNT_BOT format khong dung, can: email|password|totp_secret');
-      return undefined;
-    }
-
-    return {
-      email: parts[0].trim(),
-      password: parts[1].trim(),
-      totpSecret: parts[2].trim(),
-    };
-  }
-
-  return undefined;
 }
 
 function normalizeAlertEntity(value: unknown): AlertEntity | undefined {
@@ -962,28 +912,6 @@ export async function getTikTokTokenConfig(): Promise<TikTokTokenConfig> {
     readAccessToken: process.env.TIKTOK_READ_ACCESS_TOKEN?.trim(),
     writeAccessToken: process.env.TIKTOK_WRITE_ACCESS_TOKEN?.trim(),
   };
-}
-
-/**
- * Get ACCOUNT_BOT credentials from the "Token" tab.
- * Format in sheet: ACCOUNT_BOT | email|password|totp_secret
- */
-export async function getAccountBotCredentials(): Promise<AccountBotCredentials | undefined> {
-  const local = await db.get<{ data_json: string }>(
-    'SELECT data_json FROM admin_config_rows WHERE section = ? ORDER BY position, id LIMIT 1',
-    ['signer']
-  ).catch(() => undefined);
-  if (local?.data_json) {
-    const value = JSON.parse(local.data_json);
-    const email = String(value.email || '').trim();
-    const password = String(value.password || '').trim();
-    const totpSecret = String(value.totp_secret || '').trim();
-    if (email && password && totpSecret) return { email, password, totpSecret };
-  }
-  const email = String(process.env.TIKTOK_ACCOUNT_EMAIL || '').trim();
-  const password = String(process.env.TIKTOK_ACCOUNT_PASSWORD || '').trim();
-  const totpSecret = String(process.env.TIKTOK_ACCOUNT_TOTP_SECRET || '').trim();
-  return email && password && totpSecret ? { email, password, totpSecret } : undefined;
 }
 
 const ALERTS_SHEET_NAME = 'Alerts';

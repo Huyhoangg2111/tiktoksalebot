@@ -5,23 +5,8 @@ import {
   assertCopyQuantity,
   buildPausedShellBody,
   formatCopyLoop,
-  isSignerFallbackEnabled,
   runCopyLoop,
 } from './duplicate-safety.js';
-
-test('signer fallback is off unless explicitly enabled', () => {
-  const previous = process.env.SMARTPLUS_SIGNER_FALLBACK;
-  delete process.env.SMARTPLUS_SIGNER_FALLBACK;
-  assert.equal(isSignerFallbackEnabled(), false);
-  process.env.SMARTPLUS_SIGNER_FALLBACK = '0';
-  assert.equal(isSignerFallbackEnabled(), false);
-  process.env.SMARTPLUS_SIGNER_FALLBACK = '1';
-  assert.equal(isSignerFallbackEnabled(), true);
-  delete process.env.SMARTPLUS_SIGNER_FALLBACK;
-  assert.equal(isSignerFallbackEnabled(true), true);
-  if (previous === undefined) delete process.env.SMARTPLUS_SIGNER_FALLBACK;
-  else process.env.SMARTPLUS_SIGNER_FALLBACK = previous;
-});
 
 test('copy quantity stays at 3 until a logged success, then 10', () => {
   assert.equal(assertCopyQuantity(3, 0), 3);

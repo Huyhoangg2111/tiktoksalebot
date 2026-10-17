@@ -15,7 +15,6 @@ export async function duplicateCampaign(
     newName?: string;
     overrideBudget?: number;
     overrideBid?: number;
-    forceSignerFallback?: boolean;
     actor?: string;
   }
 ): Promise<TikTokDuplicateCampaignResult> {

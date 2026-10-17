@@ -9,14 +9,7 @@ services:
       - .env
     environment:
       NODE_ENV: "production"
-      PW_SIGNER_INTERNAL_ENABLED: "true"
-      PW_SIGNER_HEADLESS: "${PW_SIGNER_HEADLESS:-true}"
-      PW_SIGNER_HOST: "127.0.0.1"
-      PW_SIGNER_PORT: "${PW_SIGNER_PORT:-8092}"
-      PW_SIGNER_AUTO_LOGIN_ON_STARTUP: "${PW_SIGNER_AUTO_LOGIN_ON_STARTUP:-true}"
-      PW_SIGNER_CHROMIUM_ARGS: "${PW_SIGNER_CHROMIUM_ARGS:---disable-dev-shm-usage,--no-zygote}"
       DATABASE_PATH: "/app/runtime/bot_data.db"
-      PW_SIGNER_STATE_PATH: "/app/runtime/playwright-signer/session.json"
       HTTP_TIMEOUT_MS: "${HTTP_TIMEOUT_MS:-30000}"
       HTTP_MAX_RETRIES: "${HTTP_MAX_RETRIES:-2}"
       ADMIN_WEB_PORT: "8080"
@@ -29,7 +22,6 @@ services:
       - "127.0.0.1:${ADMIN_WEB_PORT:-8080}:8080"
     volumes:
       - ./runtime:/app/runtime
-    shm_size: 1gb
     logging:
       driver: json-file
       options:

@@ -14,7 +14,6 @@ import { setupCampaignDetailHandlers } from './bot/campaign-detail.js';
 import { setupCampaignEditHandlers } from './bot/campaign-edit-handlers.js';
 import { initializeAlertRules } from './alerts/index.js';
 import { startScheduler } from './scheduler/index.js';
-import { startServer, type SignerServerRuntime } from './playwright-signer/server.js';
 import { configureHttpResilience } from './runtime/http-resilience.js';
 import { startAdminServer } from './admin/server.js';
 
@@ -22,7 +21,6 @@ import { startAdminServer } from './admin/server.js';
 config();
 
 let bot: Telegraf | undefined;
-let signerRuntime: SignerServerRuntime | undefined;
 let fatalExitScheduled = false;
 
 function getRequiredEnv(name: string): string {
@@ -33,14 +31,6 @@ function getRequiredEnv(name: string): string {
   }
 
   return value;
-}
-
-function isEmbeddedSignerEnabled(): boolean {
-  const rawValue = String(process.env.PW_SIGNER_INTERNAL_ENABLED || '')
-    .trim()
-    .toLowerCase();
-
-  return ['true', '1', 'yes', 'on'].includes(rawValue);
 }
 
 function scheduleFatalExit(source: string, error: unknown): void {
@@ -58,13 +48,8 @@ async function main() {
   // Configure a finite timeout for all Axios requests before any scheduled work starts.
   configureHttpResilience();
 
-  // SQLite là nguồn cấu hình duy nhất; phải kết nối trước khi signer đọc tài khoản TikTok.
+  // SQLite là nguồn cấu hình duy nhất; phải kết nối trước khi đọc cấu hình TikTok.
   await connectDB();
-
-  if (isEmbeddedSignerEnabled()) {
-    signerRuntime = await startServer({ installSignalHandlers: false });
-    console.log(`Embedded Playwright signer started at ${signerRuntime.baseUrl}`);
-  }
 
   await initializeAlertRules();
 
@@ -130,14 +115,6 @@ async function shutdown(signal: NodeJS.Signals) {
     bot?.stop(signal);
   } catch (e) {
     console.error('Error stopping bot:', e);
-  }
-
-  if (signerRuntime) {
-    try {
-      await signerRuntime.close();
-    } catch (e) {
-      console.error('Error closing signer:', e);
-    }
   }
 
   process.exit(0);

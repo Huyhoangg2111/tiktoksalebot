@@ -164,20 +164,6 @@ interface TikTokSpentAdOptions {
 
 // Base API configuration
 const TIKTOK_API_BASE_URL = 'https://business-api.tiktok.com/open_api/v1.3';
-const TIKTOK_WEB_SIGNER_DEFAULT_URL = 'http://127.0.0.1:8092';
-const TIKTOK_WEB_SIGNER_DEFAULT_TIMEOUT_MS = 30_000;
-const TIKTOK_WEB_RISK_INFO = {
-  cookie_enabled: true,
-  screen_width: 2560,
-  screen_height: 1080,
-  browser_language: 'vi',
-  browser_platform: 'Win32',
-  browser_name: 'Mozilla',
-  browser_version:
-    '5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
-  browser_online: true,
-  timezone_name: 'Asia/Saigon',
-};
 export type TikTokCampaignOperationStatus = 'ENABLE' | 'DISABLE';
 
 export interface TikTokCampaignStatusRef {
@@ -289,79 +275,6 @@ function normalizeBaseUrl(value: string): string {
 function parsePositiveEnvNumber(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function getTikTokWebSignerConfig() {
-  return {
-    baseUrl: normalizeBaseUrl(
-      process.env.SMARTPLUS_SIGNER_URL || process.env.PW_SIGNER_URL || TIKTOK_WEB_SIGNER_DEFAULT_URL
-    ),
-    timeoutMs: parsePositiveEnvNumber(
-      process.env.SMARTPLUS_SIGNER_TIMEOUT_MS || process.env.PW_SIGNER_TIMEOUT_MS,
-      TIKTOK_WEB_SIGNER_DEFAULT_TIMEOUT_MS
-    ),
-  };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function parseJsonLikeString(value: string): unknown | undefined {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return undefined;
-  }
-}
-
-function parseSignedResponseData(value: unknown): unknown {
-  if (typeof value !== 'string') return value;
-  return parseJsonLikeString(value) ?? value;
-}
-
-function getSignedResponseData(response: unknown): any {
-  const root = isRecord(response) ? response : {};
-  const axiosData = isRecord(root.data) ? root.data : {};
-  const signerData = isRecord(axiosData.data) ? axiosData.data : axiosData;
-
-  if ('responseData' in signerData) {
-    return parseSignedResponseData(signerData.responseData);
-  }
-
-  if (isRecord(signerData.response) && 'data' in signerData.response) {
-    return parseSignedResponseData(signerData.response.data);
-  }
-
-  if ('response' in signerData) {
-    return parseSignedResponseData(signerData.response);
-  }
-
-  return undefined;
-}
-
-function getSignedResponseStatus(response: unknown): number | undefined {
-  const root = isRecord(response) ? response : {};
-  const axiosData = isRecord(root.data) ? root.data : {};
-  const signerData = isRecord(axiosData.data) ? axiosData.data : axiosData;
-  const status = Number(signerData.responseStatus);
-  return Number.isFinite(status) ? status : undefined;
-}
-
-function buildMultipartFormData(fields: Record<string, string>): { body: string; contentType: string } {
-  const boundary = `----WebKitFormBoundary${Math.random().toString(36).slice(2, 18)}`;
-  const body = Object.entries(fields)
-    .map(([name, value]) => (
-      `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="${name}"\r\n\r\n` +
-      `${value}\r\n`
-    ))
-    .join('') + `--${boundary}--\r\n`;
-
-  return {
-    body,
-    contentType: `multipart/form-data; boundary=${boundary}`,
-  };
 }
 
 function isSmartPlusCreativeStatusError(message: string): boolean {
@@ -1942,7 +1855,6 @@ export async function duplicateCampaign(
     newName?: string;
     overrideBudget?: number;
     overrideBid?: number;
-    forceSignerFallback?: boolean;
     actor?: string;
   }
 ): Promise<TikTokDuplicateCampaignResult | null> {
@@ -2245,77 +2157,6 @@ export async function getCampaignAdsStatuses(
   }
 
   return results;
-}
-
-async function getTikTokWebSignerTokens(baseUrl: string, timeoutMs: number): Promise<{ csrfToken: string }> {
-  const res = await axios.get(`${baseUrl}/tokens`, { timeout: timeoutMs });
-  const snapshot = res.data?.tokens || {};
-  const csrfToken = String(snapshot.lastSignedHeaders?.['x-csrftoken'] || snapshot.xCsrfToken || '');
-  return { csrfToken };
-}
-
-async function setCampaignAdsStatusViaAdsManager(
-  advertiserId: string,
-  campaignId: string,
-  adIds: string[],
-  operationStatus: TikTokCampaignOperationStatus
-): Promise<TikTokAdStatusUpdateResult> {
-  const cfg = getTikTokWebSignerConfig();
-  const { csrfToken } = await getTikTokWebSignerTokens(cfg.baseUrl, cfg.timeoutMs);
-  const operation = operationStatus === 'ENABLE' ? 'enable' : 'disable';
-  const url = `https://ads.tiktok.com/api/v2/i18n/overture/creative/update_status/?aadvid=${encodeURIComponent(advertiserId)}&req_src=bidding`;
-  const adsManagerUrl = `https://ads.tiktok.com/i18n/manage/campaign?aadvid=${encodeURIComponent(advertiserId)}`;
-  const formData = {
-    creative_list: JSON.stringify(adIds),
-    aco_creative_list: '[]',
-    operation,
-    ad_channel: '1',
-    risk_info: JSON.stringify(TIKTOK_WEB_RISK_INFO),
-  };
-
-  const headers: Record<string, string> = {
-    accept: 'application/json, text/plain, */*',
-    'accept-language': 'vi,en-US;q=0.9,en;q=0.8',
-    'app-name': '@tt4b-vmok/campaign-list',
-    'trace-log-adv-id': advertiserId,
-  };
-
-  if (csrfToken) {
-    headers['x-csrftoken'] = csrfToken;
-  }
-
-  const response = await axios.post(
-    `${cfg.baseUrl}/sign-request`,
-    {
-      method: 'POST',
-      url,
-      headers,
-      formData,
-      referrer: adsManagerUrl,
-      prepareUrl: adsManagerUrl,
-      timeoutMs: cfg.timeoutMs,
-    },
-    { timeout: cfg.timeoutMs + 5000 }
-  );
-
-  const responseData = getSignedResponseData(response);
-  const responseStatus = getSignedResponseStatus(response);
-
-  if (responseStatus && (responseStatus < 200 || responseStatus >= 300)) {
-    throw new Error(`Ads Manager trả HTTP ${responseStatus}`);
-  }
-
-  if (!responseData || responseData.code !== 0 || responseData.data?.status !== 'success') {
-    console.error('[TikTok Ads Manager fallback] update_status failed:', responseData);
-    throw new Error(getTikTokApiErrorMessage(responseData, 'Ads Manager không cập nhật được trạng thái quảng cáo'));
-  }
-
-  return {
-    advertiserId,
-    campaignId,
-    adIds,
-    status: normalizeCampaignStatus(operationStatus),
-  };
 }
 
 async function setCampaignAdsStatusViaOpenApiAds(

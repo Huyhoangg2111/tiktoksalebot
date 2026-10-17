@@ -1,6 +1,6 @@
 import { buildDuplicateCampaignName } from './naming.js';
 import { writeCampaignAudit } from './change-log.js';
-import { buildPausedShellBody, isSignerFallbackEnabled, PartialDuplicateError } from './duplicate-safety.js';
+import { buildPausedShellBody, PartialDuplicateError } from './duplicate-safety.js';
 import {
   classifyCampaign,
   commitBidChange,
@@ -20,8 +20,6 @@ export interface OfficialDuplicateOptions {
   newName?: string;
   overrideBudget?: number;
   overrideBid?: number;
-  /** Skip the official recreate and use the Playwright signer. Upgraded Smart+ only. */
-  forceSignerFallback?: boolean;
   actor?: string;
 }
 
@@ -143,35 +141,26 @@ async function previewSmartPlus(
       actor: options.actor,
     });
     const unsupported = dry.plan.unsupported.length > 0;
-    const signer = unsupported && isSignerFallbackEnabled(options.forceSignerFallback);
     const blockers = dry.plan.errors;
     return {
       ...base,
       kind: unsupported ? 'unsupported_smart_plus' : 'smart_plus',
-      method: signer
-        ? 'FALLBACK: Playwright signer (ngoài phạm vi recreate)'
-        : 'GET /smart_plus/*/get/ rồi POST /smart_plus/campaign|adgroup|ad/create/',
-      summary: clip(formatOperatorSummary(dry.plan, { willEnable: blockers.length === 0 && !signer })),
-      blockers: signer ? [] : blockers.map(humanizeBlocker),
-      warnings: [
-        ...(signer ? ['Loại này không tạo lại được bằng API. Xác nhận sẽ dùng trình duyệt.'] : []),
-        ...(!signer && unsupported ? ['Signer tắt. Đặt SMARTPLUS_SIGNER_FALLBACK=1 nếu muốn dùng trình duyệt.'] : []),
-      ],
-      canConfirm: signer || blockers.length === 0,
+      method: 'GET /smart_plus/*/get/ rồi POST /smart_plus/campaign|adgroup|ad/create/',
+      summary: clip(formatOperatorSummary(dry.plan, { willEnable: blockers.length === 0 })),
+      blockers: blockers.map(humanizeBlocker),
+      warnings: [],
+      canConfirm: blockers.length === 0,
     };
   } catch (error) {
     if (error instanceof SafetyError) {
-      const signer = isSignerFallbackEnabled(options.forceSignerFallback);
       return {
         ...base,
         kind: 'unsupported_smart_plus',
-        method: signer ? 'FALLBACK: Playwright signer (ngoài phạm vi recreate)' : 'Bị chặn — ngoài phạm vi recreate',
+        method: 'Bị chặn — ngoài phạm vi recreate',
         summary: error.message,
-        blockers: signer ? [] : [error.message],
-        warnings: signer
-          ? [`FALLBACK: Playwright signer. ${PAUSED_NOTE}`]
-          : ['Signer tắt mặc định. Chỉ bật khi SMARTPLUS_SIGNER_FALLBACK=1. Bot không dùng signer sau khi đã có campaign id.'],
-        canConfirm: signer,
+        blockers: [error.message],
+        warnings: [],
+        canConfirm: false,
       };
     }
     throw error;
@@ -208,10 +197,6 @@ async function executeSmartPlus(
   options: OfficialDuplicateOptions,
   actor: string
 ): Promise<OfficialDuplicateResult> {
-  if (options.forceSignerFallback) {
-    return runSignerFallback(advertiserId, campaignId, campaignName, options, actor, 'forceSignerFallback');
-  }
-
   const input = copyInput(advertiserId, campaignId, campaignName, options.overrideBudget);
   const recreateOptions = {
     dryRun: false as const,
@@ -264,8 +249,8 @@ async function executeSmartPlus(
       ok: false,
       detail: message,
     });
-    if (!partialId && error instanceof SafetyError && isSignerFallbackEnabled(options.forceSignerFallback)) {
-      return runSignerFallback(advertiserId, campaignId, campaignName, options, actor, message);
+    if (!partialId && error instanceof SafetyError) {
+      console.warn(`[duplicate] SafetyError ngoài phạm vi recreate, campaign=${campaignId}: ${message}`);
     }
     throw error;
   }
@@ -309,46 +294,6 @@ async function applyBidAfterCreate(campaignId: string, bid: number, actor: strin
   } catch (error) {
     return [`Đã tạo campaign nhưng chưa đổi được giá thầu: ${describeMoneyError(error)}. Dùng /bid ${campaignId} ${bid}`];
   }
-}
-
-async function runSignerFallback(
-  advertiserId: string,
-  campaignId: string,
-  campaignName: string,
-  options: OfficialDuplicateOptions,
-  actor: string,
-  reason: string
-): Promise<OfficialDuplicateResult> {
-  const warning = `FALLBACK: Playwright signer. ${reason}`;
-  console.warn(`[duplicate] ${warning} campaign=${campaignId}`);
-  const { duplicateSmartPlusCampaign } = await import('./smartplus-duplicator.js');
-  const result = await duplicateSmartPlusCampaign(advertiserId, campaignId, {
-    newName: campaignName,
-    overrideBudget: options.overrideBudget,
-    overrideBid: options.overrideBid,
-  });
-  await writeCampaignAudit({
-    actor,
-    action: 'duplicate.smart_plus.signer_fallback',
-    advertiserId,
-    campaignId: result.campaignId,
-    before: { sourceCampaignId: campaignId },
-    after: { status: result.status, campaignId: result.campaignId, taskId: result.taskId },
-    ok: result.status === 'created' && !!result.campaignId,
-    detail: warning,
-  });
-  if (result.status === 'created' && result.campaignId) {
-    return {
-      campaignId: result.campaignId,
-      advertiserId: result.advertiserId,
-      campaignName: result.campaignName || campaignName,
-      overrideWarnings: [warning],
-    };
-  }
-  if (result.status === 'draft' && result.campaignId) {
-    throw new Error(`FALLBACK: Playwright signer đã tạo bản nháp ${result.campaignId}, chưa phải campaign chính thức. Task: ${result.taskId || 'không rõ'}.`);
-  }
-  throw new Error(`FALLBACK: Playwright signer chưa tạo xong campaign. Task: ${result.taskId || 'không rõ'}.`);
 }
 
 async function executeManualCopy(

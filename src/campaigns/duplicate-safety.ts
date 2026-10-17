@@ -1,5 +1,5 @@
 /**
- * Pure guards for duplication and the signer fallback.
+ * Pure guards for duplication.
  * Network code calls these so the rules can be tested without TikTok.
  */
 
@@ -32,12 +32,6 @@ export function assertCopyQuantity(quantity: number, successfulClones: number): 
     );
   }
   return quantity;
-}
-
-/** Signer stays off unless the operator passes an explicit flag or sets SMARTPLUS_SIGNER_FALLBACK=1. */
-export function isSignerFallbackEnabled(explicit = false): boolean {
-  if (explicit) return true;
-  return process.env.SMARTPLUS_SIGNER_FALLBACK === '1';
 }
 
 export interface CopyLoopOutcome<T> {
