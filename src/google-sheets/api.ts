@@ -310,7 +310,7 @@ export interface MktScopeOptions {
 }
 
 export type AlertComparisonOperator = 'gt' | 'lt' | 'eq' | 'gte' | 'lte' | 'between';
-export type AlertEntity = 'campaign' | 'ad';
+export type AlertEntity = 'campaign' | 'material';
 export type AlertMetric = 'cpa' | 'spend';
 export type AlertAction = 'pause' | 'enable' | 'notify';
 export type AlertCampaignStatus = 'active' | 'paused' | 'deleted';
@@ -389,8 +389,8 @@ function normalizeAlertEntity(value: unknown): AlertEntity | undefined {
     return 'campaign';
   }
 
-  if (['ad', 'ads', 'advertisement', 'advertisements'].includes(normalized)) {
-    return 'ad';
+  if (['material', 'materials', 'vật_tư', 'sp'].includes(normalized)) {
+    return 'material';
   }
 
   return undefined;

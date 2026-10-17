@@ -15,13 +15,7 @@ export const RUNTIME_SETTING_DEFAULTS = {
   sheetsConcurrency: 4,
   /** Concurrent TikTok advertiser report workers for /bc. */
   tiktokConcurrency: 5,
-  materialRulerRunTime: '00:05',
-  materialRulerPeriod: 'today',
-  /** Chế độ auto tắt/bật: 'material' = tác động material (bản hiện tại), 'campaign' = tác động campaign (bản đầu). */
-  autoActionMode: 'material',
 } as const;
-
-export type RuntimeTextSettingKey = 'material_ruler_run_time' | 'material_ruler_period' | 'auto_action_mode';
 
 export type RuntimeSettingKey =
   | 'level1_interval_minutes'
@@ -115,46 +109,6 @@ export async function setRuntimeSettingNumber(
   );
 }
 
-export async function getRuntimeSettingText(
-  key: RuntimeTextSettingKey,
-  fallback: string
-): Promise<string> {
-  await ensureSettingsTable();
-  const row = await db.get<BotSettingRow>('SELECT value FROM bot_settings WHERE key = ?', [key]);
-  return String(row?.value || '').trim() || fallback;
-}
-
-export async function setRuntimeSettingText(
-  key: RuntimeTextSettingKey,
-  value: string
-): Promise<void> {
-  const normalized = String(value || '').trim();
-  if (key === 'material_ruler_run_time' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(normalized)) {
-    throw new Error('Giờ chạy phải theo định dạng HH:mm, ví dụ 00:05 hoặc 06:30.');
-  }
-  if (key === 'material_ruler_period' && !/^(today|yesterday|month_to_date|last_([1-9]|[1-8]\d|90)_days|\d{4}-\d{2}-\d{2}\.\.\d{4}-\d{2}-\d{2})$/i.test(normalized)) {
-    throw new Error('Khoảng kiểm tra hợp lệ: today, yesterday, month_to_date, last_N_days (N=1–90), hoặc YYYY-MM-DD..YYYY-MM-DD.');
-  }
-  if (key === 'auto_action_mode' && !['material', 'campaign'].includes(normalized.toLocaleLowerCase('vi-VN'))) {
-    throw new Error('Chế độ auto chỉ nhận "material" hoặc "campaign".');
-  }
-  const stored = key === 'auto_action_mode' ? normalized.toLocaleLowerCase('vi-VN') : normalized;
-  await ensureSettingsTable();
-  await db.run(`INSERT INTO bot_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`, [key, stored]);
-}
-
-export type AutoActionMode = 'material' | 'campaign';
-
-export async function getAutoActionMode(): Promise<AutoActionMode> {
-  const value = await getRuntimeSettingText('auto_action_mode', RUNTIME_SETTING_DEFAULTS.autoActionMode);
-  return value.toLocaleLowerCase('vi-VN') === 'campaign' ? 'campaign' : 'material';
-}
-
-export async function setAutoActionMode(mode: AutoActionMode): Promise<void> {
-  await setRuntimeSettingText('auto_action_mode', mode);
-}
-
 export async function getRuntimeSettingsSnapshot() {
   const [
     level1IntervalMinutes,
@@ -166,9 +120,6 @@ export async function getRuntimeSettingsSnapshot() {
     level3CpAdsThreshold,
     sheetsConcurrency,
     tiktokConcurrency,
-    materialRulerRunTime,
-    materialRulerPeriod,
-    autoActionMode,
   ] = await Promise.all([
     getRuntimeSettingNumber('level1_interval_minutes', RUNTIME_SETTING_DEFAULTS.level1IntervalMinutes),
     getRuntimeSettingNumber('level2_interval_minutes', RUNTIME_SETTING_DEFAULTS.level2IntervalMinutes),
@@ -179,9 +130,6 @@ export async function getRuntimeSettingsSnapshot() {
     getRuntimeSettingNumber('level3_cp_ads_threshold', RUNTIME_SETTING_DEFAULTS.level3CpAdsThreshold),
     getRuntimeSettingNumber('sheets_concurrency', RUNTIME_SETTING_DEFAULTS.sheetsConcurrency),
     getRuntimeSettingNumber('tiktok_concurrency', RUNTIME_SETTING_DEFAULTS.tiktokConcurrency),
-    getRuntimeSettingText('material_ruler_run_time', RUNTIME_SETTING_DEFAULTS.materialRulerRunTime),
-    getRuntimeSettingText('material_ruler_period', RUNTIME_SETTING_DEFAULTS.materialRulerPeriod),
-    getAutoActionMode(),
   ]);
 
   return {
@@ -194,8 +142,5 @@ export async function getRuntimeSettingsSnapshot() {
     level3CpAdsThreshold,
     sheetsConcurrency,
     tiktokConcurrency,
-    materialRulerRunTime,
-    materialRulerPeriod,
-    autoActionMode,
   };
 }

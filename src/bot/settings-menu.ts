@@ -2,22 +2,15 @@ import { Markup, type Context, type Telegraf } from 'telegraf';
 import { initializeAlertRules } from '../alerts/index.js';
 import { getSchedulerHealthSnapshot, restartScheduler } from '../scheduler/index.js';
 import {
-  getAutoActionMode,
   getRuntimeSettingsSnapshot,
-  setAutoActionMode,
   setRuntimeSettingNumber,
-  setRuntimeSettingText,
   type RuntimeSettingKey,
-  type RuntimeTextSettingKey,
 } from '../settings/runtime.js';
 
-type AnySettingKey = RuntimeSettingKey | RuntimeTextSettingKey;
+type AnySettingKey = RuntimeSettingKey;
 const pendingSettingsByChat = new Map<number, AnySettingKey>();
 
 const SETTING_LABELS: Record<AnySettingKey, string> = {
-  material_ruler_run_time: 'Giờ chạy Ruler theo lịch',
-  material_ruler_period: 'Khoảng kiểm tra Ruler theo lịch',
-  auto_action_mode: 'Chế độ auto tắt/bật',
   level1_interval_minutes: 'Lịch cảnh báo cấp 1',
   level2_interval_minutes: 'Lịch cảnh báo cấp 2',
   level3_interval_minutes: 'Lịch cảnh báo cấp 3 (tháng)',
@@ -86,14 +79,8 @@ function formatSchedulerStatus(state: {
   return '⚪ ĐANG CHỜ';
 }
 
-function autoActionModeLabel(mode: string): string {
-  return mode === 'campaign' ? 'Campaign' : 'Material';
-}
-
-async function buildSettingsMessage(): Promise<string> {
-  const settings = await getRuntimeSettingsSnapshot();
-
-  return [
+function buildSettingsMessage(): Promise<string> {
+  return getRuntimeSettingsSnapshot().then(settings => [
     '<b>⚙️ CÀI ĐẶT BOT</b>',
     '',
     '<b>📋 Cảnh báo</b>',
@@ -102,10 +89,8 @@ async function buildSettingsMessage(): Promise<string> {
     `• Cấp 3 (tháng): mỗi <b>${formatSettingNumber(settings.level3IntervalMinutes)}</b> phút · %CP &gt; <b>${formatSettingNumber(settings.level3CpAdsThreshold)}%</b>`,
     `• Số dư: dưới <b>$${formatSettingNumber(settings.balanceThresholdUsd)}</b>`,
     '',
-    '<b>🎬 Ruler theo lịch</b>',
-    `• Chế độ auto: <b>${escapeHtml(autoActionModeLabel(settings.autoActionMode))}</b>`,
-    `• Giờ chạy: <b>${escapeHtml(settings.materialRulerRunTime)}</b> · múi giờ Việt Nam`,
-    `• Khoảng kiểm tra: <b>${escapeHtml(settings.materialRulerPeriod)}</b>`,
+    '<b>🎬 Quy tắc</b>',
+    '• Mỗi dòng quy tắc tự chọn áp dụng cho Campaign hoặc Material, kiểu Liên tục hoặc Theo giờ.',
     '• Chạy ngay: <code>/materialruler</code>',
     '',
     '<b>💱 Tỉ giá</b>',
@@ -116,15 +101,11 @@ async function buildSettingsMessage(): Promise<string> {
     `• Luồng TikTok API: <b>${formatSettingNumber(settings.tiktokConcurrency)}</b> (1–8)`,
     '',
     '<i>Chọn mục bên dưới → nhập số mới.</i>',
-  ].join('\n');
+  ].join('\n'));
 }
 
-async function buildSettingsKeyboard() {
-  const mode = await getAutoActionMode();
+function buildSettingsKeyboard() {
   return Markup.inlineKeyboard([
-    [
-      Markup.button.callback(`🔁 Chế độ auto: ${mode === 'campaign' ? 'Campaign' : 'Material'}`, 'settings:mode'),
-    ],
     [
       Markup.button.callback('⏱ Cấp 1', 'settings:set:level1_interval_minutes'),
       Markup.button.callback('⏱ Cấp 2', 'settings:set:level2_interval_minutes'),
@@ -136,10 +117,6 @@ async function buildSettingsKeyboard() {
     [
       Markup.button.callback('📈 %CP C2', 'settings:set:level2_cp_ads_threshold'),
       Markup.button.callback('📉 %CP C3', 'settings:set:level3_cp_ads_threshold'),
-    ],
-    [
-      Markup.button.callback('🎬 Giờ Material Ruler', 'settings:set:material_ruler_run_time'),
-      Markup.button.callback('📅 Khoảng kiểm tra', 'settings:set:material_ruler_period'),
     ],
     [Markup.button.callback('💱 Tỉ giá', 'settings:set:exchange_rate')],
     [
@@ -260,20 +237,6 @@ async function handlePendingSettingText(ctx: Context): Promise<boolean> {
     pendingSettingsByChat.delete(chatId);
     return false;
   }
-  if (pendingKey === 'material_ruler_run_time' || pendingKey === 'material_ruler_period' || pendingKey === 'auto_action_mode') {
-    try {
-      await setRuntimeSettingText(pendingKey, text);
-      pendingSettingsByChat.delete(chatId);
-      const suffix = pendingKey === 'material_ruler_run_time' ? ' (giờ Việt Nam)' : '';
-      await ctx.reply(`✅ Đã cập nhật ${SETTING_LABELS[pendingKey]}: <b>${escapeHtml(text.trim())}</b>${suffix}`, { parse_mode: 'HTML' });
-      await showSettings(ctx);
-    } catch (error) {
-      const messageText = error instanceof Error ? error.message : String(error);
-      await ctx.reply(`❌ Không lưu được cài đặt: ${escapeHtml(messageText)}`, { parse_mode: 'HTML' });
-    }
-    return true;
-  }
-
   const value = Number(text.replace(/,/g, '').trim());
 
   if (!Number.isFinite(value) || value <= 0) {
@@ -339,33 +302,13 @@ export function setupSettingsMenuHandlers(bot: Telegraf): void {
 
     pendingSettingsByChat.set(chatId, key);
     await ctx.answerCbQuery();
-    const rangeHint = key === 'material_ruler_run_time'
-      ? '\n<i>Nhập HH:mm theo giờ Việt Nam, ví dụ 00:05 hoặc 06:30.</i>'
-      : key === 'sheets_concurrency' || key === 'tiktok_concurrency'
-        ? '\n<i>Nhập số nguyên từ 1 đến 8.</i>\nThấp = nhẹ quota · Cao = /bc nhanh hơn.'
-        : '';
+    const rangeHint = key === 'sheets_concurrency' || key === 'tiktok_concurrency'
+      ? '\n<i>Nhập số nguyên từ 1 đến 8.</i>\nThấp = nhẹ quota · Cao = /bc nhanh hơn.'
+      : '';
     await ctx.reply(
       `Nhập giá trị mới cho <b>${escapeHtml(SETTING_LABELS[key])}</b>.${rangeHint}`,
       { parse_mode: 'HTML' }
     );
-  });
-
-  bot.action(/^settings:mode$/, async ctx => {
-    if (!isAdmin(ctx)) {
-      await ctx.answerCbQuery('Không có quyền thực hiện.');
-      return;
-    }
-
-    try {
-      const current = await getAutoActionMode();
-      const next = current === 'campaign' ? 'material' : 'campaign';
-      await setAutoActionMode(next);
-      await ctx.answerCbQuery(`Đã chuyển chế độ auto sang: ${next === 'campaign' ? 'Campaign' : 'Material'}`);
-      await showSettings(ctx, true);
-    } catch (error) {
-      const messageText = error instanceof Error ? error.message : String(error);
-      await ctx.answerCbQuery(`❌ Không chuyển được chế độ: ${messageText}`.slice(0, 190));
-    }
   });
 
   bot.action(/^settings:health$/, async ctx => {

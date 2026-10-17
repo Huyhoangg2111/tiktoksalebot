@@ -2,8 +2,7 @@ import {
   checkAndSendLevel2Alerts,
   checkAndSendLevel3Alerts,
 } from '../alerts/index.js';
-import { checkAndRunDailyMaterialRuler } from '../materials/daily-ruler.js';
-import { checkAndSendCampaignMaterialAlerts } from '../materials/rule-engine.js';
+import { checkAndSendCampaignMaterialAlerts, checkAndRunScheduledRules } from '../materials/rule-engine.js';
 import {
   getRuntimeSettingsSnapshot,
   RUNTIME_SETTING_DEFAULTS,
@@ -199,11 +198,11 @@ async function runScheduledCheck(): Promise<void> {
     'level1',
     'Check campaign notifications and material rules',
     async () => {
-      // Lỗi Ruler theo lịch không được làm trượt engine material trong cùng tick.
+      // Lỗi quy tắc theo lịch không được làm trượt engine material trong cùng tick.
       try {
-        await checkAndRunDailyMaterialRuler(botInstance!);
+        await checkAndRunScheduledRules(botInstance!);
       } catch (rulerError) {
-        console.error('[scheduler] daily material ruler failed:', rulerError);
+        console.error('[scheduler] scheduled rules failed:', rulerError);
       }
       await checkAndSendCampaignMaterialAlerts(botInstance!);
     }

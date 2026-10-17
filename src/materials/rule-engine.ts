@@ -7,7 +7,7 @@ import {
   type AlertMetric,
 } from '../google-sheets/api.js';
 import { getTodaySpentCampaigns, setCampaignStatus, type TikTokCampaignOperationStatus, type TikTokSpentCampaign } from '../tiktok/api.js';
-import { getAutoActionMode, getRuntimeSettingNumber, RUNTIME_SETTING_DEFAULTS } from '../settings/runtime.js';
+import { getRuntimeSettingNumber, RUNTIME_SETTING_DEFAULTS } from '../settings/runtime.js';
 import { saveAlertHistory } from './alert-store.js';
 import { checkAndSendLowBalanceAlert } from './balance-alert.js';
 import { buildMaterialDetailCallbackData } from './callbacks.js';
@@ -21,8 +21,14 @@ import {
 const CAMPAIGN_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
 const MATERIAL_NOTIFY_COOLDOWN_MS = 30 * 60 * 1000;
 
+/** Quy tắc "Theo giờ" chạy theo múi giờ Việt Nam. */
+export const VN_TIMEZONE = 'Asia/Ho_Chi_Minh';
+
+type TriggerKind = 'continuous' | 'scheduled';
+
 interface MaterialRule {
   rowNumber: number;
+  entity: 'campaign' | 'material';
   nameContains?: string;
   metric: AlertMetric;
   metricOperator: AlertComparisonOperator;
@@ -32,6 +38,9 @@ interface MaterialRule {
   conversionsThreshold: number;
   action: AlertAction;
   note?: string;
+  triggerKind: TriggerKind;
+  runTime?: string;
+  period?: string;
 }
 
 interface Level1RuleSnapshot {
@@ -49,6 +58,12 @@ interface RuleConditionShape {
   conversionsThreshold: number;
 }
 
+interface DateRange {
+  start: string;
+  end: string;
+  label: string;
+}
+
 
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
@@ -64,12 +79,6 @@ function normalizeText(value: unknown): string {
     .toLowerCase()
     .normalize('NFD')
     .replace(/\p{Diacritic}/gu, '');
-}
-
-function parseEnabled(value: unknown): boolean {
-  const normalized = normalizeText(value);
-  if (!normalized) return true;
-  return !['false', '0', 'no', 'n', 'disabled', 'off'].includes(normalized);
 }
 
 function parseNumber(value: unknown): number {
@@ -106,6 +115,18 @@ function normalizeAction(value: unknown): AlertAction | undefined {
   return undefined;
 }
 
+function normalizeEntity(value: unknown): 'campaign' | 'material' | undefined {
+  const normalized = normalizeText(value).replace(/[\s-]+/g, '_');
+  if (['campaign', 'campaigns', 'camp'].includes(normalized)) return 'campaign';
+  if (['material', 'materials'].includes(normalized)) return 'material';
+  return undefined;
+}
+
+function normalizeTriggerKind(value: unknown): TriggerKind {
+  const normalized = normalizeText(value).replace(/[\s-]+/g, '_');
+  return ['scheduled', 'schedule', 'theo_gio', 'theo_lich'].includes(normalized) ? 'scheduled' : 'continuous';
+}
+
 function parseThreshold(
   value: unknown,
   operator: AlertComparisonOperator
@@ -124,60 +145,192 @@ function parseThreshold(
   return { threshold: parseNumber(value) };
 }
 
-function parseRuleSide(
-  row: any[],
-  rowNumber: number,
-  offset: number,
-  actionIndex: number,
-  note?: string
-): MaterialRule | undefined {
-  const metric = normalizeMetric(row[2]);
-  const metricOperator = normalizeOperator(row[offset]);
-  const conversionsOperator = normalizeOperator(row[offset + 2]);
-  const action = normalizeAction(row[actionIndex]);
-  if (!metric || !metricOperator || !conversionsOperator || !action) return undefined;
+/** Cảnh báo rule hỏng — mỗi ruột chỉ warn một lần để không spam log mỗi phút. */
+const warnedInvalidRuleIds = new Set<string>();
+function warnInvalidRuleOnce(ruleId: string, detail: string): void {
+  const key = `${ruleId}:${detail}`;
+  if (warnedInvalidRuleIds.has(key)) return;
+  warnedInvalidRuleIds.add(key);
+  console.warn(`[MaterialRules] rule ${ruleId} bị bỏ qua: ${detail}`);
+}
 
-  const metricThreshold = parseThreshold(row[offset + 1], metricOperator);
-  const conversionsThreshold = parseNumber(row[offset + 3]);
-  if (!Number.isFinite(metricThreshold.threshold) || !Number.isFinite(conversionsThreshold)) return undefined;
+const RULE_ROW_COLUMNS =
+  'id,entity,trigger_kind,run_time,period,name_contains,metric,metric_operator,metric_threshold,' +
+  'metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note';
+
+/** Map + validate một dòng alert_action_rules thành MaterialRule. Trả undefined nếu dòng hỏng. */
+function mapRuleRow(row: Record<string, unknown>): MaterialRule | undefined {
+  const id = Number(row.id) || 0;
+  const label = `#${id}`;
+  const entity = normalizeEntity(row.entity);
+  const metric = normalizeMetric(row.metric);
+  const metricOperator = normalizeOperator(row.metric_operator);
+  const conversionsOperator = normalizeOperator(row.conversions_operator);
+  const action = normalizeAction(row.action);
+  if (!entity) {
+    warnInvalidRuleOnce(label, 'entity không hợp lệ (chỉ nhận campaign/material)');
+    return undefined;
+  }
+  if (!metric || !metricOperator || !conversionsOperator || !action) {
+    warnInvalidRuleOnce(label, 'thiếu metric/toán tử/hành động');
+    return undefined;
+  }
+  if (conversionsOperator === 'between') {
+    // Conversions chỉ có ngưỡng đơn — khoảng không hỗ trợ.
+    warnInvalidRuleOnce(label, 'Điều kiện lượt chuyển đổi không hỗ trợ "trong khoảng"');
+    return undefined;
+  }
+  if (Number(row.is_active ?? 1) === 0) return undefined;
+
+  const threshold = parseThreshold(row.metric_threshold, metricOperator);
+  const conversionsThreshold = parseNumber(row.conversions_threshold);
+  if (!Number.isFinite(threshold.threshold) || !Number.isFinite(conversionsThreshold)) {
+    warnInvalidRuleOnce(label, 'mức chỉ số hoặc lượt chuyển đổi không phải số');
+    return undefined;
+  }
+  if (metricOperator === 'between' && !Number.isFinite(threshold.min) && row.metric_min_threshold == null) {
+    warnInvalidRuleOnce(label, '"trong khoảng" thiếu Mức thấp nhất');
+    return undefined;
+  }
+
+  const triggerKind = normalizeTriggerKind(row.trigger_kind);
+  let runTime: string | undefined;
+  let period: string | undefined;
+  if (triggerKind === 'scheduled') {
+    const rawRunTime = String(row.run_time ?? '').trim();
+    if (/^\d{2}:\d{2}$/.test(rawRunTime)) {
+      runTime = rawRunTime;
+    } else {
+      warnInvalidRuleOnce(label, 'kiểu "Theo giờ" nhưng Giờ không đúng định dạng HH:mm');
+      return undefined;
+    }
+    period = String(row.period ?? '').trim() || 'today';
+  }
 
   return {
-    rowNumber,
-    nameContains: String(row[1] || '').trim() || undefined,
+    rowNumber: id,
+    entity,
+    nameContains: String(row.name_contains ?? '').trim() || undefined,
     metric,
     metricOperator,
-    metricThreshold: metricThreshold.threshold,
-    metricMinThreshold: metricThreshold.min,
+    metricThreshold: threshold.threshold,
+    metricMinThreshold: threshold.min ?? (row.metric_min_threshold == null ? undefined : Number(row.metric_min_threshold)),
     conversionsOperator,
     conversionsThreshold,
     action,
-    note,
-  };
+    note: String(row.note ?? '').trim() || undefined,
+    triggerKind,
+    runTime,
+    period,
+  } satisfies MaterialRule;
 }
 
-async function readDashboardRules(entity: 'campaign' | 'material'): Promise<MaterialRule[]> {
+async function readDashboardRules(
+  entity: 'campaign' | 'material',
+  triggerKind?: TriggerKind
+): Promise<MaterialRule[]> {
   const rows = await db.all<Record<string, unknown>>(
-    'SELECT id,name_contains,metric,metric_operator,metric_threshold,metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note FROM alert_action_rules WHERE entity=? ORDER BY id',
+    `SELECT ${RULE_ROW_COLUMNS} FROM alert_action_rules WHERE entity=? ORDER BY id`,
     [entity]
   );
-  return rows.flatMap(value => {
-    const metric = normalizeMetric(value.metric);
-    const metricOperator = normalizeOperator(value.metric_operator);
-    const conversionsOperator = normalizeOperator(value.conversions_operator);
-    const action = normalizeAction(value.action);
-    const threshold = parseThreshold(value.metric_threshold, metricOperator || 'eq');
-    const conversionsThreshold = parseNumber(value.conversions_threshold);
-    if (!metric || !metricOperator || !conversionsOperator || !action || Number(value.is_active ?? 1) === 0 || !Number.isFinite(threshold.threshold) || !Number.isFinite(conversionsThreshold)) return [];
-    return [{rowNumber:Number(value.id),nameContains:String(value.name_contains ?? '').trim()||undefined,metric,metricOperator,metricThreshold:threshold.threshold,metricMinThreshold:threshold.min ?? (value.metric_min_threshold == null ? undefined : Number(value.metric_min_threshold)),conversionsOperator,conversionsThreshold,action,note:String(value.note ?? '').trim()||undefined} satisfies MaterialRule];
-  });
+  return rows
+    .map(mapRuleRow)
+    .filter((rule): rule is MaterialRule => Boolean(rule))
+    .filter(rule => rule.entity === entity)
+    .filter(rule => !triggerKind || rule.triggerKind === triggerKind);
 }
 
-async function getLevel1RuleSnapshot(): Promise<Level1RuleSnapshot> {
+/** Quy tắc "Theo giờ" đang bật: trigger_kind='scheduled' + có run_time HH:mm. */
+async function readScheduledRules(): Promise<MaterialRule[]> {
+  const rows = await db.all<Record<string, unknown>>(
+    `SELECT ${RULE_ROW_COLUMNS} FROM alert_action_rules WHERE trigger_kind='scheduled' AND is_active<>0 AND run_time IS NOT NULL ORDER BY run_time, id`
+  );
+  return rows
+    .map(mapRuleRow)
+    .filter((rule): rule is MaterialRule => Boolean(rule));
+}
+
+interface PeriodParts {
+  dateKey: string;
+  timeKey: string;
+}
+
+export function vnNow(): PeriodParts {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: VN_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts();
+  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find(part => part.type === type)?.value || '';
+  return { dateKey: `${get('year')}-${get('month')}-${get('day')}`, timeKey: `${get('hour')}:${get('minute')}` };
+}
+
+function shiftDate(dateKey: string, days: number): string {
+  const date = new Date(`${dateKey}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+/** Khoảng dữ liệu của quy tắc: today/yesterday/month_to_date/last_N_days/YYYY-MM-DD..YYYY-MM-DD. */
+export function resolvePeriodValue(value: string | undefined, today: string): DateRange | undefined {
+  const normalized = String(value || 'today').trim().toLowerCase();
+  if (['today', 'hom_nay', 'hôm_nay'].includes(normalized)) {
+    return { start: today, end: today, label: today };
+  }
+  if (['yesterday', 'hom_qua', 'hôm_qua'].includes(normalized)) {
+    const yesterday = shiftDate(today, -1);
+    return { start: yesterday, end: yesterday, label: yesterday };
+  }
+  if (['month_to_date', 'mtd', 'thang_nay'].includes(normalized)) {
+    return { start: `${today.slice(0, 8)}01`, end: today, label: `${today.slice(0, 8)}01..${today}` };
+  }
+  const lastMatch = normalized.match(/^last_(\d{1,3})_days$/);
+  if (lastMatch) {
+    const days = Math.max(1, Math.min(90, Number(lastMatch[1])));
+    return { start: shiftDate(today, -(days - 1)), end: today, label: `${shiftDate(today, -(days - 1))}..${today}` };
+  }
+  const fixedMatch = normalized.match(/^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/);
+  if (fixedMatch && fixedMatch[1] <= fixedMatch[2]) {
+    return { start: fixedMatch[1], end: fixedMatch[2], label: normalized };
+  }
+  return undefined;
+}
+
+interface Level1RuleSnapshotOptions {
+  triggerKind?: TriggerKind;
+}
+
+async function getLevel1RuleSnapshot(options: Level1RuleSnapshotOptions = {}): Promise<Level1RuleSnapshot> {
   const [campaignRules, materialRules] = await Promise.all([
-    readDashboardRules('campaign'),
-    readDashboardRules('material'),
+    readDashboardRules('campaign', options.triggerKind),
+    readDashboardRules('material', options.triggerKind),
   ]);
   return { campaignRules, materialRules, loadedAtMs: Date.now() };
+}
+
+async function getTikTokRuleConcurrency(): Promise<number> {
+  const configuredConcurrency = await getRuntimeSettingNumber(
+    'tiktok_concurrency',
+    RUNTIME_SETTING_DEFAULTS.tiktokConcurrency
+  );
+  return Math.min(6, Math.max(1, Math.trunc(configuredConcurrency)));
+}
+
+async function getTrackedCampaigns(startDate?: string, endDate?: string): Promise<TikTokSpentCampaign[]> {
+  const campaigns = await getTodaySpentCampaigns(startDate, endDate, {
+    concurrency: await getTikTokRuleConcurrency(),
+  });
+  const trackedAdvertiserIds = await getTrackedAdvertiserIdSet(
+    campaigns.map(campaign => ({
+      advertiserId: campaign.advertiser_id,
+      advertiserName: campaign.advertiser_name,
+    }))
+  );
+  return campaigns.filter(campaign => trackedAdvertiserIds.has(campaign.advertiser_id));
 }
 
 function compareValues(
@@ -305,7 +458,7 @@ async function sendMaterialPipelineWarning(bot: Telegraf, detail: string): Promi
   if (!(await canNotify(key, 30 * 60 * 1000))) return;
   await bot.telegram.sendMessage(
     adminChatId,
-    ['⚠️ <b>Ruler material đang gặp lỗi</b>', escapeHtml(detail), 'Bot sẽ tự thử lại ở lượt kế tiếp. Nếu lỗi lặp lại liên tục, hãy kiểm tra log container và token TikTok.'].join('\n'),
+    ['⚠️ <b>Quy tắc material đang gặp lỗi</b>', escapeHtml(detail), 'Bot sẽ tự thử lại ở lượt kế tiếp. Nếu lỗi lặp lại liên tục, hãy kiểm tra log container và token TikTok.'].join('\n'),
     { parse_mode: 'HTML' }
   );
   await saveAlertHistory('material_pipeline_warning', detail, 'high');
@@ -314,6 +467,11 @@ async function sendMaterialPipelineWarning(bot: Telegraf, detail: string): Promi
 
 function campaignSubjectKey(campaign: TikTokSpentCampaign, rule: MaterialRule): string {
   return `campaign:${campaign.advertiser_id}:${campaign.campaign_id}:${rule.metric}:${rule.metricOperator}:${rule.metricThreshold}:${rule.metricMinThreshold ?? ''}:${rule.nameContains ?? ''}:${rule.conversionsOperator}:${rule.conversionsThreshold}:${rule.action}`;
+}
+
+/** Khóa cooldown theo NỘI DUNG quy tắc: sửa/tái lưu rule trên dashboard không reset cooldown. */
+function materialRuleContentKey(rule: MaterialRule): string {
+  return `${rule.nameContains || ''}|${rule.metric}|${rule.metricOperator}|${rule.metricThreshold}|${rule.metricMinThreshold || ''}|${rule.action}|${rule.conversionsOperator}|${rule.conversionsThreshold}`;
 }
 
 function getMktGroupKey(mktCode: string | undefined | null): string {
@@ -508,7 +666,9 @@ async function sendMaterialNotifyRules(
   for (const material of materials) {
     for (const rule of notifyRules) {
       if (!materialMatchesRule(material, rule)) continue;
-      const key = `material-notify:${material.advertiserId}:${material.adMaterialId}:${rule.rowNumber}:${rule.metric}:${rule.metricThreshold}:${rule.conversionsThreshold}`;
+      // Khóa theo nội dung quy tắc (không theo id dòng): lưu lại rule trên dashboard không reset cooldown.
+      const contentKey = materialRuleContentKey(rule);
+      const key = `material-notify:${material.advertiserId}:${material.adMaterialId}:${contentKey}`;
       if (!(await canNotify(key, MATERIAL_NOTIFY_COOLDOWN_MS))) continue;
 
       const plainMessage = [
@@ -689,7 +849,7 @@ async function applyCampaignDecisions(
     groups.set(mkt, group);
   }
 
-  const lines: string[] = ['🤖 <b>Campaign Rule Auto · chế độ Campaign</b>'];
+  const lines: string[] = ['🤖 <b>Campaign Rule Auto</b>'];
   const buttons: Array<{ text: string; callback_data: string }> = [];
   for (const [mkt, group] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0], 'vi'))) {
     lines.push(`— <b>${escapeHtml(getMktSectionLabel(mkt))}</b> —`, ...group.lines);
@@ -755,22 +915,23 @@ async function forEachWithConcurrency<T>(
   }));
 }
 
+interface EvaluateMaterialRulesOptions {
+  /** Khoảng dữ liệu cho snapshot material; bỏ trống = hôm nay (kiểu "Liên tục"). */
+  dateRange?: { start: string; end: string };
+}
+
 async function evaluateMaterialRules(
   bot: Telegraf,
   campaigns: TikTokSpentCampaign[],
-  rules: MaterialRule[]
+  rules: MaterialRule[],
+  options: EvaluateMaterialRulesOptions = {}
 ): Promise<void> {
   if (rules.length === 0) {
-    console.warn('[MaterialRules] No enabled material rules found in SQLite');
-    await sendMaterialPipelineWarning(bot, 'Không tìm thấy rule material đang bật trong Ruler Auto.');
+    console.log('[MaterialRules] no enabled material rules, skipping material evaluation');
     return;
   }
 
-  const configuredConcurrency = await getRuntimeSettingNumber(
-    'tiktok_concurrency',
-    RUNTIME_SETTING_DEFAULTS.tiktokConcurrency
-  );
-  const concurrency = Math.min(6, Math.max(1, Math.trunc(configuredConcurrency)));
+  const concurrency = await getTikTokRuleConcurrency();
   const startedAt = Date.now();
   const failures: string[] = [];
   let matchedCampaigns = 0;
@@ -787,7 +948,9 @@ async function evaluateMaterialRules(
       const snapshot = await getCampaignMaterialSnapshot(
         campaign.advertiser_id,
         campaign.campaign_id,
-        campaign.campaign_name
+        campaign.campaign_name,
+        options.dateRange?.start,
+        options.dateRange?.end
       );
       materialCount += snapshot.materials.length;
       unknownStatusCount += snapshot.materials.filter(item => item.status === 'UNKNOWN').length;
@@ -832,14 +995,14 @@ async function evaluateMaterialRules(
     `[MaterialRules] scanned ${campaigns.length} campaigns, matched=${matchedCampaigns}, materials=${materialCount}, unknown_status=${unknownStatusCount}, failures=${failures.length}, concurrency=${concurrency} in ${Date.now() - startedAt}ms`
   );
 }
+
 /**
- * Level 1 architecture:
- * - Rule cấp 1 được đọc trực tiếp từ SQLite/dashboard;
- * - if that read fails, the last-known-good in-memory snapshot is used;
- * - chế độ 'material' (mặc định): campaign rules chỉ notify; ad rules bị bỏ qua;
- *   material rules được đánh giá theo chỉ số hôm nay và điều khiển ad_material_id;
- * - chế độ 'campaign' (bản đầu): campaign rules pause/enable tự tắt/bật campaign,
- *   material rules không chạy; low-balance monitoring remains active.
+ * Level 1 architecture (bản hợp nhất):
+ * - Toàn bộ quy tắc đọc trực tiếp từ bảng alert_action_rules, một engine duy nhất;
+ * - Mỗi quy tắc tự chọn entity (campaign/material) và kiểu chạy:
+ *   "Liên tục" (continuous) — đánh giá mỗi tick của lịch cấp 1 theo dữ liệu hôm nay;
+ *   "Theo giờ" (scheduled) — chỉ chạy trong checkAndRunScheduledRules() theo run_time;
+ * - Không còn setting auto_action_mode toàn cục; quota/low-balance vẫn chạy trước.
  */
 export async function checkAndSendCampaignMaterialAlerts(bot: Telegraf): Promise<void> {
   try {
@@ -848,25 +1011,223 @@ export async function checkAndSendCampaignMaterialAlerts(bot: Telegraf): Promise
     console.error('[MaterialRules] low-balance check failed:', error);
   }
 
-  const ruleSnapshot = await getLevel1RuleSnapshot();
-  const campaigns = await getTodaySpentCampaigns();
-  const trackedAdvertiserIds = await getTrackedAdvertiserIdSet(
-    campaigns.map(campaign => ({
-      advertiserId: campaign.advertiser_id,
-      advertiserName: campaign.advertiser_name,
-    }))
-  );
-  const filteredCampaigns = campaigns.filter(campaign =>
-    trackedAdvertiserIds.has(campaign.advertiser_id)
-  );
+  const ruleSnapshot = await getLevel1RuleSnapshot({ triggerKind: 'continuous' });
+  const filteredCampaigns = await getTrackedCampaigns();
 
   await evaluateCampaignNotifications(bot, filteredCampaigns, ruleSnapshot.campaignRules);
+  await evaluateCampaignActions(bot, filteredCampaigns, ruleSnapshot.campaignRules);
+  await evaluateMaterialRules(bot, filteredCampaigns, ruleSnapshot.materialRules);
+}
 
-  const mode = await getAutoActionMode();
-  if (mode === 'campaign') {
-    await evaluateCampaignActions(bot, filteredCampaigns, ruleSnapshot.campaignRules);
-    return;
+// ---------------------------------------------------------------------------
+// Quy tắc theo lịch (scheduled): chạy theo run_time từng quy tắc, múi giờ Việt Nam.
+// ---------------------------------------------------------------------------
+
+let rulerRunning = false;
+/** Đang có lượt áp quy tắc (theo lịch hoặc thủ công) chạy → lượt khác phải chờ. */
+export function isMaterialRulerRunning(): boolean {
+  return rulerRunning;
+}
+
+async function ensureRulerRunsTable(): Promise<void> {
+  await db.exec(`CREATE TABLE IF NOT EXISTS material_daily_ruler_runs(
+    rule_id TEXT NOT NULL,date_key TEXT NOT NULL,timezone TEXT NOT NULL,run_time TEXT NOT NULL,
+    matched_campaigns INTEGER DEFAULT 0,changed_materials INTEGER DEFAULT 0,completed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(rule_id,date_key))`);
+}
+
+async function isRulerRunCompleted(dateKey: string, markerId: string): Promise<boolean> {
+  return Boolean(await db.get('SELECT 1 FROM material_daily_ruler_runs WHERE rule_id=? AND date_key=?', [markerId, dateKey]));
+}
+
+async function markRulerRun(dateKey: string, markerId: string, runTime: string, matchedCampaigns: number, changed: number): Promise<void> {
+  await db.run(`INSERT INTO material_daily_ruler_runs
+    (rule_id,date_key,timezone,run_time,matched_campaigns,changed_materials) VALUES(?,?,?,?,?,?)
+    ON CONFLICT(rule_id,date_key) DO UPDATE SET matched_campaigns=excluded.matched_campaigns,changed_materials=excluded.changed_materials,completed_at=CURRENT_TIMESTAMP`,
+    [markerId, dateKey, VN_TIMEZONE, runTime, matchedCampaigns, changed]);
+}
+
+interface ScheduledRulesSummary {
+  manual: boolean;
+  runTime?: string;
+  ruleCount: number;
+  campaignRuleCount: number;
+  notifyRuleCount: number;
+  materialRuleCount: number;
+  evaluatedCampaigns: number;
+  periodLabels: string[];
+  failures: string[];
+}
+
+function formatScheduledRulesSummary(summary: ScheduledRulesSummary): string {
+  const failLine = summary.failures.length
+    ? `Lỗi: <b>${summary.failures.length}</b> (ví dụ <code>${escapeHtml(summary.failures[0].slice(0, 160))}</code>)`
+    : '';
+  return [
+    `<b>${summary.manual ? '▶ Quy tắc theo lịch — chạy thủ công' : '⏳ Quy tắc theo lịch — hoàn tất'}</b>`,
+    summary.runTime ? `Giờ chạy: <code>${escapeHtml(summary.runTime)}</code> · giờ Việt Nam` : 'Chạy thủ công, không chờ giờ',
+    `Quy tắc: <b>${summary.ruleCount}</b> (campaign ${summary.campaignRuleCount} · material ${summary.materialRuleCount}${summary.notifyRuleCount ? ` · notify ${summary.notifyRuleCount}` : ''})`,
+    `Campaign đã xét: <b>${summary.evaluatedCampaigns}</b>`,
+    `Khoảng dữ liệu: <code>${escapeHtml([...new Set(summary.periodLabels)].join(', '))}</code>`,
+    failLine,
+    'Báo cáo chi tiết (thông báo/tắt/bật) đã được gửi ở các tin nhắn phía trên.',
+  ].filter(Boolean).join('\n');
+}
+
+async function sendRulerStartMessage(bot: Telegraf, summary: ScheduledRulesSummary): Promise<void> {
+  const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
+  if (!adminChatId) return;
+  await sendChunkedMessage(bot, adminChatId, [
+    `<b>${summary.manual ? '⏳ Bắt đầu Quy tắc theo lịch (thủ công)' : '⏳ Bắt đầu Quy tắc theo lịch'}</b>`,
+    summary.runTime ? `Giờ cài đặt: <code>${escapeHtml(summary.runTime)}</code>` : 'Chạy thủ công',
+    `Số quy tắc: <b>${summary.ruleCount}</b>`,
+    'Kết quả sẽ được gửi ngay sau khi chạy xong.',
+  ]);
+}
+
+/**
+ * Chạy MỘT nhóm quy tắc theo lịch (cùng run_time).
+ * Mỗi quy tắc dùng khoảng dữ liệu (period) của chính nó: gom nhóm theo period trong nhóm
+ * để chỉ cần lấy danh sách campaign theo period một lần.
+ */
+async function runScheduledRuleGroup(
+  bot: Telegraf,
+  rules: MaterialRule[],
+  options: { manual: boolean; runTime?: string }
+): Promise<ScheduledRulesSummary> {
+  const summary: ScheduledRulesSummary = {
+    manual: options.manual,
+    runTime: options.runTime,
+    ruleCount: rules.length,
+    campaignRuleCount: rules.filter(rule => rule.entity === 'campaign').length,
+    notifyRuleCount: rules.filter(rule => rule.action === 'notify').length,
+    materialRuleCount: rules.filter(rule => rule.entity === 'material').length,
+    evaluatedCampaigns: 0,
+    periodLabels: [],
+    failures: [],
+  };
+
+  if (rulerRunning) {
+    throw new Error('Quy tắc đang có một lượt khác chạy, vui lòng chờ.');
+  }
+  rulerRunning = true;
+  try {
+    await sendRulerStartMessage(bot, summary);
+    const today = vnNow().dateKey;
+    const byPeriod = new Map<string, MaterialRule[]>();
+    for (const rule of rules) {
+      const periodKey = (rule.period || 'today').trim().toLowerCase() || 'today';
+      const list = byPeriod.get(periodKey) || [];
+      list.push(rule);
+      byPeriod.set(periodKey, list);
+    }
+
+    for (const [periodValue, periodRules] of byPeriod) {
+      const range = resolvePeriodValue(periodValue, today);
+      if (!range) {
+        summary.failures.push(`Khoảng dữ liệu không hợp lệ: ${periodValue}`);
+        console.warn(`[ScheduledRules] invalid period "${periodValue}", skipping its rules`);
+        continue;
+      }
+      summary.periodLabels.push(range.label);
+
+      const campaigns = await getTrackedCampaigns(range.start, range.end);
+      summary.evaluatedCampaigns += campaigns.length;
+      console.log(
+        `[ScheduledRules] run_time=${options.runTime || 'manual'} period=${periodValue} (${range.label}) campaigns=${campaigns.length}`
+      );
+
+      const campaignRules = periodRules.filter(rule => rule.entity === 'campaign');
+      const materialRules = periodRules.filter(rule => rule.entity === 'material');
+
+      // Campaign: notify + tắt/bật tự động (rule nhận biết action bên trong).
+      await evaluateCampaignNotifications(bot, campaigns, campaignRules);
+      await evaluateCampaignActions(bot, campaigns, campaignRules);
+
+      // Material: notify + tắt/bật theo snapshot trong khoảng dữ liệu.
+      await evaluateMaterialRules(bot, campaigns, materialRules, {
+        dateRange: { start: range.start, end: range.end },
+      });
+    }
+  } finally {
+    rulerRunning = false;
   }
 
-  await evaluateMaterialRules(bot, filteredCampaigns, ruleSnapshot.materialRules);
+  await sendChunkedMessageIfAdmin(bot, formatScheduledRulesSummary(summary));
+  return summary;
+}
+
+async function sendChunkedMessageIfAdmin(bot: Telegraf, text: string): Promise<void> {
+  const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
+  if (!adminChatId) return;
+  await sendChunkedMessage(bot, adminChatId, [text]);
+}
+
+/**
+ * Lịch cấp 1 gọi hàm này mỗi tick: với mỗi nhóm run_time đã đến giờ trong ngày
+ * mà chưa được ghi nhận (marker rule_id='rt:<HH:mm>') → chạy đúng một lần.
+ */
+export async function checkAndRunScheduledRules(bot: Telegraf): Promise<void> {
+  await ensureRulerRunsTable();
+  const rules = await readScheduledRules();
+  if (rules.length === 0) return;
+
+  const now = vnNow();
+  const groups = new Map<string, MaterialRule[]>();
+  for (const rule of rules) {
+    const runTime = rule.runTime;
+    if (!runTime) continue;
+    const list = groups.get(runTime) || [];
+    list.push(rule);
+    groups.set(runTime, list);
+  }
+
+  for (const [runTime, groupRules] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (now.timeKey < runTime) continue;
+    const markerId = `rt:${runTime}`;
+    if (await isRulerRunCompleted(now.dateKey, markerId)) continue;
+
+    try {
+      const summary = await runScheduledRuleGroup(bot, groupRules, { manual: false, runTime });
+      // Lượt nào cũng được ghi nhận (kể cả có lỗi nhỏ): tránh scheduler chạy lại và gửi tin suốt ngày.
+      await markRulerRun(now.dateKey, markerId, runTime, summary.evaluatedCampaigns, summary.periodLabels.length);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[ScheduledRules] run_time=${runTime} failed:`, error);
+      const adminChatId = String(process.env.ADMIN_CHAT_ID || '').trim();
+      if (adminChatId) {
+        await bot.telegram.sendMessage(
+          adminChatId,
+          `❌ <b>Quy tắc theo lịch (${escapeHtml(runTime)}) thất bại</b>\n<code>${escapeHtml(message.slice(0, 1000))}</code>`,
+          { parse_mode: 'HTML' }
+        ).catch(sendError => console.error('[ScheduledRules] cannot report failure:', sendError));
+      }
+      // Vẫn đánh dấu là đã chạy để không spam thử lại; lỗi đã báo Telegram cho admin.
+      await markRulerRun(now.dateKey, markerId, runTime, 0, 0);
+    }
+  }
+}
+
+/** Chạy manual (lệnh /materialruler): toàn bộ quy tắc "Theo giờ" chạy ngay, bỏ qua marker. */
+export async function runMaterialRulerNow(bot: Telegraf): Promise<ScheduledRulesSummary[]> {
+  const rules = await readScheduledRules();
+  if (rules.length === 0) {
+    await sendChunkedMessageIfAdmin(bot,
+      'ℹ️ Chưa có quy tắc "Theo giờ" nào đang bật. Hãy tạo quy tắc trong tab <b>Quy tắc</b> của dashboard và chọn Chạy = "Theo giờ".');
+    return [];
+  }
+
+  const groups = new Map<string, MaterialRule[]>();
+  for (const rule of rules) {
+    const runTime = rule.runTime || '00:00';
+    const list = groups.get(runTime) || [];
+    list.push(rule);
+    groups.set(runTime, list);
+  }
+
+  const summaries: ScheduledRulesSummary[] = [];
+  for (const [runTime, groupRules] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    summaries.push(await runScheduledRuleGroup(bot, groupRules, { manual: true, runTime }));
+  }
+  return summaries;
 }

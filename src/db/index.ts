@@ -86,6 +86,164 @@ class SqliteDatabase implements Database {
 
 let db: Database;
 
+const MIGRATION_MARKER_KEY = 'material_ruler_migrated';
+
+/**
+ * Migration một lần (idempotent): chuyển rule cũ của tab "Ruler lập lịch"
+ * trong admin_config_rows (section='material_ruler', dạng spend_operator/spend_threshold,
+ * cpa_*, conversions_*) thành quy tắc thống nhất trong alert_action_rules với
+ * trigger_kind='scheduled'. Sau đó xoá những dòng đã chuyển đi.
+ *
+ * - Operator cũ `> >= < <= =` → gt/gte/lt/lte/eq.
+ * - Nếu một dòng có CẢ điều kiện spend và cpa được set (hiếm): chọn cpa, log thêm.
+ * - Dòng có điều kiện bất thường / không bật / chỉ có campaign_match + note:
+ *   giữ nguyên trong admin_config_rows (không còn code nào đọc chúng).
+ */
+async function migrateLegacyMaterialRulerRules(): Promise<void> {
+  const marker = await db.get<{ value: string }>(
+    'SELECT value FROM bot_settings WHERE key = ?',
+    [MIGRATION_MARKER_KEY]
+  );
+  if (String(marker?.value || '') !== '1') {
+    await db.run(
+      'INSERT OR IGNORE INTO bot_settings(key,value) VALUES(?,?)',
+      [MIGRATION_MARKER_KEY, '1']
+    );
+  }
+
+  const rows = await db.all<{ id: number; data_json: string }>(
+    'SELECT id,data_json FROM admin_config_rows WHERE section=? ORDER BY id',
+    ['material_ruler']
+  ).catch(() => []);
+
+  if (rows.length === 0) return;
+
+  const parseText = (value: unknown): string => String(value ?? '').trim();
+  const parseOperator = (value: unknown): string | undefined => {
+    const raw = parseText(value);
+    if (raw === '>') return 'gt';
+    if (raw === '>=') return 'gte';
+    if (raw === '<') return 'lt';
+    if (raw === '<=') return 'lte';
+    if (raw === '=') return 'eq';
+    return undefined;
+  };
+  const parseCondition = (operatorValue: unknown, thresholdValue: unknown): { operator: string; threshold: number } | undefined => {
+    const rawOperator = parseText(operatorValue);
+    const rawThreshold = parseText(thresholdValue).replace(',', '.');
+    if (!rawOperator && !rawThreshold) return undefined;
+    if (!rawOperator || !rawThreshold) return undefined;
+    const operator = parseOperator(rawOperator);
+    const threshold = Number(rawThreshold);
+    return operator && Number.isFinite(threshold) ? { operator, threshold } : undefined;
+  };
+  const isLegacyEnabled = (value: unknown): boolean =>
+    ['true', '1', 'yes', 'on', 'enabled', 'bat', 'bật'].includes(parseText(value).toLocaleLowerCase('vi-VN'));
+
+  // Giờ/khoảng mặc định lấy từ bot_settings của Ruler lập lịch cũ (đọc bằng SQL thường).
+  const readSetting = async (key: string, fallback: string): Promise<string> => {
+    const row = await db.get<{ value: string }>('SELECT value FROM bot_settings WHERE key = ?', [key]).catch(() => undefined);
+    const value = parseText(row?.value);
+    return value || fallback;
+  };
+  const rawRunTime = await readSetting('material_ruler_run_time', '00:05');
+  const runTime = /^\d{2}:\d{2}$/.test(rawRunTime) ? rawRunTime : '00:05';
+  const rawPeriod = await readSetting('material_ruler_period', 'today');
+  const period = /^(today|yesterday|month_to_date|last_\d{1,3}_days|\d{4}-\d{2}-\d{2}\.\.\d{4}-\d{2}-\d{2})$/i.test(rawPeriod)
+    ? rawPeriod.toLowerCase()
+    : 'today';
+
+  let migrated = 0;
+  let kept = 0;
+  const migratedIds: number[] = [];
+
+  for (const row of rows) {
+    let value: Record<string, unknown>;
+    try {
+      value = JSON.parse(row.data_json) as Record<string, unknown>;
+    } catch {
+      console.warn(`[DB migration] material_ruler row ${row.id}: JSON không hợp lệ, giữ nguyên`);
+      kept += 1;
+      continue;
+    }
+
+    if (!isLegacyEnabled(value.enabled)) {
+      kept += 1;
+      continue;
+    }
+
+    const spend = parseCondition(value.spend_operator, value.spend_threshold);
+    const cpa = parseCondition(value.cpa_operator, value.cpa_threshold);
+    const conversions = parseCondition(value.conversions_operator, value.conversions_threshold);
+
+    const malformed = ([
+      [value.spend_operator, value.spend_threshold],
+      [value.cpa_operator, value.cpa_threshold],
+      [value.conversions_operator, value.conversions_threshold],
+    ] as const).some(([operatorValue, thresholdValue]) =>
+      Boolean(parseText(operatorValue) || parseText(thresholdValue)) && !parseCondition(operatorValue, thresholdValue)
+    );
+
+    if (malformed || (!spend && !cpa)) {
+      console.warn(`[DB migration] material_ruler row ${row.id}: điều kiện không đọc được, giữ nguyên trong admin_config_rows`);
+      kept += 1;
+      continue;
+    }
+
+    let metricCondition: { metric: 'spend' | 'cpa'; operator: string; threshold: number };
+    if (cpa && spend) {
+      metricCondition = { metric: 'cpa', operator: cpa.operator, threshold: cpa.threshold };
+      console.log(`[DB migration] material_ruler row ${row.id}: có cả điều kiện Spend và CPA — chọn CPA`);
+    } else {
+      metricCondition = cpa
+        ? { metric: 'cpa', operator: cpa!.operator, threshold: cpa!.threshold }
+        : { metric: 'spend', operator: spend!.operator, threshold: spend!.threshold };
+    }
+
+    await db.run(
+      `INSERT INTO alert_action_rules
+        (entity,name_contains,metric,metric_operator,metric_threshold,metric_min_threshold,
+         conversions_operator,conversions_threshold,action,trigger_kind,run_time,period,is_active,note)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        'material',
+        parseText(value.campaign_match) || null,
+        metricCondition.metric,
+        metricCondition.operator,
+        metricCondition.threshold,
+        null,
+        conversions ? conversions.operator : 'gte',
+        conversions ? conversions.threshold : 0,
+        'enable',
+        'scheduled',
+        runTime,
+        period,
+        1,
+        parseText(value.note) || null,
+      ]
+    );
+    migratedIds.push(row.id);
+    migrated += 1;
+  }
+
+  if (migrated > 0) {
+    await db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const id of migratedIds) {
+        await db.run('DELETE FROM admin_config_rows WHERE id=?', [id]);
+      }
+      await db.exec('COMMIT');
+    } catch (error) {
+      await db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  console.log(
+    `[DB migration] material_ruler: chuyển ${migrated} rule sang alert_action_rules (scheduled ${runTime}, khoảng ${period}); giữ lại ${kept} dòng trong admin_config_rows`
+  );
+}
+
 export async function connectDB() {
   // Open the database
   db = new SqliteDatabase(resolve(process.env.DATABASE_PATH || './bot_data.db'));
@@ -162,6 +320,22 @@ export async function connectDB() {
       throw error;
     }
   }
+
+  const addColumnIfMissing = async (sql: string): Promise<void> => {
+    try {
+      await db.run(sql);
+    } catch (error) {
+      if (!String(error).includes('duplicate column name')) {
+        throw error;
+      }
+    }
+  };
+
+  await addColumnIfMissing("ALTER TABLE alert_action_rules ADD COLUMN trigger_kind TEXT NOT NULL DEFAULT 'continuous'");
+  await addColumnIfMissing('ALTER TABLE alert_action_rules ADD COLUMN run_time TEXT');
+  await addColumnIfMissing('ALTER TABLE alert_action_rules ADD COLUMN period TEXT');
+
+  await migrateLegacyMaterialRulerRules();
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS alert_action_state (
