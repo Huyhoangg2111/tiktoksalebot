@@ -28,7 +28,7 @@ type TriggerKind = 'continuous' | 'scheduled';
 
 interface MaterialRule {
   rowNumber: number;
-  entity: 'campaign' | 'material';
+  entity: 'campaign' | 'material' | 'both';
   nameContains?: string;
   metric: AlertMetric;
   metricOperator: AlertComparisonOperator;
@@ -115,10 +115,12 @@ function normalizeAction(value: unknown): AlertAction | undefined {
   return undefined;
 }
 
-function normalizeEntity(value: unknown): 'campaign' | 'material' | undefined {
+function normalizeEntity(value: unknown): 'campaign' | 'material' | 'both' | undefined {
   const normalized = normalizeText(value).replace(/[\s-]+/g, '_');
   if (['campaign', 'campaigns', 'camp'].includes(normalized)) return 'campaign';
-  if (['material', 'materials'].includes(normalized)) return 'material';
+  if (['material', 'materials', 'mkt'].includes(normalized)) return 'material';
+  // "Cả hai": cùng điều kiện được đánh giá ở CẢ tầng campaign lẫn material.
+  if (['both', 'all', 'ca_hai', 'cahai', 'camp_and_material', 'campaign_material'].includes(normalized)) return 'both';
   return undefined;
 }
 
@@ -168,7 +170,7 @@ function mapRuleRow(row: Record<string, unknown>): MaterialRule | undefined {
   const conversionsOperator = normalizeOperator(row.conversions_operator);
   const action = normalizeAction(row.action);
   if (!entity) {
-    warnInvalidRuleOnce(label, 'entity không hợp lệ (chỉ nhận campaign/material)');
+    warnInvalidRuleOnce(label, 'entity không hợp lệ (chỉ nhận campaign/material/both)');
     return undefined;
   }
   if (!metric || !metricOperator || !conversionsOperator || !action) {
@@ -229,14 +231,15 @@ async function readDashboardRules(
   entity: 'campaign' | 'material',
   triggerKind?: TriggerKind
 ): Promise<MaterialRule[]> {
+  // entity='both' phục vụ CẢ campaign lẫn material → nạp ở cả hai phía.
   const rows = await db.all<Record<string, unknown>>(
-    `SELECT ${RULE_ROW_COLUMNS} FROM alert_action_rules WHERE entity=? ORDER BY id`,
+    `SELECT ${RULE_ROW_COLUMNS} FROM alert_action_rules WHERE entity IN (?, 'both') ORDER BY id`,
     [entity]
   );
   return rows
     .map(mapRuleRow)
     .filter((rule): rule is MaterialRule => Boolean(rule))
-    .filter(rule => rule.entity === entity)
+    .filter(rule => rule.entity === entity || rule.entity === 'both')
     .filter(rule => !triggerKind || rule.triggerKind === triggerKind);
 }
 
@@ -1101,9 +1104,9 @@ async function runScheduledRuleGroup(
     manual: options.manual,
     runTime: options.runTime,
     ruleCount: rules.length,
-    campaignRuleCount: rules.filter(rule => rule.entity === 'campaign').length,
+    campaignRuleCount: rules.filter(rule => rule.entity === 'campaign' || rule.entity === 'both').length,
     notifyRuleCount: rules.filter(rule => rule.action === 'notify').length,
-    materialRuleCount: rules.filter(rule => rule.entity === 'material').length,
+    materialRuleCount: rules.filter(rule => rule.entity === 'material' || rule.entity === 'both').length,
     evaluatedCampaigns: 0,
     periodLabels: [],
     failures: [],
@@ -1139,8 +1142,10 @@ async function runScheduledRuleGroup(
         `[ScheduledRules] run_time=${options.runTime || 'manual'} period=${periodValue} (${range.label}) campaigns=${campaigns.length}`
       );
 
-      const campaignRules = periodRules.filter(rule => rule.entity === 'campaign');
-      const materialRules = periodRules.filter(rule => rule.entity === 'material');
+      // Rule entity='both' nằm ở CẢ hai danh sách: cùng điều kiện được đánh
+      // giá trên số liệu tầng campaign và trên số liệu tầng material.
+      const campaignRules = periodRules.filter(rule => rule.entity === 'campaign' || rule.entity === 'both');
+      const materialRules = periodRules.filter(rule => rule.entity === 'material' || rule.entity === 'both');
 
       // Campaign: notify + tắt/bật tự động (rule nhận biết action bên trong).
       await evaluateCampaignNotifications(bot, campaigns, campaignRules);
