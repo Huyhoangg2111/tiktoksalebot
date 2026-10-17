@@ -302,9 +302,16 @@ function getKnownMarketCodes(config: ConfigData): Set<string> {
   );
 }
 
+/** Tên campaign có thể phân tách bằng ' · ' (mới) hoặc ' - ' (cũ); tách về cùng một bộ phận. */
+function splitCampaignNameParts(campaignName: string): string[] {
+  return String(campaignName || '')
+    .split(/\s*·\s*|-/)
+    .map(part => part.trim())
+    .filter(Boolean);
+}
+
 function extractCampaignMarketCode(campaignName: string, knownMarketCodes: Set<string>): string {
-  const nameParts = campaignName
-    .split('-')
+  const nameParts = splitCampaignNameParts(campaignName)
     .map(part => normalizeKey(part))
     .filter(Boolean);
 
@@ -319,11 +326,14 @@ function extractCampaignMarketCode(campaignName: string, knownMarketCodes: Set<s
 
   const normalizedCampaignName = normalizeKey(campaignName);
   const marketInName = [...knownMarketCodes].find(marketCode =>
-    normalizedCampaignName.includes(`-${marketCode}-`) ||
-    normalizedCampaignName.includes(` ${marketCode} `)
+    new RegExp(`(?:^|[-·\\s])${escRegExp(marketCode)}(?:[-·\\s]|$)`).test(normalizedCampaignName)
   );
 
   return marketInName || 'UNKNOWN';
+}
+
+function escRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function extractCampaignProductShortName(campaignName: string, config: ConfigData): string {
@@ -332,7 +342,8 @@ function extractCampaignProductShortName(campaignName: string, config: ConfigDat
     return 'Unknown';
   }
 
-  const firstPart = rawName.split('-')[0]?.trim() || rawName;
+  const nameParts = splitCampaignNameParts(rawName);
+  const firstPart = nameParts[0]?.trim() || '';
   const normalizedFirst = normalizeKey(firstPart);
   const normalizedFull = normalizeKey(rawName);
 
@@ -358,7 +369,9 @@ function extractCampaignProductShortName(campaignName: string, config: ConfigDat
         score = 200 + normalizedCandidate.length;
       } else if (
         normalizedFull.startsWith(`${normalizedCandidate} -`) ||
-        normalizedFull.startsWith(`${normalizedCandidate}-`)
+        normalizedFull.startsWith(`${normalizedCandidate} ·`) ||
+        normalizedFull.startsWith(`${normalizedCandidate}-`) ||
+        normalizedFull.startsWith(`${normalizedCandidate}·`)
       ) {
         score = 150 + normalizedCandidate.length;
       } else if (normalizedFirst.startsWith(normalizedCandidate) && normalizedCandidate.length >= 3) {

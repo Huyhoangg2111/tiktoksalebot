@@ -529,11 +529,13 @@ async function sendChunkedMessage(
   options?: { buttons?: Array<{ text: string; callback_data: string }> }
 ): Promise<void> {
   const chunks = chunkLinesForTelegram(lines);
-  for (let index = 0; index < chunks.length; index++) {
-    const isLast = index === chunks.length - 1;
-    await bot.telegram.sendMessage(chatId, chunks[index], {
+  const keyboard = options?.buttons?.length ? { inline_keyboard: chunkInlineButtons(options.buttons, 3) } : undefined;
+  for (const chunk of chunks) {
+    await bot.telegram.sendMessage(chatId, chunk, {
       parse_mode: 'HTML',
-      ...(isLast && options?.buttons?.length ? { reply_markup: { inline_keyboard: chunkInlineButtons(options.buttons, 3) } } : {}),
+      // Buttons gắn ở MỌI chunk: nếu chỉ gắn chunk cuối, các chunk trước bị
+      // rewrite/đọc riêng và người dùng không thấy nút từ đầu thông báo.
+      ...(keyboard ? { reply_markup: keyboard } : {}),
     });
   }
 }

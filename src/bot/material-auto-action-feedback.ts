@@ -437,7 +437,9 @@ export function parseGroupedAutoActionItems(text: string): ParsedAutoAction[] {
     const line = lines[index];
     if (!line.trim()) continue;
 
-    const mktHeader = line.match(/^👤\s*<b>(.*?)<\/b>\s*$/);
+    // Header MKT gửi từ engine là '— <b>MKT</b> —' (rule-engine.ts);
+    // chấp nhận cả format cũ '👤 <b>MKT</b>' để không break với tin cũ.
+    const mktHeader = line.match(/^(?:👤|—)\s*<b>(.*?)<\/b>(?:\s*—)?\s*$/);
     if (mktHeader) {
       currentMkt = mktHeader[1];
       current = undefined;

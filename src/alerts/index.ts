@@ -472,14 +472,19 @@ function campaignMatchesProductPausePayload(
   campaign: Pick<TikTokCampaign, 'name'>,
   payload: ProductPausePayload
 ): boolean {
+  // Tên campaign mới phân tách bằng ' · ', bản cũ dùng ' - '; chuẩn hoá về 1 bộ phận tách.
   const campaignParts = String(campaign.name || '')
-    .split('-')
+    .split(/\s*[·-]\s*|\s-\s/)
     .map(part => normalizeSearchValue(part))
     .filter(Boolean);
   const productKey = normalizeSearchValue(payload.productShortName);
   const marketKey = normalizeSearchValue(payload.marketCode);
-
-  return campaignParts[0] === productKey && campaignParts.slice(1).includes(marketKey);
+  const productHead = campaignParts[0] || '';
+  const productMatch = Boolean(productKey) && (
+    productHead === productKey || productHead.includes(productKey) || productKey.includes(productHead)
+  );
+  const marketMatch = Boolean(marketKey) && campaignParts.slice(1).includes(marketKey);
+  return productMatch && marketMatch;
 }
 
 async function getActiveProductCampaignRefs(

@@ -1,6 +1,7 @@
 import { Telegraf } from 'telegraf';
 import { config } from 'dotenv';
 import { connectDB } from './db/index.js';
+import { startDataRetention } from './db/cleanup.js';
 import { setupBotHandlers } from './bot/handlers.js';
 import { setupSmartPlusAppealHandlers } from './bot/smartplus-appeal-handlers.js';
 import { setupSettingsMenuHandlers } from './bot/settings-menu.js';
@@ -50,6 +51,9 @@ async function main() {
 
   // SQLite là nguồn cấu hình duy nhất; phải kết nối trước khi đọc cấu hình TikTok.
   await connectDB();
+
+  // Tự động xoá dữ liệu lịch sử sau 45 ngày (mặc định) để giảm tải dung lượng VPS.
+  startDataRetention();
 
   await initializeAlertRules();
 

@@ -17,6 +17,9 @@ interface ParsedCampaignAlert {
   advertiserId?: string;
   metricsLine: string;
   detailButton?: Record<string, unknown>;
+  /** Nội dung HTML gốc của alert để fallback gửi lại nếu gom nhóm lỗi. */
+  rawText?: string;
+  rawReplyMarkup?: unknown;
 }
 
 interface PendingCampaignBatch {
@@ -110,6 +113,8 @@ function parseCampaignAlertPayload(payload: unknown): ParsedCampaignAlert[] | un
       advertiserId: detailRef?.advertiserId,
       metricsLine,
       detailButton: detailButtons[items.length],
+      rawText: source.text,
+      rawReplyMarkup: source.reply_markup,
     });
   }
 
@@ -232,6 +237,24 @@ export function setupCampaignAlertUiCompatibility(bot: Telegraf): void {
       await originalCallApi('sendMessage', nextPayload);
     } catch (error) {
       console.error('[CampaignAlertUiCompatibility] grouped campaign notification failed:', error);
+      // Fallback: gửi lại nguyên bản từng alert thay vì mất hẳn thông báo
+      // khi DB/tiktok helper trong buildGroupedCampaignMessage lỗi.
+      // Gửi lại từng alert gốc 1 lần (một raw text có thể chứa nhiều camp).
+      const sentRawTexts = new Set<string>();
+      for (const pending of items) {
+        const rawText = pending.rawText;
+        if (!rawText || sentRawTexts.has(rawText)) continue;
+        sentRawTexts.add(rawText);
+        try {
+          const fallbackPayload: Record<string, unknown> = { ...batch.payload, text: rawText };
+          if (pending.rawReplyMarkup) fallbackPayload.reply_markup = pending.rawReplyMarkup;
+          else delete fallbackPayload.reply_markup;
+          await originalCallApi('sendMessage', fallbackPayload);
+        } catch (fallbackError) {
+          console.error('[CampaignAlertUiCompatibility] raw fallback also failed:', fallbackError);
+          break;
+        }
+      }
     }
   };
 
