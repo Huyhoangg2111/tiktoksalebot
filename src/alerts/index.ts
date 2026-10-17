@@ -101,11 +101,6 @@ interface QualifiedCampaignCandidate {
   severity: AlertSeverity;
 }
 
-interface CampaignDailyAlertTrackingRow {
-  advertiser_id: string;
-  campaign_id: string;
-}
-
 const BALANCE_RULE_METRIC = 'balance';
 const LEVEL2_PRODUCT_CP_ADS_RULE_ID = -200;
 const LEVEL3_PRODUCT_CP_ADS_MONTH_RULE_ID = -300;
@@ -212,40 +207,6 @@ function normalizeSearchValue(value: string | undefined): string {
     .replace(/\s+-\s+/g, ' - ')
     .trim()
     .toLocaleUpperCase('vi-VN');
-}
-function getDateKey(timeZone = 'Asia/Ho_Chi_Minh'): string {
-  const dateParts = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(new Date());
-
-  const year = dateParts.find(part => part.type === 'year')?.value || '1970';
-  const month = dateParts.find(part => part.type === 'month')?.value || '01';
-  const day = dateParts.find(part => part.type === 'day')?.value || '01';
-
-  return `${year}-${month}-${day}`;
-}
-
-export async function setCampaignDailyAlertTracking(
-  advertiserId: string,
-  campaignId: string,
-  isTracked: boolean,
-  dateKey = getDateKey()
-): Promise<void> {
-  await db.run(
-    `INSERT INTO campaign_daily_alert_tracking (
-      date_key,
-      advertiser_id,
-      campaign_id,
-      is_tracked,
-      updated_at
-    ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(date_key, advertiser_id, campaign_id)
-    DO UPDATE SET is_tracked = excluded.is_tracked, updated_at = CURRENT_TIMESTAMP`,
-    [dateKey, advertiserId, campaignId, isTracked ? 1 : 0]
-  );
 }
 function getRuleNotificationSubjectKey(ruleId: number): string {
   return `notification:${ruleId}`;

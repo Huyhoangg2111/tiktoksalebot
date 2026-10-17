@@ -92,46 +92,6 @@ export async function connectDB() {
 
   // Create tables if they don't exist
   await db.exec(`
-    CREATE TABLE IF NOT EXISTS campaigns (
-      id TEXT PRIMARY KEY,
-      advertiser_id TEXT,
-      name TEXT,
-      status TEXT,
-      daily_budget REAL,
-      lifetime_budget REAL,
-      created_time TEXT,
-      updated_time TEXT
-    )
-  `);
-
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS campaign_performance (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      campaign_id TEXT,
-      date TEXT,
-      spend REAL,
-      impressions INTEGER,
-      clicks INTEGER,
-      conversions INTEGER,
-      cpc REAL,
-      cpa REAL,
-      ctr REAL,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
-    )
-  `);
-
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS account_balance (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      advertiser_id TEXT UNIQUE,
-      balance REAL,
-      currency TEXT,
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  await db.exec(`
     CREATE TABLE IF NOT EXISTS bot_settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL,
@@ -210,17 +170,6 @@ export async function connectDB() {
       state TEXT NOT NULL,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (rule_id, subject_key)
-    )
-  `);
-
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS campaign_daily_alert_tracking (
-      date_key TEXT NOT NULL,
-      advertiser_id TEXT NOT NULL,
-      campaign_id TEXT NOT NULL,
-      is_tracked BOOLEAN DEFAULT 1,
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (date_key, advertiser_id, campaign_id)
     )
   `);
 

@@ -4,17 +4,13 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
   executeProductPauseByToken,
-  getRecentAlerts,
   initializeAlertRules,
   PRODUCT_PAUSE_CALLBACK_PREFIX,
   PRODUCT_PAUSE_DONE_CALLBACK_PREFIX,
-  setCampaignDailyAlertTracking,
   updateProductAlertMessageIconAfterPause,
   updateProductPauseKeyboardAfterSuccess,
-  type StoredAlert,
 } from '../alerts/index.js';
 import {
-  getCampaignCloneDefaults,
   getTikTokAccountBalance,
   getTodaySpentAds,
   getTodaySpentCampaigns,
@@ -65,19 +61,11 @@ const COMMAND_MENU_DEFAULT = [
 ] as const;
 
 const CAMPAIGN_ACTION_CALLBACK_PREFIX = 'campaign_action';
-const CAMPAIGN_DAILY_ALERT_CALLBACK_PREFIX = 'cad';
 const CAMPAIGNS_PAGE_CALLBACK_PREFIX = 'campaigns_page';
 const CAMPAIGNS_STATUS_CALLBACK_PREFIX = 'cs';
 const CAMPAIGNS_NOOP_CALLBACK_PREFIX = 'cn';
-const CAMPAIGNS_ACCOUNT_PERIOD_CALLBACK_PREFIX = 'cap';
-const CAMPAIGNS_ACCOUNT_REPORT_CALLBACK_PREFIX = 'car';
-const CAMPAIGNS_MKT_PERIOD_CALLBACK_PREFIX = 'cmp';
-const CAMPAIGNS_MKT_REPORT_CALLBACK_PREFIX = 'cmr';
-const CAMPAIGNS_MKT_PAGE_CALLBACK_PREFIX = 'cmpg';
 const CAMPAIGNS_PAGE_SIZE = 15;
 const CAMPAIGNS_STATUS_BUTTONS_PER_ROW = 5;
-const CAMPAIGNS_ACCOUNT_BUTTONS_PER_ROW = 3;
-const CAMPAIGNS_MKT_BUTTONS_PER_ROW = 3;
 const CAMPAIGNS_LIST_CACHE_TTL_MS = 20_000;
 
 const COMMAND_MENU_ADMIN = [
@@ -104,12 +92,6 @@ const campaignsListStateByMessage = new Map<string, {
   campaigns: TikTokSpentCampaign[];
   fetchedAt: number;
   period?: CampaignAccountReportPeriod;
-}>();
-const campaignsMktStateByMessage = new Map<string, {
-  campaigns: TikTokSpentCampaign[];
-  fetchedAt: number;
-  period: CampaignAccountReportPeriod;
-  mktCode: string;
 }>();
 
 // Giới hạn kích thước state theo message — Map không eviction sẽ phình chậm theo thời gian chạy.
@@ -141,17 +123,6 @@ type CampaignAccountReportPeriod = {
   startDate: string;
   endDate: string;
   label: string;
-};
-
-type CampaignReportAdvertiserAccount = {
-  advertiser_id: string;
-  advertiser_name?: string;
-  mkt_code?: string;
-};
-
-type CampaignMktGroup = {
-  mktCode: string;
-  accounts: CampaignReportAdvertiserAccount[];
 };
 
 type DuplicatedCampaignResult = {
@@ -582,49 +553,6 @@ function getCampaignAccountQuickPeriods(): Array<CampaignAccountReportPeriod & {
   ];
 }
 
-function parseCampaignAccountReportPeriodArgs(args: string[]): {
-  period?: CampaignAccountReportPeriod;
-  error?: string;
-} {
-  if (args.length === 0) {
-    return {};
-  }
-
-  const firstToken = normalizeCommandToken(args[0] || '');
-  const quickPeriod = getCampaignAccountQuickPeriods()
-    .find(period => period.aliases.includes(firstToken));
-
-  if (quickPeriod) {
-    return { period: quickPeriod };
-  }
-
-  const rangePeriod = parseCampaignReportRangeInput(args.join(' '));
-  if (rangePeriod) {
-    return { period: rangePeriod };
-  }
-
-  const startDate = parseCampaignReportDateInput(args[0] || '');
-  if (!startDate) {
-    return {
-      error: 'Thời gian không hợp lệ. Dùng dạng YYYY-MM-DD hoặc DD/MM/YYYY.',
-    };
-  }
-
-  const endDate = args[1]
-    ? parseCampaignReportDateInput(args[1])
-    : startDate;
-
-  if (!endDate) {
-    return {
-      error: 'Ngày kết thúc không hợp lệ. Dùng dạng YYYY-MM-DD hoặc DD/MM/YYYY.',
-    };
-  }
-
-  return {
-    period: buildCampaignAccountReportPeriod(startDate, endDate),
-  };
-}
-
 function parseCampaignsPeriodArgs(args: string[]): {
   period?: CampaignAccountReportPeriod;
   error?: string;
@@ -951,59 +879,6 @@ function updateGroupedCampaignActionReplyMarkup(
   return changed ? { inline_keyboard: updatedKeyboard as InlineKeyboardMarkup['inline_keyboard'] } : undefined;
 }
 
-function buildCampaignDailyAlertCallbackData(
-  isTracked: boolean,
-  advertiserId: string,
-  campaignId: string
-): string {
-  return `${CAMPAIGN_DAILY_ALERT_CALLBACK_PREFIX}:${isTracked ? '1' : '0'}:${advertiserId}:${campaignId}`;
-}
-
-function getCampaignDailyAlertButtonText(currentText: string, isCurrentlyTracked: boolean): string {
-  const indexMatch = currentText.match(/\b(\d+)\b/);
-  const label = isCurrentlyTracked ? 'Bỏ TD' : 'Theo dõi';
-
-  if (indexMatch?.[1]) {
-    return `${isCurrentlyTracked ? '🔕' : '🔔'} ${indexMatch[1]} ${label}`;
-  }
-
-  return isCurrentlyTracked ? '🔕 Bỏ theo dõi hôm nay' : '🔔 Theo dõi lại hôm nay';
-}
-
-function updateCampaignDailyAlertReplyMarkup(
-  replyMarkup: InlineKeyboardMarkup | undefined,
-  advertiserId: string,
-  campaignId: string,
-  isTracked: boolean
-): InlineKeyboardMarkup | undefined {
-  if (!replyMarkup?.inline_keyboard) {
-    return undefined;
-  }
-
-  const callbackPattern = new RegExp(
-    `^${CAMPAIGN_DAILY_ALERT_CALLBACK_PREFIX}:[01]:${advertiserId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:${campaignId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`
-  );
-  let changed = false;
-  const updatedKeyboard = replyMarkup.inline_keyboard.map(row =>
-    row.map(button => {
-      const callbackData = 'callback_data' in button ? button.callback_data : '';
-
-      if (!callbackPattern.test(callbackData)) {
-        return button;
-      }
-
-      changed = true;
-      return {
-        ...button,
-        text: getCampaignDailyAlertButtonText(button.text, isTracked),
-        callback_data: buildCampaignDailyAlertCallbackData(!isTracked, advertiserId, campaignId),
-      };
-    })
-  );
-
-  return changed ? { inline_keyboard: updatedKeyboard as InlineKeyboardMarkup['inline_keyboard'] } : undefined;
-}
-
 function upsertCampaignActionResultLine(
   messageText: string,
   actionLabel: 'Pause' | 'Active',
@@ -1273,128 +1148,6 @@ function buildCampaignsStatusCallbackData(
   return `${CAMPAIGNS_STATUS_CALLBACK_PREFIX}:${statusCode}:${page}:${advertiserId}:${campaignId}`;
 }
 
-function buildCampaignAccountPeriodCallbackData(period: CampaignAccountReportPeriod): string {
-  return `${CAMPAIGNS_ACCOUNT_PERIOD_CALLBACK_PREFIX}:${period.startDate}:${period.endDate}`;
-}
-
-function buildCampaignAccountReportCallbackData(
-  period: CampaignAccountReportPeriod,
-  advertiserId: string
-): string {
-  return `${CAMPAIGNS_ACCOUNT_REPORT_CALLBACK_PREFIX}:${period.startDate}:${period.endDate}:${advertiserId}`;
-}
-
-function buildCampaignAccountPeriodKeyboard() {
-  const buttons = getCampaignAccountQuickPeriods().map(period =>
-    Markup.button.callback(
-      period.buttonText,
-      buildCampaignAccountPeriodCallbackData(period)
-    )
-  );
-
-  return Markup.inlineKeyboard(chunkArray(buttons, 2));
-}
-
-function getCampaignAccountSelectorLabel(account: CampaignReportAdvertiserAccount): string {
-  const accountLabel = getAccountShortBalanceLabel(account);
-
-  return account.mkt_code
-    ? `${accountLabel} · ${account.mkt_code}`
-    : accountLabel;
-}
-
-function buildCampaignAccountSelectorKeyboard(
-  accounts: CampaignReportAdvertiserAccount[],
-  period: CampaignAccountReportPeriod
-) {
-  const buttons = accounts.map(account =>
-    Markup.button.callback(
-      getCampaignAccountSelectorLabel(account),
-      buildCampaignAccountReportCallbackData(period, account.advertiser_id)
-    )
-  );
-
-  return Markup.inlineKeyboard(chunkArray(buttons, CAMPAIGNS_ACCOUNT_BUTTONS_PER_ROW));
-}
-
-function encodeCallbackValue(value: string): string {
-  return encodeURIComponent(value);
-}
-
-function decodeCallbackValue(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function buildCampaignMktPeriodCallbackData(period: CampaignAccountReportPeriod): string {
-  return `${CAMPAIGNS_MKT_PERIOD_CALLBACK_PREFIX}:${period.startDate}:${period.endDate}`;
-}
-
-function buildCampaignMktReportCallbackData(
-  period: CampaignAccountReportPeriod,
-  mktCode: string
-): string {
-  return `${CAMPAIGNS_MKT_REPORT_CALLBACK_PREFIX}:${period.startDate}:${period.endDate}:${encodeCallbackValue(mktCode)}`;
-}
-
-function buildCampaignMktPageCallbackData(page: number): string {
-  return `${CAMPAIGNS_MKT_PAGE_CALLBACK_PREFIX}:${page}`;
-}
-
-function buildCampaignMktPeriodKeyboard() {
-  const buttons = getCampaignAccountQuickPeriods().map(period =>
-    Markup.button.callback(
-      period.buttonText,
-      buildCampaignMktPeriodCallbackData(period)
-    )
-  );
-
-  return Markup.inlineKeyboard(chunkArray(buttons, 2));
-}
-
-async function getCampaignMktGroups(): Promise<CampaignMktGroup[]> {
-  const accounts = await getCampaignReportAdvertiserAccounts();
-  const groupByMkt = new Map<string, CampaignReportAdvertiserAccount[]>();
-
-  for (const account of accounts) {
-    const mktCode = String(account.mkt_code || 'CHUA_GAN_MKT').trim() || 'CHUA_GAN_MKT';
-    const groupAccounts = groupByMkt.get(mktCode) || [];
-
-    groupAccounts.push(account);
-    groupByMkt.set(mktCode, groupAccounts);
-  }
-
-  return [...groupByMkt.entries()]
-    .map(([mktCode, groupAccounts]) => ({
-      mktCode,
-      accounts: groupAccounts.sort((accountA, accountB) =>
-        compareAccountNames(getAccountShortBalanceLabel(accountA), getAccountShortBalanceLabel(accountB))
-      ),
-    }))
-    .sort((groupA, groupB) => groupA.mktCode.localeCompare(groupB.mktCode, 'vi'));
-}
-
-function getCampaignMktSelectorLabel(group: CampaignMktGroup): string {
-  return `${group.mktCode} (${group.accounts.length} TKQC)`;
-}
-
-function buildCampaignMktSelectorKeyboard(
-  groups: CampaignMktGroup[],
-  period: CampaignAccountReportPeriod
-) {
-  const buttons = groups.map(group =>
-    Markup.button.callback(
-      getCampaignMktSelectorLabel(group),
-      buildCampaignMktReportCallbackData(period, group.mktCode)
-    )
-  );
-
-  return Markup.inlineKeyboard(chunkArray(buttons, CAMPAIGNS_MKT_BUTTONS_PER_ROW));
-}
-
 function getCampaignsStatusButtonText(
   campaign: TikTokSpentCampaign,
   itemNumber: number,
@@ -1505,124 +1258,6 @@ function buildCampaignsPageMessage(
   };
 }
 
-function buildCampaignMktPageKeyboard(page: number, totalPages: number) {
-  if (totalPages <= 1) {
-    return undefined;
-  }
-
-  const previousPage = normalizeCampaignPage(page - 1, totalPages);
-  const nextPage = normalizeCampaignPage(page + 1, totalPages);
-
-  return Markup.inlineKeyboard([[
-    Markup.button.callback('\u23EA', buildCampaignMktPageCallbackData(previousPage)),
-    Markup.button.callback(`${page + 1}/${totalPages}`, buildCampaignMktPageCallbackData(page)),
-    Markup.button.callback('\u23E9', buildCampaignMktPageCallbackData(nextPage)),
-  ]]);
-}
-
-function buildCampaignMktReportPageMessage(
-  mktCode: string,
-  period: CampaignAccountReportPeriod,
-  campaigns: TikTokSpentCampaign[],
-  requestedPage = 0
-): {
-  message: string;
-  page: number;
-  totalPages: number;
-  replyMarkup?: ReturnType<typeof buildCampaignMktPageKeyboard>;
-} {
-  const sortedCampaigns = getSortedCampaignsBySpend(campaigns);
-  const totalPages = Math.max(Math.ceil(sortedCampaigns.length / CAMPAIGNS_PAGE_SIZE), 1);
-  const page = normalizeCampaignPage(requestedPage, totalPages);
-  const pageCampaigns = sortedCampaigns.slice(
-    page * CAMPAIGNS_PAGE_SIZE,
-    (page + 1) * CAMPAIGNS_PAGE_SIZE
-  );
-  const periodRange = formatCampaignReportPeriodRange(period);
-  const lines = [
-    `<b>Chiến dịch MKT ${escapeHtml(mktCode)}</b>`,
-    `<b>Phần ${page + 1}/${totalPages}</b>`,
-    `\u{1F4C5} <code>${escapeHtml(periodRange)}</code>`,
-    '',
-    escapeHtml(formatCampaignSummary(summarizeCampaigns(sortedCampaigns), true)),
-    escapeHtml(formatCampaignStatusSummary(sortedCampaigns)),
-    '',
-  ];
-
-  for (const [index, campaign] of pageCampaigns.entries()) {
-    const shortName = getCampaignShortName(campaign.campaign_name);
-    const accountNumber = getAccountNumberLabel(campaign);
-    const accountSuffix = accountNumber ? ` \u00b7 ${escapeHtml(accountNumber)}` : '';
-    const itemNumber = page * CAMPAIGNS_PAGE_SIZE + index + 1;
-
-    lines.push(
-      `${itemNumber}. ${getCampaignStatusIcon(campaign)} ${escapeHtml(shortName)} - <code>${escapeHtml(campaign.campaign_id)}</code>${accountSuffix}`,
-      `\u{1F4B8} ${formatCurrency(campaign.spend)} \u00b7 \u{1F446} ${campaign.clicks.toLocaleString()}/${formatPercent(campaign.ctr)} \u00b7 \u{1F3AF} ${campaign.conversions.toLocaleString()} \u00b7 \u{1F4B0} ${formatCurrency(campaign.cpa)}`
-    );
-  }
-
-  return {
-    message: lines.join('\n'),
-    page,
-    totalPages,
-    replyMarkup: buildCampaignMktPageKeyboard(page, totalPages),
-  };
-}
-
-function dedupeCampaignReportAdvertiserAccounts(
-  accounts: CampaignReportAdvertiserAccount[]
-): CampaignReportAdvertiserAccount[] {
-  const accountById = new Map<string, CampaignReportAdvertiserAccount>();
-
-  for (const account of accounts) {
-    if (!account.advertiser_id) {
-      continue;
-    }
-
-    const existingAccount = accountById.get(account.advertiser_id);
-    accountById.set(account.advertiser_id, {
-      advertiser_id: account.advertiser_id,
-      advertiser_name: existingAccount?.advertiser_name || account.advertiser_name,
-      mkt_code: existingAccount?.mkt_code || account.mkt_code,
-    });
-  }
-
-  return [...accountById.values()].sort((accountA, accountB) =>
-    compareAccountNames(
-      getAccountShortBalanceLabel(accountA),
-      getAccountShortBalanceLabel(accountB)
-    )
-  );
-}
-
-async function getCampaignReportAdvertiserAccounts(): Promise<CampaignReportAdvertiserAccount[]> {
-  try {
-    const permissions = await getAdvertiserPermissions({ includeAllMkt: true });
-    const permissionAccounts = dedupeCampaignReportAdvertiserAccounts(
-      permissions.map(permission => ({
-        advertiser_id: permission.advertiserId,
-        advertiser_name: permission.advertiserName,
-        mkt_code: permission.mktCode,
-      }))
-    );
-
-    if (permissionAccounts.length > 0) {
-      return permissionAccounts;
-    }
-  } catch (error) {
-    console.error('Error fetching advertiser permissions for campaign account report:', error);
-  }
-
-  const balances = await getTikTokAccountBalance();
-  return dedupeCampaignReportAdvertiserAccounts(
-    balances.map(account => ({
-      advertiser_id: account.advertiser_id,
-      advertiser_name: account.advertiser_name,
-      mkt_code: account.mkt_code,
-    }))
-  );
-}
-
 function aggregateCampaignsByCampaign(campaigns: TikTokSpentCampaign[]): TikTokSpentCampaign[] {
   const campaignByKey = new Map<string, TikTokSpentCampaign>();
 
@@ -1665,43 +1300,6 @@ function aggregateCampaignsByCampaign(campaigns: TikTokSpentCampaign[]): TikTokS
     );
 }
 
-function buildCampaignAccountReportMessage(
-  account: CampaignReportAdvertiserAccount,
-  period: CampaignAccountReportPeriod,
-  campaigns: TikTokSpentCampaign[]
-): string {
-  const sortedCampaigns = aggregateCampaignsByCampaign(campaigns);
-  const accountLabel = getAccountDisplayName(account);
-  const periodRange = formatCampaignReportPeriodRange(period);
-  const lines = [
-    `<b>${escapeHtml(accountLabel)}</b>`,
-    `\u{1F4C5} ${escapeHtml(period.label)} · <code>${escapeHtml(periodRange)}</code>`,
-    '',
-  ];
-
-  if (sortedCampaigns.length === 0) {
-    lines.push('Không có chiến dịch phát sinh chi tiêu trong thời gian này.');
-    return lines.join('\n');
-  }
-
-  lines.push(
-    escapeHtml(formatCampaignSummary(summarizeCampaigns(sortedCampaigns), true)),
-    escapeHtml(formatCampaignStatusSummary(sortedCampaigns)),
-    ''
-  );
-
-  for (const [index, campaign] of sortedCampaigns.entries()) {
-    const shortName = getCampaignShortName(campaign.campaign_name);
-
-    lines.push(
-      `${index + 1}. ${getCampaignStatusIcon(campaign)} ${escapeHtml(shortName)} - <code>${escapeHtml(campaign.campaign_id)}</code>`,
-      `\u{1F4B8} ${formatCurrency(campaign.spend)} \u00b7 \u{1F446} ${campaign.clicks.toLocaleString()}/${formatPercent(campaign.ctr)} \u00b7 \u{1F3AF} ${campaign.conversions.toLocaleString()} \u00b7 \u{1F4B0} ${formatCurrency(campaign.cpa)}`
-    );
-  }
-
-  return lines.join('\n');
-}
-
 async function editCampaignsListMessage(
   telegram: Context['telegram'],
   chatId: number | string,
@@ -1734,70 +1332,6 @@ async function editCampaignsListMessage(
   saveCampaignsListMessageState(chatId, messageId, campaigns, period);
 }
 
-function saveCampaignMktMessageState(
-  chatId: number | string,
-  messageId: number,
-  campaigns: TikTokSpentCampaign[],
-  period: CampaignAccountReportPeriod,
-  mktCode: string
-): void {
-  campaignsMktStateByMessage.set(
-    getCampaignListStateKey(chatId, messageId),
-    {
-      campaigns,
-      fetchedAt: Date.now(),
-      period,
-      mktCode,
-    }
-  );
-  capMessageStateEntries(campaignsMktStateByMessage);
-}
-
-async function editCampaignMktReportMessage(
-  telegram: Context['telegram'],
-  chatId: number | string,
-  messageId: number,
-  requestedPage: number
-): Promise<void> {
-  const state = campaignsMktStateByMessage.get(getCampaignListStateKey(chatId, messageId));
-
-  if (!state) {
-    await telegram.editMessageText(
-      chatId,
-      messageId,
-      undefined,
-      'Báo cáo MKT đã hết hạn. Vui lòng chạy lại /campmkt.'
-    );
-    return;
-  }
-
-  const campaignPage = buildCampaignMktReportPageMessage(
-    state.mktCode,
-    state.period,
-    state.campaigns,
-    requestedPage
-  );
-
-  try {
-    await telegram.editMessageText(
-      chatId,
-      messageId,
-      undefined,
-      campaignPage.message,
-      {
-        parse_mode: 'HTML',
-        ...(campaignPage.replyMarkup?.reply_markup ? { reply_markup: campaignPage.replyMarkup.reply_markup } : {}),
-      }
-    );
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-
-    if (!errorMessage.toLowerCase().includes('message is not modified')) {
-      throw error;
-    }
-  }
-}
-
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -1810,44 +1344,6 @@ function formatCallbackErrorMessage(prefix: string, error: unknown): string {
   const reason = getErrorMessage(error).replace(/\s+/g, ' ').trim();
   const message = reason ? `${prefix}: ${reason}` : prefix;
   return message.length > 190 ? `${message.slice(0, 187)}...` : message;
-}
-
-function getAlertSeverityIcon(severity: StoredAlert['severity']): string {
-  if (severity === 'critical') {
-    return '🛑';
-  }
-
-  if (severity === 'high') {
-    return '🔴';
-  }
-
-  if (severity === 'medium') {
-    return '🟠';
-  }
-
-  return '🟡';
-}
-
-function formatAlertTypeLabel(type: string): string {
-  return type
-    .split('_')
-    .filter(Boolean)
-    .map(word => `${word.charAt(0).toUpperCase()}${word.slice(1)}`)
-    .join(' ');
-}
-
-function buildRecentAlertsMessage(alerts: StoredAlert[]): string {
-  return alerts
-    .map((alert, index) => {
-      const title = `${getAlertSeverityIcon(alert.severity)} ${alert.severity.toUpperCase()} · ${formatAlertTypeLabel(alert.type)}`;
-      return [
-        `<b>${index + 1}. ${escapeHtml(title)}</b>`,
-        `<code>${escapeHtml(alert.createdAt)} UTC</code>`,
-        `<code>${escapeHtml(alert.type)}</code>`,
-        escapeHtml(alert.message.trim() || '(Không có nội dung)'),
-      ].join('\n');
-    })
-    .join('\n\n');
 }
 
 async function setupCommandMenu(bot: Telegraf): Promise<void> {
@@ -2243,270 +1739,6 @@ async function processXcampQueue(): Promise<void> {
   }
 }
 
-function buildCampaignMktSelectorMessage(period: CampaignAccountReportPeriod): string {
-  return [
-    '<b>Chọn MKT để xem chiến dịch</b>',
-    `Thời gian: <code>${escapeHtml(formatCampaignReportPeriodRange(period))}</code>`,
-    '',
-    'Có thể nhập khoảng ngày riêng:',
-    '<code>/campmkt 24</code>',
-    '<code>/campmkt 24-29</code>',
-    '<code>/campmkt 24/04-29/04</code>',
-    '<code>/campmkt 2026-04-24 2026-04-29</code>',
-  ].join('\n');
-}
-
-async function sendCampaignMktSelector(
-  ctx: Context,
-  period: CampaignAccountReportPeriod
-): Promise<void> {
-  const groups = await getCampaignMktGroups();
-
-  if (groups.length === 0) {
-    await ctx.reply('Không xác định được MKT từ Page Mapping hoặc tên chiến dịch.');
-    return;
-  }
-
-  const keyboard = buildCampaignMktSelectorKeyboard(groups, period);
-  await ctx.reply(
-    buildCampaignMktSelectorMessage(period),
-    {
-      parse_mode: 'HTML',
-      ...keyboard,
-    }
-  );
-}
-
-async function editCampaignMktSelector(
-  ctx: Context,
-  period: CampaignAccountReportPeriod
-): Promise<void> {
-  const groups = await getCampaignMktGroups();
-
-  if (groups.length === 0) {
-    await ctx.editMessageText('Không xác định được MKT từ Page Mapping hoặc tên chiến dịch.');
-    return;
-  }
-
-  const keyboard = buildCampaignMktSelectorKeyboard(groups, period);
-  await ctx.editMessageText(
-    buildCampaignMktSelectorMessage(period),
-    {
-      parse_mode: 'HTML',
-      ...keyboard,
-    }
-  );
-}
-
-async function handleCampaignMktReportRequest(ctx: Context, forcedArgs?: string[]): Promise<void> {
-  const messageText = getTextMessage(ctx);
-  const args = forcedArgs ?? messageText.split(/\s+/).slice(1).filter(Boolean);
-  const parseResult = parseCampaignsPeriodArgs(args);
-
-  if (parseResult.error) {
-    await ctx.reply(
-      'Thời gian không hợp lệ.\n\nVí dụ:\n/campmkt 24\n/campmkt 24-29\n/campmkt 24/04-29/04\n/campmkt 2026-04-24 2026-04-29'
-    );
-    return;
-  }
-
-  if (!parseResult.period) {
-    await ctx.reply(
-      '<b>Chọn thời gian xem chiến dịch theo MKT</b>',
-      {
-        parse_mode: 'HTML',
-        ...buildCampaignMktPeriodKeyboard(),
-      }
-    );
-    return;
-  }
-
-  await sendCampaignMktSelector(ctx, parseResult.period);
-}
-
-async function sendCampaignMktReport(
-  ctx: Context,
-  period: CampaignAccountReportPeriod,
-  mktCode: string
-): Promise<void> {
-  const message = ctx.callbackQuery?.message;
-
-  if (!message?.chat?.id || !message.message_id) {
-    await ctx.reply('Không cập nhật được tin nhắn báo cáo MKT.');
-    return;
-  }
-
-  const groups = await getCampaignMktGroups();
-  const group = groups.find(item => item.mktCode === mktCode);
-
-  if (!group) {
-    await ctx.editMessageText(`Không tìm thấy MKT ${escapeHtml(mktCode)} trong dữ liệu chiến dịch.`, {
-      parse_mode: 'HTML',
-    });
-    return;
-  }
-
-  await ctx.editMessageText(
-    `Đang lấy dữ liệu chiến dịch cho MKT <b>${escapeHtml(mktCode)}</b>...`,
-    { parse_mode: 'HTML' }
-  );
-
-  const allowedAdvertiserIds = new Set(group.accounts.map(account => account.advertiser_id));
-  const campaigns = await applyTodayAdStatusesToCampaigns(aggregateCampaignsByCampaign((await getTodaySpentCampaigns(
-    period.startDate,
-    period.endDate,
-    {
-      advertiserIds: group.accounts.map(account => account.advertiser_id),
-      advertiserAccounts: group.accounts.map(account => ({
-        advertiserId: account.advertiser_id,
-        advertiserName: account.advertiser_name,
-        mktCode: account.mkt_code,
-      })),
-    }
-  )).filter(campaign => allowedAdvertiserIds.has(campaign.advertiser_id))), {
-    advertiserIds: group.accounts.map(account => account.advertiser_id),
-    advertiserAccounts: group.accounts.map(account => ({
-      advertiserId: account.advertiser_id,
-      advertiserName: account.advertiser_name,
-      mktCode: account.mkt_code,
-    })),
-  });
-
-  if (campaigns.length === 0) {
-    await ctx.editMessageText(
-      `Không có chiến dịch phát sinh chi tiêu cho MKT <b>${escapeHtml(mktCode)}</b> trong thời gian <code>${escapeHtml(formatCampaignReportPeriodRange(period))}</code>.`,
-      { parse_mode: 'HTML' }
-    );
-    return;
-  }
-
-  saveCampaignMktMessageState(message.chat.id, message.message_id, campaigns, period, mktCode);
-  await editCampaignMktReportMessage(ctx.telegram, message.chat.id, message.message_id, 0);
-}
-
-function buildCampaignAccountSelectorMessage(period: CampaignAccountReportPeriod): string {
-  return [
-    '<b>Chọn TKQC để xem chiến dịch</b>',
-    `Thời gian: <code>${escapeHtml(formatCampaignReportPeriodRange(period))}</code>`,
-    '',
-    'Có thể nhập khoảng ngày riêng:',
-    '<code>/tkqc 01-29</code>',
-    '<code>/tkqc 01/04-29/04</code>',
-    '<code>/tkqc 01/04/2026-29/04/2026</code>',
-  ].join('\n');
-}
-
-async function sendCampaignAccountSelector(
-  ctx: Context,
-  period: CampaignAccountReportPeriod
-): Promise<void> {
-  const accounts = await getCampaignReportAdvertiserAccounts();
-
-  if (accounts.length === 0) {
-    await ctx.reply('Không tìm thấy TKQC đang bật trong mục Tài khoản quảng cáo.');
-    return;
-  }
-
-  const keyboard = buildCampaignAccountSelectorKeyboard(accounts, period);
-  await ctx.reply(
-    buildCampaignAccountSelectorMessage(period),
-    {
-      parse_mode: 'HTML',
-      ...keyboard,
-    }
-  );
-}
-
-async function editCampaignAccountSelector(
-  ctx: Context,
-  period: CampaignAccountReportPeriod
-): Promise<void> {
-  const accounts = await getCampaignReportAdvertiserAccounts();
-
-  if (accounts.length === 0) {
-    await ctx.editMessageText('Không tìm thấy TKQC đang bật trong mục Tài khoản quảng cáo.');
-    return;
-  }
-
-  const keyboard = buildCampaignAccountSelectorKeyboard(accounts, period);
-  await ctx.editMessageText(
-    buildCampaignAccountSelectorMessage(period),
-    {
-      parse_mode: 'HTML',
-      ...keyboard,
-    }
-  );
-}
-
-async function handleCampaignAccountReportRequest(ctx: Context, forcedArgs?: string[]): Promise<void> {
-  const messageText = getTextMessage(ctx);
-  const args = forcedArgs ?? messageText.split(/\s+/).slice(1).filter(Boolean);
-  const parseResult = parseCampaignAccountReportPeriodArgs(args);
-
-  if (parseResult.error) {
-    await ctx.reply(
-      `${parseResult.error}\n\nVí dụ:\n/tkqc 01-29\n/tkqc 01/04-29/04\n/tkqc 01/04/2026-29/04/2026\n/tkqc 2026-04-01 2026-04-29`
-    );
-    return;
-  }
-
-  if (!parseResult.period) {
-    await ctx.reply(
-      '<b>Chọn thời gian xem chiến dịch theo TKQC</b>',
-      {
-        parse_mode: 'HTML',
-        ...buildCampaignAccountPeriodKeyboard(),
-      }
-    );
-    return;
-  }
-
-  await sendCampaignAccountSelector(ctx, parseResult.period);
-}
-
-async function sendCampaignAccountReport(
-  ctx: Context,
-  period: CampaignAccountReportPeriod,
-  advertiserId: string
-): Promise<void> {
-  const accounts = await getCampaignReportAdvertiserAccounts();
-  const account = accounts.find(item => item.advertiser_id === advertiserId) || {
-    advertiser_id: advertiserId,
-  };
-
-  try {
-    await ctx.editMessageText(
-      `Đang lấy dữ liệu chiến dịch cho ${escapeHtml(getCampaignAccountSelectorLabel(account))}...`,
-      { parse_mode: 'HTML' }
-    );
-  } catch (error) {
-    console.error('Error editing campaign account selector while loading:', error);
-  }
-
-  const campaigns = await applyTodayAdStatusesToCampaigns(await getTodaySpentCampaigns(
-    period.startDate,
-    period.endDate,
-    {
-      advertiserIds: [advertiserId],
-      advertiserAccounts: [{
-        advertiserId: account.advertiser_id,
-        advertiserName: account.advertiser_name,
-        mktCode: account.mkt_code,
-      }],
-    }
-  ), {
-    advertiserIds: [advertiserId],
-    advertiserAccounts: [{
-      advertiserId: account.advertiser_id,
-      advertiserName: account.advertiser_name,
-      mktCode: account.mkt_code,
-    }],
-  });
-
-  const reportMessage = buildCampaignAccountReportMessage(account, period, campaigns);
-  await replyLongMessage(ctx, reportMessage, { parse_mode: 'HTML' });
-}
-
 async function handleCampaignsRequest(ctx: Context, forcedArgs?: string[]): Promise<void> {
   try {
     const messageText = getTextMessage(ctx);
@@ -2563,28 +1795,6 @@ async function handleActiveCampaignProductsRequest(ctx: Context): Promise<void> 
   } catch (error) {
     console.error('Error building active campaign product report:', error);
     await ctx.reply('❌ Có lỗi xảy ra khi thống kê campaign active theo sản phẩm.');
-  }
-}
-
-async function handleAlertsRequest(ctx: Context): Promise<void> {
-  if (!isAdmin(ctx)) {
-    await ctx.reply('❌ Chỉ admin mới có thể xem danh sách cảnh báo.');
-    return;
-  }
-
-  try {
-    const alerts = await getRecentAlerts(10);
-
-    if (alerts.length === 0) {
-      await ctx.reply('📋 Chưa có cảnh báo nào được ghi nhận.');
-      return;
-    }
-
-    const response = `📋 10 cảnh báo gần đây:\n\n${buildRecentAlertsMessage(alerts)}`;
-    await replyLongMessage(ctx, response, { parse_mode: 'HTML' });
-  } catch (error) {
-    console.error('Error fetching alerts:', error);
-    await ctx.reply('❌ Có lỗi xảy ra khi lấy danh sách cảnh báo.');
   }
 }
 
@@ -2761,7 +1971,6 @@ export function setupBotHandlers(bot: Telegraf) {
 
   bot.command('balance', (ctx) => void handleBalanceRequest(ctx));
   bot.command('campactive', (ctx) => void handleActiveCampaignProductsRequest(ctx));
-  bot.command('settings', (ctx) => void handleSettingsRequest(ctx));
   setupBcSalesHandlers(bot);
 
   // Nút tắt camp theo SP dưới cảnh báo cấp 2 / cấp 3 (chấm màu + số như /campaigns).
@@ -3147,77 +2356,6 @@ export function setupBotHandlers(bot: Telegraf) {
 
       await ctx.answerCbQuery(alertErrorMessage, { show_alert: true });
     }
-  });
-
-  bot.action(/^cad:([01]):([^:]+):(.+)$/, async (ctx) => {
-    if (!isAdmin(ctx)) {
-      await ctx.answerCbQuery('Không có quyền thực hiện.');
-      return;
-    }
-
-    const isTracked = ctx.match[1] === '1';
-    const advertiserId = ctx.match[2];
-    const campaignId = ctx.match[3];
-
-    try {
-      await setCampaignDailyAlertTracking(advertiserId, campaignId, isTracked);
-
-      const message = ctx.callbackQuery.message as { reply_markup?: InlineKeyboardMarkup } | undefined;
-      if (message?.reply_markup) {
-        const nextReplyMarkup = updateCampaignDailyAlertReplyMarkup(
-          message.reply_markup,
-          advertiserId,
-          campaignId,
-          isTracked
-        );
-
-        if (nextReplyMarkup) {
-          try {
-            await ctx.editMessageReplyMarkup(nextReplyMarkup);
-          } catch (editError) {
-            console.error('Error editing campaign daily alert tracking keyboard:', editError);
-          }
-        }
-      }
-
-      await ctx.answerCbQuery(
-        isTracked
-          ? 'Đã theo dõi lại camp này trong hôm nay.'
-          : 'Đã bỏ theo dõi camp này trong hôm nay.'
-      );
-    } catch (error) {
-      console.error('Error updating campaign daily alert tracking:', error);
-      await ctx.answerCbQuery('Không cập nhật được theo dõi camp.', { show_alert: true });
-    }
-  });
-
-  bot.action(/^duplicate_camp:(.+)$/, async (ctx) => {
-    if (!isAdmin(ctx)) {
-      await ctx.answerCbQuery('Không có quyền thực hiện.');
-      return;
-    }
-
-    const campaignId = ctx.match[1];
-
-    await ctx.answerCbQuery();
-
-    let budget = 20;
-    let bid = 0.5;
-    try {
-      const cloneDefaults = await getCampaignCloneDefaults(campaignId);
-      if (cloneDefaults.budget != null) {
-        budget = cloneDefaults.budget;
-      }
-      if (cloneDefaults.bid != null) {
-        bid = cloneDefaults.bid;
-      }
-    } catch (error) {
-      console.error(`Không lấy được ngân sách/thầu hiện tại cho camp ${campaignId}:`, error);
-    }
-
-    const budgetText = formatCommandNumber(budget);
-    const bidText = formatCommandNumber(bid);
-    await ctx.reply(`Ví dụ nhân bản 3 camp, ngân sách $${budgetText}, thầu $${bidText}:\n<code>/xcamp ${campaignId} 3 ${budgetText} ${bidText}</code>`, { parse_mode: 'HTML' });
   });
 
   bot.command('campaigns', (ctx) => void handleCampaignsRequest(ctx));
