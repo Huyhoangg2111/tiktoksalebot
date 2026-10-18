@@ -245,10 +245,11 @@ async function migrateLegacyMaterialRulerRules(): Promise<void> {
 }
 
 const UNIFY_RULER_ENTITY_MARKER = 'ruler_entity_unified_both_migrated';
+const DUAL_LAYER_RULER_MARKER = 'ruler_entity_dual_layers_migrated';
 
 /**
- * Một lần: gộp entity campaign/material → both (camp + material trong camp),
- * rồi xoá các dòng trùng điều kiện sau khi gộp.
+ * Deprecated: không còn gộp campaign/material → both.
+ * Chỉ đánh dấu đã xử lý để không chạy lại bản gộp cũ trên DB mới.
  */
 async function migrateUnifyRulerEntityToBoth(): Promise<void> {
   const marker = await db.get<{ value: string }>(
@@ -257,42 +258,82 @@ async function migrateUnifyRulerEntityToBoth(): Promise<void> {
   );
   if (String(marker?.value || '') === '1') return;
 
-  const updated = await db.run(
-    `UPDATE alert_action_rules SET entity = 'both', updated_at = CURRENT_TIMESTAMP
-     WHERE entity IN ('campaign', 'material')`
+  await db.run(
+    'INSERT OR REPLACE INTO bot_settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)',
+    [UNIFY_RULER_ENTITY_MARKER, '1']
   );
+  console.log('[DB migration] ruler entity: bỏ qua gộp → both (giữ ngưỡng camp/material riêng)');
+}
 
-  const rows = await db.all<{ id: number }>(`
-    SELECT a.id
-    FROM alert_action_rules a
-    WHERE a.entity = 'both'
-      AND EXISTS (
-        SELECT 1 FROM alert_action_rules b
-        WHERE b.entity = 'both'
-          AND b.id < a.id
-          AND IFNULL(b.trigger_kind, 'continuous') = IFNULL(a.trigger_kind, 'continuous')
-          AND IFNULL(b.run_time, '') = IFNULL(a.run_time, '')
-          AND IFNULL(b.period, '') = IFNULL(a.period, '')
-          AND IFNULL(b.name_contains, '') = IFNULL(a.name_contains, '')
-          AND b.metric = a.metric
-          AND b.metric_operator = a.metric_operator
-          AND b.metric_threshold = a.metric_threshold
-          AND IFNULL(b.metric_min_threshold, -1) = IFNULL(a.metric_min_threshold, -1)
-          AND b.conversions_operator = a.conversions_operator
-          AND b.conversions_threshold = a.conversions_threshold
-          AND b.action = a.action
-          AND IFNULL(b.is_active, 1) = IFNULL(a.is_active, 1)
-          AND IFNULL(b.note, '') = IFNULL(a.note, '')
-      )
-  `).catch(() => [] as { id: number }[]);
+/**
+ * Một lần: tách entity=both (pause/enable) thành 2 dòng campaign + material
+ * cùng ngưỡng ban đầu — UI/engine dùng ngưỡng riêng từng tầng.
+ * Quy tắc notify giữ entity=both.
+ */
+async function migrateBothEntityToDualLayers(): Promise<void> {
+  const marker = await db.get<{ value: string }>(
+    'SELECT value FROM bot_settings WHERE key = ?',
+    [DUAL_LAYER_RULER_MARKER]
+  );
+  if (String(marker?.value || '') === '1') return;
 
-  let deleted = 0;
-  if (rows.length > 0) {
+  type BothRow = {
+    id: number;
+    trigger_kind: string | null;
+    run_time: string | null;
+    period: string | null;
+    name_contains: string | null;
+    metric: string;
+    metric_operator: string;
+    metric_threshold: number;
+    metric_min_threshold: number | null;
+    conversions_operator: string;
+    conversions_threshold: number;
+    action: string;
+    is_active: number | null;
+    note: string | null;
+  };
+
+  const bothRows = await db.all<BothRow>(
+    `SELECT id,trigger_kind,run_time,period,name_contains,metric,metric_operator,metric_threshold,
+            metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note
+     FROM alert_action_rules
+     WHERE entity = 'both' AND action IN ('pause', 'enable')
+     ORDER BY id`
+  ).catch(() => [] as BothRow[]);
+
+  let expanded = 0;
+  if (bothRows.length > 0) {
     await db.exec('BEGIN IMMEDIATE');
     try {
-      for (const row of rows) {
-        await db.run('DELETE FROM alert_action_rules WHERE id = ?', [row.id]);
-        deleted += 1;
+      for (const row of bothRows) {
+        await db.run(
+          `UPDATE alert_action_rules SET entity = 'campaign', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          [row.id]
+        );
+        await db.run(
+          `INSERT INTO alert_action_rules(
+            entity,trigger_kind,run_time,period,name_contains,metric,metric_operator,metric_threshold,
+            metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note
+          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [
+            'material',
+            row.trigger_kind || 'continuous',
+            row.run_time,
+            row.period,
+            row.name_contains,
+            row.metric,
+            row.metric_operator,
+            row.metric_threshold,
+            row.metric_min_threshold,
+            row.conversions_operator,
+            row.conversions_threshold,
+            row.action,
+            row.is_active ?? 1,
+            row.note,
+          ]
+        );
+        expanded += 1;
       }
       await db.exec('COMMIT');
     } catch (error) {
@@ -303,11 +344,11 @@ async function migrateUnifyRulerEntityToBoth(): Promise<void> {
 
   await db.run(
     'INSERT OR REPLACE INTO bot_settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)',
-    [UNIFY_RULER_ENTITY_MARKER, '1']
+    [DUAL_LAYER_RULER_MARKER, '1']
   );
 
   console.log(
-    `[DB migration] ruler entity: chuyển ${updated.changes ?? 0} rule → both; xoá ${deleted} dòng trùng`
+    `[DB migration] ruler dual-layer: tách ${expanded} rule both → campaign + material`
   );
 }
 
@@ -404,6 +445,7 @@ export async function connectDB() {
 
   await migrateLegacyMaterialRulerRules();
   await migrateUnifyRulerEntityToBoth();
+  await migrateBothEntityToDualLayers();
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS alert_action_state (

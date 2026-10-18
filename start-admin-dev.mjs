@@ -21,23 +21,39 @@ const { startAdminServer } = adminModule;
 
 const seedDemoData = async () => {
   const db = dbModule.db;
-  // Rule demo "Cả hai (Campaign + Material)" — gieo cả khi DB đã có rule cũ.
-  const hasBoth = await db.get(`SELECT COUNT(*) as c FROM alert_action_rules WHERE note = 'Demo Cả hai'`);
-  if (Number(hasBoth?.c || 0) === 0) {
-    await db.run(`DELETE FROM alert_action_rules WHERE note = 'Demo Cả hai'`);
-    const bothRules = [
-      { threshold: 20, action: 'pause', name: 'Mặt nạ mắt demo' },
-      { threshold: 5, action: 'enable', name: 'Mặt nạ mắt demo' },
-      { threshold: 30, action: 'notify', name: 'Son kem demo' },
+  // Demo dual-layer: 1 card / tên chiến dịch, 2 khối ngưỡng camp ≠ material.
+  const hasDual = await db.get(`SELECT COUNT(*) as c FROM alert_action_rules WHERE note LIKE 'Demo dual%'`);
+  if (Number(hasDual?.c || 0) === 0) {
+    await db.run(`DELETE FROM alert_action_rules WHERE note IN ('Demo Cả hai') OR note LIKE 'Demo dual%'`);
+    const spendDemo = [
+      { entity: 'campaign', th: 0.5, action: 'pause' },
+      { entity: 'material', th: 0.2, action: 'pause' },
     ];
-    for (const rule of bothRules) {
+    for (const rule of spendDemo) {
       await db.run(`INSERT INTO alert_action_rules
-        (entity,trigger_kind,run_time,period,name_contains,metric,metric_operator,metric_threshold,
+        (entity,trigger_kind,name_contains,metric,metric_operator,metric_threshold,
          conversions_operator,conversions_threshold,action,is_active,note)
-        VALUES('both','scheduled','06:30','last_7_days',?,'spend','gt',?,'gt',0,?,1,'Demo Cả hai')`,
-        [rule.name, rule.threshold, rule.action]);
+        VALUES(?,'continuous','gấu bông -VN','spend','gt',?,'lt',1,?,1,'Demo dual spend')`,
+        [rule.entity, rule.th, rule.action]);
     }
-    console.log('Đã gieo 3 rule demo "Cả hai" (TẮT >$20 · BẬT >$5 · THÔNG BÁO >$30)');
+    const cpaDemo = [
+      { entity: 'campaign', op: 'gt', th: 0.6, action: 'pause' },
+      { entity: 'campaign', op: 'lt', th: 0.6, action: 'enable' },
+      { entity: 'material', op: 'gt', th: 0.4, action: 'pause' },
+      { entity: 'material', op: 'lt', th: 0.4, action: 'enable' },
+    ];
+    for (const rule of cpaDemo) {
+      await db.run(`INSERT INTO alert_action_rules
+        (entity,trigger_kind,name_contains,metric,metric_operator,metric_threshold,
+         conversions_operator,conversions_threshold,action,is_active,note)
+        VALUES(?,'continuous','gấu bông -VN','cpa',?,?, 'gte',1,?,1,'Demo dual CPA')`,
+        [rule.entity, rule.op, rule.th, rule.action]);
+    }
+    await db.run(`INSERT INTO alert_action_rules
+      (entity,trigger_kind,run_time,period,name_contains,metric,metric_operator,metric_threshold,
+       conversions_operator,conversions_threshold,action,is_active,note)
+      VALUES('both','scheduled','06:30','last_7_days','Son kem demo','spend','gt',30,'gt',0,'notify',1,'Demo dual notify')`);
+    console.log('Đã gieo demo dual-layer: spend camp>0.5/mat>0.2 · CPA camp 0.6/mat 0.4');
   }
   await db.exec('CREATE TABLE IF NOT EXISTS admin_config_rows(id INTEGER PRIMARY KEY AUTOINCREMENT,section TEXT NOT NULL,data_json TEXT NOT NULL,position INTEGER NOT NULL DEFAULT 0,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)');
   const existing = await db.get('SELECT COUNT(*) as c FROM alert_action_rules');
