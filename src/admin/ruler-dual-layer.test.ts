@@ -21,3 +21,11 @@ test('ruler UI: entity=both và flatten không tái dùng cùng id cho hai tần
   assert.match(source, /const usedIds=new Set\(\)/);
   assert.match(source, /if\(usedIds\.has\(n\)\)id=undefined/);
 });
+
+test('ruler UI: có thêm quy tắc thông báo Telegram (blankNotify + nút)', () => {
+  assert.match(source, /const blankNotify=/);
+  assert.match(source, /id="add-notify"/);
+  assert.match(source, /action:'notify'/);
+  assert.match(source, /entity:'both'/);
+  assert.match(source, /Thông báo Telegram/);
+});
