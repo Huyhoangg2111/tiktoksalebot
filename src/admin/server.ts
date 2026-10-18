@@ -35,11 +35,13 @@ const scheduleDefaultsFor=(r:Record<string,string|number>)=>{const trigger=Strin
 for(const item of items){
 const r=normalize(section,item);
 const schedule=scheduleDefaultsFor(r);
+// Ruler thống nhất: luôn áp dụng cho campaign + material trong camp (entity=both).
+const entity='both';
 const id=getRowId(item);
 if(id!==undefined&&id>0){
-await db.run(`UPDATE alert_action_rules SET entity=?,trigger_kind=?,run_time=?,period=?,name_contains=?,metric=?,metric_operator=?,metric_threshold=?,metric_min_threshold=?,conversions_operator=?,conversions_threshold=?,action=?,is_active=?,note=?,campaign_status=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`,[r.entity,schedule.trigger_kind,schedule.run_time,schedule.period,r.name_contains||null,r.metric,r.metric_operator,Number(r.metric_threshold),r.metric_min_threshold===''?null:Number(r.metric_min_threshold),r.conversions_operator,Number(r.conversions_threshold),r.action,r.enabled,r.note||null,id]);
+await db.run(`UPDATE alert_action_rules SET entity=?,trigger_kind=?,run_time=?,period=?,name_contains=?,metric=?,metric_operator=?,metric_threshold=?,metric_min_threshold=?,conversions_operator=?,conversions_threshold=?,action=?,is_active=?,note=?,campaign_status=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`,[entity,schedule.trigger_kind,schedule.run_time,schedule.period,r.name_contains||null,r.metric,r.metric_operator,Number(r.metric_threshold),r.metric_min_threshold===''?null:Number(r.metric_min_threshold),r.conversions_operator,Number(r.conversions_threshold),r.action,r.enabled,r.note||null,id]);
 }else{
-await db.run(`INSERT INTO alert_action_rules(entity,trigger_kind,run_time,period,name_contains,metric,metric_operator,metric_threshold,metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[r.entity,schedule.trigger_kind,schedule.run_time,schedule.period,r.name_contains||null,r.metric,r.metric_operator,Number(r.metric_threshold),r.metric_min_threshold===''?null:Number(r.metric_min_threshold),r.conversions_operator,Number(r.conversions_threshold),r.action,r.enabled,r.note||null]);
+await db.run(`INSERT INTO alert_action_rules(entity,trigger_kind,run_time,period,name_contains,metric,metric_operator,metric_threshold,metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,[entity,schedule.trigger_kind,schedule.run_time,schedule.period,r.name_contains||null,r.metric,r.metric_operator,Number(r.metric_threshold),r.metric_min_threshold===''?null:Number(r.metric_min_threshold),r.conversions_operator,Number(r.conversions_threshold),r.action,r.enabled,r.note||null]);
 }}
 // Giữ id ổn định giữa các lần lưu: chỉ xoá những dòng không còn trong danh sách gửi lên.
 if(payloadIds.size>0){await db.run(`DELETE FROM alert_action_rules WHERE id NOT IN (${[...payloadIds].map(()=>'?').join(',')})`,[...payloadIds]);}
@@ -268,7 +270,7 @@ const el=id=>document.getElementById(id);
 const content=el('content'),search=el('search'),add=el('add'),save=el('save');
 const defs={"settings":{"label":"Cài đặt","columns":["key","display_name","value","note"]},"tiktok":{"label":"Kết nối TikTok","columns":["business_center_id","read_token","write_token","note"]},"advertisers":{"label":"Tài khoản quảng cáo","columns":["advertiser_id","advertiser_name","market_code","enabled","note"]},"sources":{"label":"Sheet doanh số","columns":["name","sheet_id","enabled","note"]},"products":{"label":"Tên sản phẩm","columns":["material_name","variant_name","campaign_key","enabled"]},"pages":{"label":"Page Mapping","columns":["page_handle","market_code","page_name","page_url","enabled"]},"ruler_auto":{"label":"Quy tắc","columns":["entity","trigger_kind","run_time","period","name_contains","metric","metric_operator","metric_threshold","metric_min_threshold","conversions_operator","conversions_threshold","action","enabled","note"]}};
 const labels={config:'Cấu hình',products:'Tên sản phẩm',pages:'Page Mapping',ruler_auto:'Quy tắc',history:'History'};
-const subtitles={config:'Toàn bộ cấu hình vận hành bot, kèm kiểm tra độ sẵn sàng dữ liệu.',products:'Map tên vật tư trên sheet doanh số sang tên sản phẩm và từ khóa chiến dịch.',pages:'Map page sang mã thị trường (ID, VN...).',ruler_auto:'Quy tắc thống nhất cho Campaign và Material: tạm dừng / kích hoạt / thông báo theo chi tiêu, CPA và lượt chuyển đổi. Chọn Chạy = Phát hiện liên tục hoặc Theo giờ (kèm giờ + khoảng dữ liệu ở từng quy tắc).',history:'Bản lưu cấu hình tự động, khôi phục được bất cứ lúc nào.'};
+const subtitles={config:'Toàn bộ cấu hình vận hành bot, kèm kiểm tra độ sẵn sàng dữ liệu.',products:'Map tên vật tư trên sheet doanh số sang tên sản phẩm và từ khóa chiến dịch.',pages:'Map page sang mã thị trường (ID, VN...).',ruler_auto:'Mỗi quy tắc áp dụng đồng thời cho chiến dịch và material trong chiến dịch đó (tạm dừng / kích hoạt / thông báo theo chi tiêu, CPA, chuyển đổi). Chọn Chạy = Liên tục hoặc Theo giờ (kèm giờ + khoảng dữ liệu).',history:'Bản lưu cấu hình tự động, khôi phục được bất cứ lúc nào.'};
 const icons={config:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>',products:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>',pages:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',ruler_auto:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>',history:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>'};
 const iconInfo='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>';
 const configNames=['settings','tiktok','advertisers','sources'];
@@ -280,7 +282,7 @@ async function api(url,opt){const response=await fetch(url,opt);if(!response.ok)
 function toast(message,type){const wrap=el('toasts');const item=document.createElement('div');item.className='toast'+(type?' '+type:'');item.textContent=message;wrap.appendChild(item);setTimeout(()=>item.remove(),2800)}
 const flash=message=>toast(message);
 function makeNav(){const nav=el('nav');nav.innerHTML='';Object.entries(labels).forEach(([key,label])=>{const button=document.createElement('button');button.className=key===active?'active':'';button.innerHTML=icons[key]+'<span>'+esc(label)+'</span>';button.onclick=()=>{if(active===key)return;active=key;render()};nav.appendChild(button)})}
-const choices={entity:[['campaign','Campaign'],['material','Material'],['both','Cả hai (Campaign + Material)']],metric:[['spend','Chi tiêu'],['cpa','Chi phí mỗi lượt chuyển đổi (CPA)']],metric_operator:[['gt','>'],['gte','>='],['lt','<'],['lte','<='],['eq','='],['between','Trong khoảng']],conversions_operator:[['gt','>'],['gte','>='],['lt','<'],['lte','<='],['eq','=']],trigger_kind:[['continuous','Phát hiện liên tục'],['scheduled','Theo giờ']],ruler_period:[['today','Hôm nay'],['yesterday','Hôm qua'],['month_to_date','Tháng này'],['last_3_days','3 ngày'],['last_7_days','7 ngày'],['last_14_days','14 ngày'],['last_30_days','30 ngày'],['last_90_days','90 ngày']],action:[['pause','Tạm dừng'],['enable','Kích hoạt'],['notify','Chỉ thông báo']]};
+const choices={metric:[['spend','Chi tiêu'],['cpa','Chi phí mỗi lượt chuyển đổi (CPA)']],metric_operator:[['gt','>'],['gte','>='],['lt','<'],['lte','<='],['eq','='],['between','Trong khoảng']],conversions_operator:[['gt','>'],['gte','>='],['lt','<'],['lte','<='],['eq','=']],trigger_kind:[['continuous','Phát hiện liên tục'],['scheduled','Theo giờ']],ruler_period:[['today','Hôm nay'],['yesterday','Hôm qua'],['month_to_date','Tháng này'],['last_3_days','3 ngày'],['last_7_days','7 ngày'],['last_14_days','14 ngày'],['last_30_days','30 ngày'],['last_90_days','90 ngày']],action:[['pause','Tạm dừng'],['enable','Kích hoạt'],['notify','Chỉ thông báo']]};
 const placeholders={name_contains:'Ví dụ: Mặt nạ mắt - ID',note:'Mô tả ngắn để dễ nhớ',run_time:'Ví dụ: 00:05',market_code:'Ví dụ: MKT80.HOÀNG-TH hoặc MKT.CT','pages:market_code':'Ví dụ: VN, ID, TH'};
 function field(key,value,section,index,extra='',row=null){const attrs=' data-key="'+key+'" data-section="'+section+'" data-index="'+index+'"'+extra;const secret=(section==='tiktok'&&key.includes('token'));const choiceKey=key==='period'?'ruler_period':key;if(key==='display_name')return '<span class="setting-name">'+esc(value)+'</span>';if(key==='enabled')return '<input'+attrs+' type="checkbox" '+(value?'checked':'')+'>';const settingChoice=section==='settings'&&key==='value'&&row?choices['setting:'+String(row.key||'')]:null;if(settingChoice)return '<select'+attrs+'>'+settingChoice.map(option=>'<option value="'+option[0]+'" '+(String(value)===option[0]?'selected':'')+'>'+option[1]+'</option>').join('')+'</select>';if(choices[choiceKey]){const shown=choices[choiceKey].filter(option=>option[0]!=='between'||String(value)==='between');return '<select'+attrs+'>'+shown.map(option=>'<option value="'+option[0]+'" '+(String(value)===option[0]?'selected':'')+'>'+option[1]+'</option>').join('')+'</select>';}return '<input'+attrs+(secret?' type="password" autocomplete="new-password"':'')+' placeholder="'+esc(placeholders[section+':'+key]||placeholders[key]||'')+'" value="'+esc(value)+'">'}
 const labelOverrides={'pages:market_code':'Mã thị trường'};
@@ -293,13 +295,11 @@ function applySearch(){const q=normText(String(search.value||'').trim());content
 async function withSaving(button,fn){const label=button.textContent;button.disabled=true;button.textContent='Đang lưu...';try{await fn()}catch(error){toast(error.message||'Có lỗi xảy ra','err')}finally{button.disabled=false;button.textContent=label}}
 const blankSide=action=>({metric_operator:action==='pause'?'gt':'lt',metric_threshold:'',metric_min_threshold:'',conversions_operator:'gte',conversions_threshold:'1',action});
 function cleanRuleNote(value){return String(value||'').replace(/\\s*\\[(pause|enable)\\]\\s*$/i,'').trim()}
-function groupRulerRows(data){const groups=[],singles=[];data.forEach(row=>{if(row.action!=='pause'&&row.action!=='enable'){singles.push(row);return}const note=cleanRuleNote(row.note);let group=groups.find(item=>item.entity===row.entity&&item.trigger_kind===(row.trigger_kind||'continuous')&&item.name_contains===row.name_contains&&item.metric===row.metric&&item.enabled===Boolean(row.enabled)&&item.note===note&&!item[row.action]);if(!group){group={entity:row.entity||'campaign',trigger_kind:row.trigger_kind||'continuous',run_time:row.run_time||'',period:row.period||'',name_contains:row.name_contains||'',metric:row.metric||'spend',enabled:Boolean(row.enabled),note,pause:null,enable:null};groups.push(group)}if(!group.run_time&&row.run_time)group.run_time=row.run_time;if(!group.period&&row.period)group.period=row.period;group[row.action]={...row}});return {groups,singles}}
+function groupRulerRows(data){const groups=[],singles=[];data.forEach(row=>{if(row.action!=='pause'&&row.action!=='enable'){singles.push({...row,entity:'both'});return}const note=cleanRuleNote(row.note);let group=groups.find(item=>item.trigger_kind===(row.trigger_kind||'continuous')&&item.name_contains===row.name_contains&&item.metric===row.metric&&item.enabled===Boolean(row.enabled)&&item.note===note&&!item[row.action]);if(!group){group={entity:'both',trigger_kind:row.trigger_kind||'continuous',run_time:row.run_time||'',period:row.period||'',name_contains:row.name_contains||'',metric:row.metric||'spend',enabled:Boolean(row.enabled),note,pause:null,enable:null};groups.push(group)}if(!group.run_time&&row.run_time)group.run_time=row.run_time;if(!group.period&&row.period)group.period=row.period;group[row.action]={...row,entity:'both'}});return {groups,singles}}
 function ruleField(groupIndex,side,key,value){const options=choices[key]?choices[key].filter(option=>option[0]!=='between'||String(value)==='between'):null;const attrs=' data-rule-group="'+groupIndex+'" data-rule-side="'+side+'" data-rule-key="'+key+'"';if(options)return '<select'+attrs+'>'+options.map(option=>'<option value="'+option[0]+'" '+(String(value)===option[0]?'selected':'')+'>'+option[1]+'</option>').join('')+'</select>';return '<input'+attrs+' value="'+esc(value)+'">'}
 let rulerFilter='all';
-let rulerEntity='all';
 const rulerExpanded=new Set();
 const rulerNotifyExpanded=new Set();
-const ENT_LABELS={campaign:'Campaign',material:'Material',both:'Cả hai'};
 const TRIGGER_LABELS={continuous:'Liên tục',scheduled:'Theo giờ'};
 const PERIOD_LABELS={today:'Hôm nay',yesterday:'Hôm qua',month_to_date:'Tháng này',last_3_days:'3 ngày',last_7_days:'7 ngày',last_14_days:'14 ngày',last_30_days:'30 ngày',last_90_days:'90 ngày'};
 const OP_SHORT={gt:'>',gte:'>=',lt:'<',lte:'<=',eq:'=',between:'trong khoảng'};
@@ -317,7 +317,7 @@ function sideSentence(metric,side){
   return s;
 }
 function rulerTitle(group){
-  return (ENT_LABELS[group.entity]||group.entity||'?')+(group.name_contains?' chứa “'+group.name_contains+'”':' — mọi chiến dịch');
+  return (group.name_contains?'Camp + material chứa “'+group.name_contains+'”':'Camp + material — mọi chiến dịch');
 }
 function flushRulerState(st){
   readInputs('ruler_auto',st.singles);
@@ -353,7 +353,7 @@ function rulerWarnings(state){
       }
       if(side&&side.conversions_operator==='between')out.push('Quy tắc '+rulerTitle(group)+pos+': lượt chuyển đổi không hỗ trợ "Trong khoảng" — engine sẽ bỏ');
     });
-    const key=[group.entity,group.trigger_kind,String(group.run_time||''),group.name_contains,group.metric].join('');
+    const key=[group.trigger_kind,String(group.run_time||''),group.name_contains,group.metric].join('');
     if(seen.has(key))out.push('Quy tắc '+rulerTitle(group)+pos+' trùng đối tượng với quy tắc thứ '+seen.get(key));
     else seen.set(key,index+1);
   });
@@ -367,7 +367,7 @@ function rulerWarnings(state){
   return out;
 }
 function rulerSideFields(index,sideName,side){
-  const title=sideName==='pause'?'TẠM DỪNG — áp dụng cho campaign ĐANG CHẠY':'KÍCH HOẠT — áp dụng cho campaign ĐANG TẮM';
+  const title=sideName==='pause'?'TẠM DỪNG — camp đang chạy + material đang bật trong camp':'KÍCH HOẠT — camp đang tắt + material đang tắt trong camp';
   return '<div class="rule-side '+sideName+'"><div class="rule-side-title">'+title+'</div><div class="rule-side-grid">'
     +'<label class="f"><span>Điều kiện</span>'+ruleField(index,sideName,'metric_operator',side.metric_operator)+'</label>'
     +'<label class="f"><span>Mức</span>'+ruleField(index,sideName,'metric_threshold',side.metric_threshold)+'</label>'
@@ -379,8 +379,7 @@ function drawRulerAuto(){
   const scrollY=window.scrollY;
   const state=getRulerState();
   const q=normText(String(search.value||'').trim());
-  const filtering=Boolean(q)||rulerFilter!=='all'||rulerEntity!=='all';
-  const entityOk=entity=>rulerEntity==='all'||String(entity||'campaign')===rulerEntity;
+  const filtering=Boolean(q)||rulerFilter!=='all';
   const warnings=rulerWarnings(state);
   let visibleCount=0;const totalCount=state.groups.length+state.singles.length;
   let cards='';
@@ -388,7 +387,6 @@ function drawRulerAuto(){
     if(rulerFilter==='notify')return;
     if(rulerFilter==='on'&&!group.enabled)return;
     if(rulerFilter==='off'&&group.enabled)return;
-    if(!entityOk(group.entity))return;
     const pause=group.pause||blankSide('pause'),enable=group.enable||blankSide('enable');
     const pauseSentence=sideSentence(group.metric,pause),enableSentence=sideSentence(group.metric,enable);
     const hay=normText([rulerTitle(group),pauseSentence,enableSentence,group.note,group.enabled?'đang dùng':'đang tắt'].join(' '));
@@ -398,7 +396,7 @@ function drawRulerAuto(){
     const parts=[pauseSentence?'TẮT khi '+pauseSentence:'',enableSentence?'BẬT khi '+enableSentence:''].filter(Boolean).join(' · ');
     cards+='<div class="rule-card" data-rg="'+index+'"><div class="rule-card-head" data-rexpand="'+index+'"><span class="chev'+(open?' open':'')+'">▶</span><b>'+esc(rulerTitle(group))+'</b><span class="badge">'+esc(METRIC_LABELS[group.metric]||group.metric)+'</span>'+(group.trigger_kind==='scheduled'?'<span class="badge">Theo giờ '+(esc(group.run_time)||'?')+' · '+esc(PERIOD_LABELS[String(group.period||'today')]||group.period||'today')+'</span>':'<span class="badge">Liên tục</span>')+(parts?'<span class="group-meta">'+esc(parts)+'</span>':'<span class="mixed">chưa có mức</span>')+'<span class="group-meta">'+(group.enabled?'Đang dùng':'Đã tắt')+'</span><span class="group-actions"><button class="btn small delete-rule" data-index="'+index+'">Xóa</button></span></div>'
       +(open?'<div class="rule-card-body">'
-        +'<label class="f"><span>Áp dụng cho</span>'+ruleField(index,'common','entity',group.entity)+'</label>'
+        +'<div class="rule-side-hint" style="margin:0 0 8px">Áp dụng đồng thời cho <b>chiến dịch</b> và <b>material trong chiến dịch</b> khớp tên.</div>'
         +'<label class="f"><span>Chạy</span>'+ruleField(index,'common','trigger_kind',group.trigger_kind||'continuous')+'</label>'
         +(group.trigger_kind==='scheduled'
           ? '<label class="f"><span>Giờ (HH:mm, giờ Việt Nam)</span>'+ruleField(index,'common','run_time',group.run_time||'')+'</label>'
@@ -415,9 +413,8 @@ function drawRulerAuto(){
     if(rulerFilter==='on'&&isOn(single.enabled)!==1)return;
     if(rulerFilter==='off'&&isOn(single.enabled)===1)return;
     if(rulerFilter!=='notify'&&rulerFilter!=='all')return;
-    if(!entityOk(single.entity))return;
     const th=String(single.metric_threshold??'').trim();
-    const title=(ENT_LABELS[single.entity]||single.entity||'?')+(single.name_contains?' chứa “'+single.name_contains+'”':' — mọi chiến dịch');
+    const title=single.name_contains?'Camp + material chứa “'+single.name_contains+'”':'Camp + material — mọi chiến dịch';
     const summary=th?'THÔNG BÁO khi '+(METRIC_LABELS[single.metric]||single.metric)+' '+(OP_SHORT[single.metric_operator]||single.metric_operator)+' '+th+(String(single.conversions_threshold??'').trim()?' & Chuyển đổi '+(CONV_OP_SHORT[single.conversions_operator]||single.conversions_operator)+' '+single.conversions_threshold:''):'THÔNG BÁO (chưa có mức)';
     const hay=normText([title,summary,single.note,String(single.trigger_kind||'continuous')==='scheduled'?'theo giờ '+(single.run_time||''):'',isOn(single.enabled)?'đang dùng':'đang tắt'].join(' '));
     if(q&&!hay.includes(q))return;
@@ -425,7 +422,7 @@ function drawRulerAuto(){
     const notifyOpen=rulerNotifyExpanded.has(si);
     cards+='<div class="rule-card"><div class="rule-card-head" data-nexpand="'+si+'"><span class="chev'+(notifyOpen?' open':'')+'">▶</span><b>'+esc(title)+'</b><span class="badge warn-badge">Chỉ thông báo</span>'+(String(single.trigger_kind||'continuous')==='scheduled'?'<span class="badge warn-badge">Theo giờ '+(esc(single.run_time)||'?')+' · '+esc(PERIOD_LABELS[String(single.period||'today')]||single.period||'today')+'</span>':'')+'<span class="group-meta">'+esc(summary)+'</span><span class="group-meta">'+(isOn(single.enabled)?'Đang dùng':'Đã tắt')+'</span><span class="group-actions"><button class="btn small delete-single" data-index="'+si+'">Xóa</button></span></div>'
       +(notifyOpen?'<div class="rule-card-body">'
-      +'<label class="f"><span>Áp dụng cho</span>'+field('entity',single.entity,'ruler_auto',si)+'</label>'
+      +'<div class="rule-side-hint" style="margin:0 0 8px">Thông báo khi camp hoặc material trong camp khớp điều kiện.</div>'
       +'<label class="f"><span>Chạy</span>'+field('trigger_kind',single.trigger_kind||'continuous','ruler_auto',si)+'</label>'
       +(String(single.trigger_kind||'continuous')==='scheduled'
         ? '<label class="f"><span>Giờ (HH:mm)</span>'+field('run_time',single.run_time||'','ruler_auto',si)+'</label>'
@@ -443,14 +440,11 @@ function drawRulerAuto(){
   });
   const stats='<div class="stats-strip"><b>'+state.groups.length+'</b> quy tắc tắt/bật · <b>'+state.singles.length+'</b> quy tắc thông báo · <b>'+state.groups.filter(group=>group.enabled).length+'</b> đang dùng'+(warnings.length?' · <span class="warn">⚠ '+warnings.length+' cảnh báo</span>':'')+'</div>';
   const chipLabels={all:'Tất cả',on:'Đang dùng',off:'Đã tắt',notify:'Chỉ thông báo'};
-  const entityLabels={all:'Mọi loại',campaign:'Campaign',material:'Material',both:'Cả hai'};
-  const entityChips='<span class="chip-sep"></span>'+['all','campaign','material','both'].map(val=>'<button class="chip'+(rulerEntity===val?' active':'')+'" data-entity="'+val+'">'+entityLabels[val]+'</button>').join('');
-  const toolbar='<div class="prod-toolbar">'+['all','on','off','notify'].map(val=>'<button class="chip'+(rulerFilter===val?' active':'')+'" data-filter="'+val+'">'+chipLabels[val]+'</button>').join('')+'<span class="search-count">'+(filtering?visibleCount+'/'+totalCount+' khớp':totalCount+' quy tắc')+'</span>'+entityChips+'<span class="spacer"></span><button class="btn small" id="expand-all">Mở tất cả</button><button class="btn small" id="collapse-all">Thu gọn tất cả</button></div>';
+  const toolbar='<div class="prod-toolbar">'+['all','on','off','notify'].map(val=>'<button class="chip'+(rulerFilter===val?' active':'')+'" data-filter="'+val+'">'+chipLabels[val]+'</button>').join('')+'<span class="search-count">'+(filtering?visibleCount+'/'+totalCount+' khớp':totalCount+' quy tắc')+'</span><span class="spacer"></span><button class="btn small" id="expand-all">Mở tất cả</button><button class="btn small" id="collapse-all">Thu gọn tất cả</button></div>';
   const warnHtml=warnings.length?'<div class="callout">'+iconInfo+'<div><b>Cảnh báo cấu hình:</b> '+warnings.slice(0,4).map(item=>esc(item)).join(' &nbsp;·&nbsp; ')+(warnings.length>4?' &nbsp;·&nbsp; <b>+'+(warnings.length-4)+' nữa</b>':'')+'</div></div>':'';
   content.innerHTML=warnHtml+stats+toolbar+'<div class="rule-list">'+cards+'</div>'+(cards?'':'<div class="card empty">'+(filtering?'Không có quy tắc khớp bộ lọc':'Chưa có quy tắc nào')+'</div>');
   window.scrollTo(0,scrollY);
   document.querySelectorAll('.chip[data-filter]').forEach(chip=>chip.onclick=()=>{rows=flushRulerState(state);rulerFilter=chip.dataset.filter;drawRulerAuto()});
-  document.querySelectorAll('.chip[data-entity]').forEach(chip=>chip.onclick=()=>{rows=flushRulerState(state);rulerEntity=chip.dataset.entity;drawRulerAuto()});
   el('expand-all').onclick=()=>{rows=flushRulerState(state);state.groups.forEach((group,index)=>rulerExpanded.add(index));state.singles.forEach((single,index)=>rulerNotifyExpanded.add(index));drawRulerAuto()};
   el('collapse-all').onclick=()=>{rows=flushRulerState(state);rulerExpanded.clear();rulerNotifyExpanded.clear();drawRulerAuto()};
   document.querySelectorAll('[data-rexpand]').forEach(head=>{head.onclick=event=>{if(event.target.closest('button'))return;rows=flushRulerState(state);const index=Number(head.dataset.rexpand);if(rulerExpanded.has(index))rulerExpanded.delete(index);else rulerExpanded.add(index);drawRulerAuto()}});
@@ -460,11 +454,11 @@ function drawRulerAuto(){
   document.querySelectorAll('[data-section="ruler_auto"][data-key="trigger_kind"]').forEach(input=>input.onchange=()=>{readInputs('ruler_auto',state.singles);drawRulerAuto()});
   document.querySelectorAll('.delete-rule').forEach(button=>button.onclick=()=>{rows=flushRulerState(state);state.groups.splice(Number(button.dataset.index),1);rows=flattenRulerGroups(state);drawRulerAuto();toast('Đã xóa quy tắc, nhấn “Lưu thay đổi” để áp dụng')});
   document.querySelectorAll('.delete-single').forEach(button=>button.onclick=()=>{rows=flushRulerState(state);state.singles.splice(Number(button.dataset.index),1);rows=flattenRulerGroups(state);drawRulerAuto();toast('Đã xóa quy tắc thông báo, nhấn “Lưu thay đổi” để áp dụng')});
-  add.onclick=()=>{rows=flushRulerState(state);state.groups.unshift({entity:'campaign',trigger_kind:'continuous',run_time:'',period:'',name_contains:'',metric:'spend',enabled:true,note:'',pause:blankSide('pause'),enable:blankSide('enable')});rows=flattenRulerGroups(state);rulerExpanded.clear();rulerExpanded.add(0);drawRulerAuto();const input=document.querySelector('[data-rule-group="0"][data-rule-key="name_contains"]');if(input&&input.focus)input.focus({preventScroll:true})};
+  add.onclick=()=>{rows=flushRulerState(state);state.groups.unshift({entity:'both',trigger_kind:'continuous',run_time:'',period:'',name_contains:'',metric:'spend',enabled:true,note:'',pause:blankSide('pause'),enable:blankSide('enable')});rows=flattenRulerGroups(state);rulerExpanded.clear();rulerExpanded.add(0);drawRulerAuto();const input=document.querySelector('[data-rule-group="0"][data-rule-key="name_contains"]');if(input&&input.focus)input.focus({preventScroll:true})};
   save.onclick=()=>withSaving(save,async()=>{rows=flushRulerState(state);await api('/admin/api/ruler_auto',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({rows:rows})});flash('Đã lưu quy tắc')});
   search.oninput=()=>{rows=flushRulerState(state);drawRulerAuto()};
 }
-function flattenRulerGroups(state){const result=[];state.groups.forEach(group=>{[['pause'],['enable']].forEach(([action])=>{const side=group[action]||blankSide(action);if(String(side.metric_threshold??'').trim()==='')return;result.push({...side,entity:group.entity,trigger_kind:group.trigger_kind||'continuous',run_time:group.run_time||'',period:group.period||'',name_contains:group.name_contains,metric:group.metric,action,enabled:group.enabled,note:group.note})})});return result.concat(state.singles)}
+function flattenRulerGroups(state){const result=[];state.groups.forEach(group=>{[['pause'],['enable']].forEach(([action])=>{const side=group[action]||blankSide(action);if(String(side.metric_threshold??'').trim()==='')return;result.push({...side,entity:'both',trigger_kind:group.trigger_kind||'continuous',run_time:group.run_time||'',period:group.period||'',name_contains:group.name_contains,metric:group.metric,action,enabled:group.enabled,note:group.note})})});return result.concat(state.singles.map(row=>({...row,entity:'both'})))}
 let productFilter='all';
 const collapsedGroups=new Set();
 const flushProducts=()=>readInputs('products',rows);

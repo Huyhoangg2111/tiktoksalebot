@@ -117,10 +117,25 @@ function normalizeAction(value: unknown): AlertAction | undefined {
 
 function normalizeEntity(value: unknown): 'campaign' | 'material' | 'both' | undefined {
   const normalized = normalizeText(value).replace(/[\s-]+/g, '_');
-  if (['campaign', 'campaigns', 'camp'].includes(normalized)) return 'campaign';
-  if (['material', 'materials', 'mkt'].includes(normalized)) return 'material';
-  // "Cả hai": cùng điều kiện được đánh giá ở CẢ tầng campaign lẫn material.
-  if (['both', 'all', 'ca_hai', 'cahai', 'camp_and_material', 'campaign_material'].includes(normalized)) return 'both';
+  // Ruler thống nhất: campaign / material / both đều áp dụng camp + material trong camp.
+  if (
+    [
+      'campaign',
+      'campaigns',
+      'camp',
+      'material',
+      'materials',
+      'mkt',
+      'both',
+      'all',
+      'ca_hai',
+      'cahai',
+      'camp_and_material',
+      'campaign_material',
+    ].includes(normalized)
+  ) {
+    return 'both';
+  }
   return undefined;
 }
 
@@ -170,7 +185,7 @@ function mapRuleRow(row: Record<string, unknown>): MaterialRule | undefined {
   const conversionsOperator = normalizeOperator(row.conversions_operator);
   const action = normalizeAction(row.action);
   if (!entity) {
-    warnInvalidRuleOnce(label, 'entity không hợp lệ (chỉ nhận campaign/material/both)');
+    warnInvalidRuleOnce(label, 'entity không hợp lệ (ruler thống nhất chỉ nhận campaign/material/both → both)');
     return undefined;
   }
   if (!metric || !metricOperator || !conversionsOperator || !action) {
@@ -228,18 +243,19 @@ function mapRuleRow(row: Record<string, unknown>): MaterialRule | undefined {
 }
 
 async function readDashboardRules(
-  entity: 'campaign' | 'material',
+  _entity: 'campaign' | 'material',
   triggerKind?: TriggerKind
 ): Promise<MaterialRule[]> {
-  // entity='both' phục vụ CẢ campaign lẫn material → nạp ở cả hai phía.
+  // Ruler thống nhất: mọi entity (campaign/material/both) đều áp dụng hai tầng.
+  // Nạp toàn bộ rule hợp lệ rồi map về both — không còn lọc theo tầng riêng.
   const rows = await db.all<Record<string, unknown>>(
-    `SELECT ${RULE_ROW_COLUMNS} FROM alert_action_rules WHERE entity IN (?, 'both') ORDER BY id`,
-    [entity]
+    `SELECT ${RULE_ROW_COLUMNS} FROM alert_action_rules
+     WHERE entity IN ('campaign', 'material', 'both')
+     ORDER BY id`
   );
   return rows
     .map(mapRuleRow)
     .filter((rule): rule is MaterialRule => Boolean(rule))
-    .filter(rule => rule.entity === entity || rule.entity === 'both')
     .filter(rule => !triggerKind || rule.triggerKind === triggerKind);
 }
 
@@ -1003,11 +1019,12 @@ async function evaluateMaterialRules(
 
 /**
  * Level 1 architecture (bản hợp nhất):
- * - Toàn bộ quy tắc đọc trực tiếp từ bảng alert_action_rules, một engine duy nhất;
- * - Mỗi quy tắc tự chọn entity (campaign/material) và kiểu chạy:
- *   "Liên tục" (continuous) — đánh giá mỗi tick của lịch cấp 1 theo dữ liệu hôm nay;
- *   "Theo giờ" (scheduled) — chỉ chạy trong checkAndRunScheduledRules() theo run_time;
- * - Không còn setting auto_action_mode toàn cục; quota/low-balance vẫn chạy trước.
+ * - Toàn bộ quy tắc đọc từ alert_action_rules; mỗi rule áp dụng đồng thời
+ *   tầng campaign và material trong campaign (entity luôn chuẩn hoá về both);
+ * - Kiểu chạy:
+ *   "Liên tục" (continuous) — mỗi tick lịch cấp 1, dữ liệu hôm nay;
+ *   "Theo giờ" (scheduled) — checkAndRunScheduledRules() theo run_time;
+ * - Low-balance vẫn chạy trước.
  */
 export async function checkAndSendCampaignMaterialAlerts(bot: Telegraf): Promise<void> {
   try {

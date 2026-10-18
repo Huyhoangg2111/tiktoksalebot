@@ -244,6 +244,73 @@ async function migrateLegacyMaterialRulerRules(): Promise<void> {
   );
 }
 
+const UNIFY_RULER_ENTITY_MARKER = 'ruler_entity_unified_both';
+
+/**
+ * Một lần: gộp entity campaign/material → both (camp + material trong camp),
+ * rồi xoá các dòng trùng điều kiện sau khi gộp.
+ */
+async function migrateUnifyRulerEntityToBoth(): Promise<void> {
+  const marker = await db.get<{ value: string }>(
+    'SELECT value FROM bot_settings WHERE key = ?',
+    [UNIFY_RULER_ENTITY_MARKER]
+  );
+  if (String(marker?.value || '') === '1') return;
+
+  const updated = await db.run(
+    `UPDATE alert_action_rules SET entity = 'both', updated_at = CURRENT_TIMESTAMP
+     WHERE entity IN ('campaign', 'material')`
+  );
+
+  const rows = await db.all<{ id: number }>(`
+    SELECT a.id
+    FROM alert_action_rules a
+    WHERE a.entity = 'both'
+      AND EXISTS (
+        SELECT 1 FROM alert_action_rules b
+        WHERE b.entity = 'both'
+          AND b.id < a.id
+          AND IFNULL(b.trigger_kind, 'continuous') = IFNULL(a.trigger_kind, 'continuous')
+          AND IFNULL(b.run_time, '') = IFNULL(a.run_time, '')
+          AND IFNULL(b.period, '') = IFNULL(a.period, '')
+          AND IFNULL(b.name_contains, '') = IFNULL(a.name_contains, '')
+          AND b.metric = a.metric
+          AND b.metric_operator = a.metric_operator
+          AND b.metric_threshold = a.metric_threshold
+          AND IFNULL(b.metric_min_threshold, -1) = IFNULL(a.metric_min_threshold, -1)
+          AND b.conversions_operator = a.conversions_operator
+          AND b.conversions_threshold = a.conversions_threshold
+          AND b.action = a.action
+          AND IFNULL(b.is_active, 1) = IFNULL(a.is_active, 1)
+          AND IFNULL(b.note, '') = IFNULL(a.note, '')
+      )
+  `).catch(() => [] as { id: number }[]);
+
+  let deleted = 0;
+  if (rows.length > 0) {
+    await db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const row of rows) {
+        await db.run('DELETE FROM alert_action_rules WHERE id = ?', [row.id]);
+        deleted += 1;
+      }
+      await db.exec('COMMIT');
+    } catch (error) {
+      await db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  await db.run(
+    'INSERT OR REPLACE INTO bot_settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)',
+    [UNIFY_RULER_ENTITY_MARKER, '1']
+  );
+
+  console.log(
+    `[DB migration] ruler entity: chuyển ${updated.changes ?? 0} rule → both; xoá ${deleted} dòng trùng`
+  );
+}
+
 export async function connectDB() {
   // Open the database
   db = new SqliteDatabase(resolve(process.env.DATABASE_PATH || './bot_data.db'));
@@ -336,6 +403,7 @@ export async function connectDB() {
   await addColumnIfMissing('ALTER TABLE alert_action_rules ADD COLUMN period TEXT');
 
   await migrateLegacyMaterialRulerRules();
+  await migrateUnifyRulerEntityToBoth();
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS alert_action_state (
