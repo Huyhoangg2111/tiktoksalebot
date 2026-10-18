@@ -230,9 +230,9 @@ tr.search-hit td,tbody tr.search-hit:hover td{background:#fffbdd}
 .rule-layer-head{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;padding:8px 10px;background:#f3f6fb;border-bottom:1px solid var(--border)}
 .rule-layer-head b{font-size:12.5px;line-height:1.3;padding-top:2px}
 .rule-layer-head .group-meta{flex:1 1 120px;min-width:0;padding-top:2px}
-.rule-layer-head > label.f.rule-metric{margin-left:auto;flex:0 0 auto;width:7.5rem;min-width:7.5rem;display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:3px}
-.rule-layer-head > label.f.rule-metric > span{display:block;flex:0 0 auto;line-height:1.2;white-space:nowrap}
-.rule-layer-head > label.f.rule-metric > select{display:block;flex:0 0 auto;width:100%;min-width:0}
+.rule-layer-head > label.f.rule-metric{margin-left:auto;flex:0 0 auto;min-width:120px;display:flex;flex-direction:row;align-items:center;justify-content:flex-end;gap:6px}
+.rule-layer-head > label.f.rule-metric > span{display:inline;flex:0 0 auto;line-height:1.2;white-space:nowrap}
+.rule-layer-head > label.f.rule-metric > select{display:inline-block;flex:0 0 auto;width:auto;min-width:4.5rem}
 .rule-layer-body{padding:6px 8px 8px}
 .rule-sides{display:grid;grid-template-columns:1fr 1fr;gap:5px;min-width:0}
 @media(max-width:960px){.rule-layers{grid-template-columns:1fr}}
