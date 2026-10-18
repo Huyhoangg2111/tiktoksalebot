@@ -50,7 +50,7 @@ test('ruler thống nhất: migration gộp entity campaign/material → both v�
   );
 
   // Cho phép migration chạy lại: xoá marker rồi gọi lại hàm qua connectDB path.
-  await database.run('DELETE FROM bot_settings WHERE key = ?', ['ruler_entity_unified_both']);
+  await database.run('DELETE FROM bot_settings WHERE key = ?', ['ruler_entity_unified_both_migrated']);
   // connectDB đã chạy migration trước khi insert; gọi lại bằng cách import lại không reset module.
   // Chạy SQL migrate tương đương: gộp + dedupe như production.
   await database.run(`UPDATE alert_action_rules SET entity='both' WHERE entity IN ('campaign','material')`);

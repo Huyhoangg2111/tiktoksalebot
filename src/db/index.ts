@@ -244,7 +244,7 @@ async function migrateLegacyMaterialRulerRules(): Promise<void> {
   );
 }
 
-const UNIFY_RULER_ENTITY_MARKER = 'ruler_entity_unified_both';
+const UNIFY_RULER_ENTITY_MARKER = 'ruler_entity_unified_both_migrated';
 
 /**
  * Một lần: gộp entity campaign/material → both (camp + material trong camp),
