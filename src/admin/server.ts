@@ -237,11 +237,10 @@ tr.search-hit td,tbody tr.search-hit:hover td{background:#fffbdd}
 .rule-side-title{display:flex;align-items:baseline;justify-content:space-between;gap:6px;font-size:11px;font-weight:700;margin-bottom:4px}
 .rule-side.pause .rule-side-title{color:#a42222}
 .rule-side.enable .rule-side-title{color:#12683a}
-.rule-side-grid{display:grid;grid-template-columns:1fr;gap:4px}
+.rule-side-grid{display:grid;grid-template-columns:auto 1fr auto 1fr;gap:4px 5px;align-items:end}
 .rule-side-hint{font-size:10px;color:var(--muted);font-weight:500;margin:0;white-space:nowrap}
-.rule-pair{display:flex;flex-direction:column;gap:2px;min-width:0}
-.rule-pair>span{font-size:10px;color:var(--muted)}
-.rule-pair-fields{display:grid;grid-template-columns:minmax(48px,.65fr) minmax(52px,1fr);gap:4px;align-items:center}
+.rule-side-grid .f>span{font-size:10px}
+.rule-side-grid select{width:3.5rem;min-width:3.5rem;max-width:3.5rem}
 .rule-side select,.rule-side input:not([type]){min-width:0;padding:4px 6px;font-size:12px}
 .f{display:flex;flex-direction:column;gap:3px;min-width:0}
 .f>span{font-size:11px;color:var(--muted)}
@@ -419,14 +418,10 @@ function rulerSideFields(index,layer,sideName,side){
   const title=sideName==='pause'?'TẠM DỪNG':'KÍCH HOẠT';
   const hint=sideName==='pause'?'Trống mức = không tắt':'Trống mức = không bật';
   return '<div class="rule-side '+sideName+'"><div class="rule-side-title"><span>'+title+'</span><span class="rule-side-hint" title="Để trống Mức chỉ số thì không tự '+(sideName==='pause'?'tắt':'bật')+'">'+hint+'</span></div><div class="rule-side-grid">'
-    +'<div class="rule-pair"><span>Chỉ số</span><div class="rule-pair-fields">'
-    +ruleField(index,layer,sideName,'metric_operator',side.metric_operator)
-    +ruleField(index,layer,sideName,'metric_threshold',side.metric_threshold)
-    +'</div></div>'
-    +'<div class="rule-pair"><span>Chuyển đổi</span><div class="rule-pair-fields">'
-    +ruleField(index,layer,sideName,'conversions_operator',side.conversions_operator)
-    +ruleField(index,layer,sideName,'conversions_threshold',side.conversions_threshold)
-    +'</div></div>'
+    +'<label class="f"><span>ĐK</span>'+ruleField(index,layer,sideName,'metric_operator',side.metric_operator)+'</label>'
+    +'<label class="f"><span>Mức</span>'+ruleField(index,layer,sideName,'metric_threshold',side.metric_threshold)+'</label>'
+    +'<label class="f"><span>CĐ</span>'+ruleField(index,layer,sideName,'conversions_operator',side.conversions_operator)+'</label>'
+    +'<label class="f"><span>Lượt CĐ</span>'+ruleField(index,layer,sideName,'conversions_threshold',side.conversions_threshold)+'</label>'
     +'</div></div>';
 }
 function rulerLayerBlock(index,layer,layerCfg){
