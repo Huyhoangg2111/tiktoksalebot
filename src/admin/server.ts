@@ -227,10 +227,12 @@ tr.search-hit td,tbody tr.search-hit:hover td{background:#fffbdd}
 .rule-card-body{padding:10px;border-top:1px solid var(--border);display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;align-items:end}
 .rule-layers{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:0 10px 10px}
 .rule-layer{border:1px solid var(--border);border-radius:10px;background:#fbfcfe;overflow:hidden;min-width:0}
-.rule-layer-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;background:#f3f6fb;border-bottom:1px solid var(--border)}
-.rule-layer-head b{font-size:12.5px}
-.rule-layer-head .group-meta{flex:1 1 120px;min-width:0}
-.rule-layer-head > label.f{margin-left:auto;min-width:120px;display:flex;flex-direction:column;align-items:stretch;gap:3px}
+.rule-layer-head{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;padding:8px 10px;background:#f3f6fb;border-bottom:1px solid var(--border)}
+.rule-layer-head b{font-size:12.5px;line-height:1.3;padding-top:2px}
+.rule-layer-head .group-meta{flex:1 1 120px;min-width:0;padding-top:2px}
+.rule-layer-head > label.f.rule-metric{margin-left:auto;flex:0 0 auto;width:7.5rem;min-width:7.5rem;display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:3px}
+.rule-layer-head > label.f.rule-metric > span{display:block;flex:0 0 auto;line-height:1.2;white-space:nowrap}
+.rule-layer-head > label.f.rule-metric > select{display:block;flex:0 0 auto;width:100%;min-width:0}
 .rule-layer-body{padding:6px 8px 8px}
 .rule-sides{display:grid;grid-template-columns:1fr 1fr;gap:5px;min-width:0}
 @media(max-width:960px){.rule-layers{grid-template-columns:1fr}}
@@ -430,7 +432,7 @@ function rulerLayerBlock(index,layer,layerCfg){
   const hint=layer==='campaign'?'Ngưỡng riêng cấp camp':'Ngưỡng riêng từng material';
   const pause=layerCfg.pause||blankSide('pause'),enable=layerCfg.enable||blankSide('enable');
   return '<div class="rule-layer"><div class="rule-layer-head"><b>'+title+'</b><span class="group-meta">'+hint+'</span>'
-    +'<label class="f"><span>Chỉ số</span>'+ruleField(index,layer,'meta','metric',layerCfg.metric||'spend')+'</label></div>'
+    +'<label class="f rule-metric"><span>Chỉ số</span>'+ruleField(index,layer,'meta','metric',layerCfg.metric||'spend')+'</label></div>'
     +'<div class="rule-layer-body"><div class="rule-sides">'+rulerSideFields(index,layer,'pause',pause)+rulerSideFields(index,layer,'enable',enable)+'</div></div></div>';
 }
 function drawRulerAuto(){
