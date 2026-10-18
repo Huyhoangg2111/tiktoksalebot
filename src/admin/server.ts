@@ -225,13 +225,14 @@ tr.search-hit td,tbody tr.search-hit:hover td{background:#fffbdd}
 .chev.open{transform:rotate(90deg)}
 .warn-badge{background:#fdecec;color:#a42222}
 .rule-card-body{padding:10px;border-top:1px solid var(--border);display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;align-items:end}
-.rule-layers{display:flex;flex-direction:column;gap:10px;padding:0 10px 10px}
-.rule-layer{border:1px solid var(--border);border-radius:10px;background:#fbfcfe;overflow:hidden}
+.rule-layers{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:0 10px 10px}
+.rule-layer{border:1px solid var(--border);border-radius:10px;background:#fbfcfe;overflow:hidden;min-width:0}
 .rule-layer-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;background:#f3f6fb;border-bottom:1px solid var(--border)}
 .rule-layer-head b{font-size:12.5px}
+.rule-layer-head .group-meta{flex:1 1 120px;min-width:0}
 .rule-layer-body{padding:8px 10px 10px}
-.rule-sides{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-@media(max-width:800px){.rule-sides{grid-template-columns:1fr}}
+.rule-sides{display:grid;grid-template-columns:1fr;gap:8px}
+@media(max-width:960px){.rule-layers{grid-template-columns:1fr}}
 .rule-side{border:1px dashed var(--border-2);border-radius:8px;padding:8px;background:#fff}
 .rule-side-title{font-size:11.5px;font-weight:700;margin-bottom:6px}
 .rule-side.pause .rule-side-title{color:#a42222}
@@ -411,24 +412,20 @@ function rulerWarnings(state){
   return out;
 }
 function rulerSideFields(index,layer,sideName,side){
-  const title=sideName==='pause'
-    ?(layer==='campaign'?'TẠM DỪNG — chiến dịch đang chạy':'TẠM DỪNG — material đang bật')
-    :(layer==='campaign'?'KÍCH HOẠT — chiến dịch đang tắt':'KÍCH HOẠT — material đang tắt');
+  const title=sideName==='pause'?'TẠM DỪNG':'KÍCH HOẠT';
   return '<div class="rule-side '+sideName+'"><div class="rule-side-title">'+title+'</div><div class="rule-side-grid">'
     +'<label class="f"><span>Điều kiện</span>'+ruleField(index,layer,sideName,'metric_operator',side.metric_operator)+'</label>'
     +'<label class="f"><span>Mức</span>'+ruleField(index,layer,sideName,'metric_threshold',side.metric_threshold)+'</label>'
     +'<label class="f"><span>Điều kiện</span>'+ruleField(index,layer,sideName,'conversions_operator',side.conversions_operator)+'</label>'
     +'<label class="f"><span>Chuyển đổi</span>'+ruleField(index,layer,sideName,'conversions_threshold',side.conversions_threshold)+'</label>'
-    +'</div><div class="rule-side-hint">'+(sideName==='pause'?'Để trống “Mức” nếu tầng này không tự tắt':'Để trống “Mức” nếu tầng này không tự bật')+'</div></div>';
+    +'</div><div class="rule-side-hint">'+(sideName==='pause'?'Trống “Mức” = không tự tắt':'Trống “Mức” = không tự bật')+'</div></div>';
 }
 function rulerLayerBlock(index,layer,layerCfg){
-  const title=layer==='campaign'?'Chiến dịch (Campaign)':'Material trong chiến dịch';
-  const hint=layer==='campaign'
-    ?'Ngưỡng riêng cấp chiến dịch. Ví dụ: Spend &gt; 0.5 &amp; Chuyển đổi &lt; 1 → tắt.'
-    :'Ngưỡng riêng từng material trong camp khớp tên. Ví dụ: Spend &gt; 0.2 &amp; Chuyển đổi &lt; 1 → tắt.';
+  const title=layer==='campaign'?'Chiến dịch':'Material';
+  const hint=layer==='campaign'?'Ngưỡng riêng cấp camp':'Ngưỡng riêng từng material';
   const pause=layerCfg.pause||blankSide('pause'),enable=layerCfg.enable||blankSide('enable');
   return '<div class="rule-layer"><div class="rule-layer-head"><b>'+title+'</b><span class="group-meta">'+hint+'</span>'
-    +'<label class="f" style="margin-left:auto;min-width:140px"><span>Chỉ số</span>'+ruleField(index,layer,'meta','metric',layerCfg.metric||'spend')+'</label></div>'
+    +'<label class="f" style="margin-left:auto;min-width:120px"><span>Chỉ số</span>'+ruleField(index,layer,'meta','metric',layerCfg.metric||'spend')+'</label></div>'
     +'<div class="rule-layer-body"><div class="rule-sides">'+rulerSideFields(index,layer,'pause',pause)+rulerSideFields(index,layer,'enable',enable)+'</div></div></div>';
 }
 function drawRulerAuto(){
