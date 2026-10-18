@@ -450,7 +450,6 @@ function drawRulerAuto(){
     const metricBadges=[camp.metric,mat.metric].filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).map(m=>METRIC_LABELS[m]||m).join('/');
     cards+='<div class="rule-card" data-rg="'+index+'"><div class="rule-card-head" data-rexpand="'+index+'"><span class="chev'+(open?' open':'')+'">▶</span><b>'+esc(rulerTitle(group))+'</b><span class="badge">'+esc(metricBadges||'—')+'</span>'+(group.trigger_kind==='scheduled'?'<span class="badge">Theo giờ '+(esc(group.run_time)||'?')+' · '+esc(PERIOD_LABELS[String(group.period||'today')]||group.period||'today')+'</span>':'<span class="badge">Liên tục</span>')+(parts?'<span class="group-meta">'+esc(parts)+'</span>':'<span class="mixed">chưa có mức camp/material</span>')+'<span class="group-meta">'+(group.enabled?'Đang dùng':'Đã tắt')+'</span><span class="group-actions"><button class="btn small delete-rule" data-index="'+index+'">Xóa</button></span></div>'
       +(open?'<div class="rule-card-body">'
-        +'<div class="rule-side-hint" style="margin:0 0 8px">Một quy tắc theo tên chiến dịch — cấu hình <b>ngưỡng riêng</b> cho Chiến dịch và Material (không dùng chung một mức).</div>'
         +'<label class="f"><span>Chạy</span>'+ruleField(index,'common','meta','trigger_kind',group.trigger_kind||'continuous')+'</label>'
         +(group.trigger_kind==='scheduled'
           ? '<label class="f"><span>Giờ (HH:mm, giờ Việt Nam)</span>'+ruleField(index,'common','meta','run_time',group.run_time||'')+'</label>'
