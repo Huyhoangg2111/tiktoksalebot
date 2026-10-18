@@ -312,9 +312,23 @@ const blankGroup=()=>({trigger_kind:'continuous',run_time:'',period:'',name_cont
 function cleanRuleNote(value){return String(value||'').replace(/\\s*\\[(pause|enable)\\]\\s*$/i,'').trim()}
 function groupRulerRows(data){
   const groups=[],singles=[];
+  const layerHasThreshold=cfg=>Boolean(cfg&&(String((cfg.pause||{}).metric_threshold??'').trim()||String((cfg.enable||{}).metric_threshold??'').trim()));
   const findGroup=row=>{
     const note=cleanRuleNote(row.note);
-    let group=groups.find(item=>item.trigger_kind===(row.trigger_kind||'continuous')&&String(item.run_time||'')===String(row.run_time||'')&&String(item.period||'')===String(row.period||'')&&item.name_contains===row.name_contains&&item.enabled===Boolean(row.enabled)&&item.note===note);
+    const entity=String(row.entity||'campaign').toLowerCase();
+    const targetLayers=entity==='both'?['campaign','material']:[entity==='material'?'material':'campaign'];
+    const rowMetric=row.metric||'spend';
+    let group=groups.find(item=>{
+      if(!(item.trigger_kind===(row.trigger_kind||'continuous')&&String(item.run_time||'')===String(row.run_time||'')&&String(item.period||'')===String(row.period||'')&&item.name_contains===row.name_contains&&item.enabled===Boolean(row.enabled)&&item.note===note))return false;
+      // Không gộp vào tầng đã có metric khác / đã có đủ slot action → tránh mất rule spend khi còn rule CPA cùng tên.
+      return targetLayers.every(layer=>{
+        const cfg=item[layer];
+        if(!cfg)return true;
+        if(cfg[row.action]&&String(cfg[row.action].metric_threshold??'').trim()!=='')return false;
+        if(layerHasThreshold(cfg)&&cfg.metric&&cfg.metric!==rowMetric)return false;
+        return true;
+      });
+    });
     if(!group){group=blankGroup();group.trigger_kind=row.trigger_kind||'continuous';group.run_time=row.run_time||'';group.period=row.period||'';group.name_contains=row.name_contains||'';group.enabled=Boolean(row.enabled);group.note=note;groups.push(group)}
     return group;
   };
@@ -323,7 +337,14 @@ function groupRulerRows(data){
     const group=findGroup(row);
     const entity=String(row.entity||'campaign').toLowerCase();
     const layers=entity==='both'?['campaign','material']:[entity==='material'?'material':'campaign'];
-    layers.forEach(layer=>{group[layer]??=blankLayer();group[layer].metric=row.metric||group[layer].metric||'spend';group[layer][row.action]={...row}});
+    // Legacy entity=both: chỉ giữ id ở tầng đầu; tầng sau INSERT mới khi lưu (tránh 2 tầng cùng id → UPDATE đè mất 1 tầng).
+    layers.forEach((layer,layerIndex)=>{
+      group[layer]??=blankLayer();
+      group[layer].metric=row.metric||group[layer].metric||'spend';
+      const copy={...row};
+      if(layerIndex>0)delete copy.id;
+      group[layer][row.action]=copy;
+    });
   });
   return {groups,singles};
 }
@@ -525,15 +546,18 @@ function drawRulerAuto(){
 }
 function flattenRulerGroups(state){
   const result=[];
+  const usedIds=new Set();
   state.groups.forEach(group=>{
     ['campaign','material'].forEach(layer=>{
       const cfg=group[layer]||blankLayer();
       ['pause','enable'].forEach(action=>{
         const side=cfg[action]||blankSide(action);
         if(String(side.metric_threshold??'').trim()==='')return;
+        let id=side.id;
+        if(id!=null&&id!==''){const n=Number(id);if(Number.isInteger(n)&&n>0){if(usedIds.has(n))id=undefined;else usedIds.add(n)}else id=undefined}
         result.push({
           ...side,
-          id:side.id,
+          id,
           entity:layer,
           trigger_kind:group.trigger_kind||'continuous',
           run_time:group.run_time||'',
