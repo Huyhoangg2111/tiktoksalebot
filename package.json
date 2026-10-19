@@ -7,7 +7,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
-    "test": "npm run build && node --test dist/campaigns/naming.test.js dist/campaigns/duplicate-safety.test.js dist/admin/campaign-confirm.test.js dist/admin/login-page.test.js dist/tiktok/smartplus/money.test.js dist/materials/rule-engine.test.js"
+    "test": "npm run build && node --test dist/campaigns/naming.test.js dist/campaigns/duplicate-safety.test.js dist/admin/campaign-confirm.test.js dist/admin/login-page.test.js dist/admin/otp-attempts.test.js dist/admin/ruler-dual-layer.test.js dist/admin/ruler-notify-save.test.js dist/tiktok/smartplus/money.test.js dist/materials/rule-engine.test.js dist/sales/bc-mkt-codes.test.js"
   },
   "keywords": [
     "telegram",

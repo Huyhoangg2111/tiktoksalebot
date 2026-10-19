@@ -54,6 +54,7 @@ const COMMAND_MENU_DEFAULT = [
   { command: 'start', description: '🚀 Mở hướng dẫn nhanh' },
   { command: 'balance', description: '💰 Kiểm tra số dư TKQC' },
   { command: 'bc', description: '🧾 Báo cáo doanh số MKT' },
+  { command: 'bckhac', description: '🧾 Báo cáo doanh số MKT khác' },
   { command: 'campaigns', description: '📊 Chiến dịch có chi tiêu hôm nay' },
   { command: 'campid', description: '🔎 Chi tiết một chiến dịch' },
   { command: 'campactive', description: '🟢 Campaign active theo sản phẩm' },
@@ -2414,7 +2415,7 @@ export function setupBotHandlers(bot: Telegraf) {
       }
 
       await ctx.reply(
-        'Tôi không hiểu lệnh này. Dùng /start để xem danh sách lệnh (ví dụ /balance, /campaigns, /bc).',
+        'Tôi không hiểu lệnh này. Dùng /start để xem danh sách lệnh (ví dụ /balance, /campaigns, /bc, /bckhac).',
         Markup.removeKeyboard()
       );
     })();

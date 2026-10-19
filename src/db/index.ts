@@ -244,6 +244,114 @@ async function migrateLegacyMaterialRulerRules(): Promise<void> {
   );
 }
 
+const UNIFY_RULER_ENTITY_MARKER = 'ruler_entity_unified_both_migrated';
+const DUAL_LAYER_RULER_MARKER = 'ruler_entity_dual_layers_migrated';
+
+/**
+ * Deprecated: không còn gộp campaign/material → both.
+ * Chỉ đánh dấu đã xử lý để không chạy lại bản gộp cũ trên DB mới.
+ */
+async function migrateUnifyRulerEntityToBoth(): Promise<void> {
+  const marker = await db.get<{ value: string }>(
+    'SELECT value FROM bot_settings WHERE key = ?',
+    [UNIFY_RULER_ENTITY_MARKER]
+  );
+  if (String(marker?.value || '') === '1') return;
+
+  await db.run(
+    'INSERT OR REPLACE INTO bot_settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)',
+    [UNIFY_RULER_ENTITY_MARKER, '1']
+  );
+  console.log('[DB migration] ruler entity: bỏ qua gộp → both (giữ ngưỡng camp/material riêng)');
+}
+
+/**
+ * Một lần: tách entity=both (pause/enable) thành 2 dòng campaign + material
+ * cùng ngưỡng ban đầu — UI/engine dùng ngưỡng riêng từng tầng.
+ * Quy tắc notify giữ entity=both.
+ */
+async function migrateBothEntityToDualLayers(): Promise<void> {
+  const marker = await db.get<{ value: string }>(
+    'SELECT value FROM bot_settings WHERE key = ?',
+    [DUAL_LAYER_RULER_MARKER]
+  );
+  if (String(marker?.value || '') === '1') return;
+
+  type BothRow = {
+    id: number;
+    trigger_kind: string | null;
+    run_time: string | null;
+    period: string | null;
+    name_contains: string | null;
+    metric: string;
+    metric_operator: string;
+    metric_threshold: number;
+    metric_min_threshold: number | null;
+    conversions_operator: string;
+    conversions_threshold: number;
+    action: string;
+    is_active: number | null;
+    note: string | null;
+  };
+
+  const bothRows = await db.all<BothRow>(
+    `SELECT id,trigger_kind,run_time,period,name_contains,metric,metric_operator,metric_threshold,
+            metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note
+     FROM alert_action_rules
+     WHERE entity = 'both' AND action IN ('pause', 'enable')
+     ORDER BY id`
+  ).catch(() => [] as BothRow[]);
+
+  let expanded = 0;
+  if (bothRows.length > 0) {
+    await db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const row of bothRows) {
+        await db.run(
+          `UPDATE alert_action_rules SET entity = 'campaign', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          [row.id]
+        );
+        await db.run(
+          `INSERT INTO alert_action_rules(
+            entity,trigger_kind,run_time,period,name_contains,metric,metric_operator,metric_threshold,
+            metric_min_threshold,conversions_operator,conversions_threshold,action,is_active,note
+          ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [
+            'material',
+            row.trigger_kind || 'continuous',
+            row.run_time,
+            row.period,
+            row.name_contains,
+            row.metric,
+            row.metric_operator,
+            row.metric_threshold,
+            row.metric_min_threshold,
+            row.conversions_operator,
+            row.conversions_threshold,
+            row.action,
+            row.is_active ?? 1,
+            row.note,
+          ]
+        );
+        expanded += 1;
+      }
+      await db.exec('COMMIT');
+    } catch (error) {
+      await db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  await db.run(
+    'INSERT OR REPLACE INTO bot_settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)',
+    [DUAL_LAYER_RULER_MARKER, '1']
+  );
+
+  console.log(
+    `[DB migration] ruler dual-layer: tách ${expanded} rule both → campaign + material`
+  );
+}
+
 export async function connectDB() {
   // Open the database
   db = new SqliteDatabase(resolve(process.env.DATABASE_PATH || './bot_data.db'));
@@ -336,6 +444,8 @@ export async function connectDB() {
   await addColumnIfMissing('ALTER TABLE alert_action_rules ADD COLUMN period TEXT');
 
   await migrateLegacyMaterialRulerRules();
+  await migrateUnifyRulerEntityToBoth();
+  await migrateBothEntityToDualLayers();
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS alert_action_state (

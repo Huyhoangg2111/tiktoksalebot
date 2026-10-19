@@ -43,6 +43,8 @@ GOOGLE_SHEET_ID=your_google_sheet_id_here
 GOOGLE_SERVICE_ACCOUNT_EMAIL=your_service_account_email_here
 GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nyour_private_key_here\n-----END PRIVATE KEY-----"
 TARGET_MKT_CODE=MKT80.HOÀNG-TH
+# Optional: mã MKT khác cho lệnh /bckhac (nếu trống, bot lấy các mã MKT khác TARGET trên TKQC dashboard)
+OTHER_MKT_CODE=
 
 # Alert Thresholds Configuration
 SPENDING_THRESHOLD=1000 # Daily spending threshold in USD
@@ -188,7 +190,7 @@ The bot uses SQLite to store data:
 2. Share your Google Sheet with the service account email
 3. Download the private key and add it to your `.env` file
 4. Add team sheet IDs in `Sources`, exchange rate in `Settings`, ad accounts in `Permissions`, and channel mapping in `PageMap`
-5. Sales rows are read from each team sheet's `Đài Loan` tab, columns A/D/E/F/G/O, filtered by `TARGET_MKT_CODE`
+5. Sales rows are read from each team sheet's `Đài Loan` tab, columns A/D/E/F/G/O, filtered by MKT code (`/bc` → `TARGET_MKT_CODE`; `/bckhac` → `OTHER_MKT_CODE` or other advertiser MKT codes)
 
 ### Setting Up Telegram Bot
 

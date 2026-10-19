@@ -1,6 +1,11 @@
 import { Markup, Telegraf, type Context } from 'telegraf';
 import { getAdvertiserPermissions } from '../google-sheets/api.js';
 import {
+  getConfiguredOtherMktCode,
+  getPrimaryMktCode,
+  resolveOtherMktCodes,
+} from './bc-mkt-codes.js';
+import {
   buildBcSalesReport,
   getMonthBcReportPeriod,
   getTodayBcReportPeriod,
@@ -9,21 +14,18 @@ import {
   type BcSalesDataIssue,
 } from './bc-report.js';
 
-type ReplyOptions = Parameters<Context['reply']>[1];
 type NextFunction = () => Promise<void>;
+type BcReportKind = 'primary' | 'other';
 
 const BC_CALLBACK_PREFIX = 'bc_report';
+const BC_OTHER_CALLBACK_PREFIX = 'bckhac_report';
 const BC_ISSUES_CALLBACK_PREFIX = 'bc_issues';
 const CUSTOM_PENDING_TTL_MS = 10 * 60 * 1000;
 const BC_ISSUES_TTL_MS = 30 * 60 * 1000;
 const BC_ISSUES_PAGE_SIZE = 8;
 
-const pendingCustomReports = new Map<string, { createdAt: number }>();
+const pendingCustomReports = new Map<string, { createdAt: number; kind: BcReportKind }>();
 const bcIssueCallbacks = new Map<string, { createdAt: number; issues: BcSalesDataIssue[] }>();
-
-function getTargetMktCode(): string {
-  return process.env.TARGET_MKT_CODE?.trim() || 'MKT80.HOÀNG-TH';
-}
 
 function getPendingKey(ctx: Context): string | undefined {
   const chatId = ctx.chat?.id;
@@ -82,25 +84,6 @@ function splitMessage(message: string, maxLength = 3500): string[] {
   return chunks;
 }
 
-function chunkArray<T>(items: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-
-  for (let index = 0; index < items.length; index += size) {
-    chunks.push(items.slice(index, index + size));
-  }
-
-  return chunks;
-}
-
-async function replyLongMessage(ctx: Context, message: string, options?: ReplyOptions): Promise<void> {
-  const chunks = splitMessage(message);
-
-  for (let index = 0; index < chunks.length; index++) {
-    const prefix = chunks.length > 1 ? `<b>Phần ${index + 1}/${chunks.length}</b>\n` : '';
-    await ctx.reply(`${prefix}${chunks[index]}`, options);
-  }
-}
-
 function clearExpiredBcIssueCallbacks(): void {
   const now = Date.now();
 
@@ -122,17 +105,29 @@ function createBcIssueCallbackToken(issues: BcSalesDataIssue[]): string {
 
   return token;
 }
-function buildBcMenuKeyboard() {
+
+function callbackPrefixForKind(kind: BcReportKind): string {
+  return kind === 'other' ? BC_OTHER_CALLBACK_PREFIX : BC_CALLBACK_PREFIX;
+}
+
+function commandLabelForKind(kind: BcReportKind): string {
+  return kind === 'other' ? '/bckhac' : '/bc';
+}
+
+function buildBcMenuKeyboard(kind: BcReportKind) {
+  const prefix = callbackPrefixForKind(kind);
+
   return Markup.inlineKeyboard([
     [
-      Markup.button.callback('Hôm nay', `${BC_CALLBACK_PREFIX}:today`),
-      Markup.button.callback('Tháng này', `${BC_CALLBACK_PREFIX}:month`),
+      Markup.button.callback('Hôm nay', `${prefix}:today`),
+      Markup.button.callback('Tháng này', `${prefix}:month`),
     ],
     [
-      Markup.button.callback('Custom', `${BC_CALLBACK_PREFIX}:custom`),
+      Markup.button.callback('Custom', `${prefix}:custom`),
     ],
   ]);
 }
+
 function buildBcIssueKeyboard(issues: BcSalesDataIssue[]) {
   if (issues.length === 0) {
     return undefined;
@@ -189,8 +184,33 @@ function formatBcIssuePage(issues: BcSalesDataIssue[], pageIndex: number): strin
   return lines.join('\n').trim();
 }
 
+async function listDashboardMktCodes(): Promise<string[]> {
+  const permissions = await getAdvertiserPermissions({ includeAllMkt: true }).catch(error => {
+    console.error('[bc] không đọc được danh sách TKQC:', error);
+    return [];
+  });
+
+  return [...new Set(
+    permissions
+      .filter(permission => permission.enabled && permission.mktCode.trim())
+      .map(permission => permission.mktCode.trim())
+  )];
+}
+
+async function getMktCodesForKind(kind: BcReportKind): Promise<string[]> {
+  if (kind === 'primary') {
+    return [getPrimaryMktCode()];
+  }
+
+  return resolveOtherMktCodes({
+    primaryMktCode: getPrimaryMktCode(),
+    configuredOther: getConfiguredOtherMktCode(),
+    dashboardCodes: await listDashboardMktCodes(),
+  });
+}
+
 export async function sendBcMenu(ctx: Context): Promise<void> {
-  const targetMktCode = getTargetMktCode();
+  const targetMktCode = getPrimaryMktCode();
 
   await ctx.reply(
     [
@@ -198,57 +218,96 @@ export async function sendBcMenu(ctx: Context): Promise<void> {
       `MKT: <code>${escapeHtml(targetMktCode)}</code>`,
       '',
       'Chọn khung thời gian cần xem:',
+      '',
+      '<i>Mã MKT khác: dùng /bckhac</i>',
     ].join('\n'),
     {
       parse_mode: 'HTML',
-      ...buildBcMenuKeyboard(),
+      ...buildBcMenuKeyboard('primary'),
     }
   );
 }
-/**
- * Danh sách mã MKT mà /bc sẽ báo cáo: mọi mã MKT của TKQC đang bật trong dashboard
- * (mã MKT env/target đứng đầu nếu có), fallback về TARGET_MKT_CODE khi dashboard trống.
- */
-async function getBcTargetMktCodes(): Promise<string[]> {
-  const permissions = await getAdvertiserPermissions({ includeAllMkt: true }).catch(error => {
-    // Không nuốt lỗi im lặng: nếu đọc danh sách TKQC lỗi (DB bận…), log để biết
-    // /bc đang fallback về một mã MKT thay vì báo đủ các mã đã cấu hình.
-    console.error('[bc] không đọc được danh sách TKQC, /bc chỉ báo theo TARGET_MKT_CODE:', error);
-    return [];
-  });
-  const codes = [...new Set(
-    permissions
-      .filter(permission => permission.enabled && permission.mktCode.trim())
-      .map(permission => permission.mktCode.trim())
-  )];
+
+export async function sendBcOtherMenu(ctx: Context): Promise<void> {
+  const codes = await getMktCodesForKind('other');
 
   if (codes.length === 0) {
-    console.warn('[bc] không có TKQC nào có Mã MKT trong dashboard — /bc chỉ báo', getTargetMktCode());
-    return [getTargetMktCode()];
+    await ctx.reply(
+      [
+        '<b>BÁO CÁO DOANH SỐ MKT KHÁC</b>',
+        '',
+        'Chưa có mã MKT khác để báo cáo.',
+        'Cách cấu hình:',
+        '• Đặt <code>OTHER_MKT_CODE</code> trong .env (ví dụ <code>MKT.CT</code>)',
+        '• hoặc gắn Mã MKT khác trên TKQC đang bật trong dashboard (khác <code>TARGET_MKT_CODE</code>)',
+      ].join('\n'),
+      { parse_mode: 'HTML' }
+    );
+    return;
   }
 
-  const target = getTargetMktCode();
-  const rest = codes
-    .filter(code => code.toLocaleUpperCase('vi-VN') !== target.toLocaleUpperCase('vi-VN'))
-    .sort((a, b) => a.localeCompare(b, 'vi'));
-  return codes.some(code => code.toLocaleUpperCase('vi-VN') === target.toLocaleUpperCase('vi-VN'))
-    ? [target, ...rest]
-    : rest.length > 0 ? rest : [target];
+  await ctx.reply(
+    [
+      '<b>BÁO CÁO DOANH SỐ MKT KHÁC</b>',
+      `MKT: <code>${escapeHtml(codes.join(', '))}</code>`,
+      '',
+      'Chọn khung thời gian cần xem:',
+      '',
+      '<i>Mã MKT chính: dùng /bc</i>',
+    ].join('\n'),
+    {
+      parse_mode: 'HTML',
+      ...buildBcMenuKeyboard('other'),
+    }
+  );
 }
 
-async function sendBcReport(ctx: Context, period: BcReportPeriod): Promise<void> {
-  const waitMessage = await ctx.reply('Đang tổng hợp dữ liệu sales và TikTok Ads cho tất cả mã MKT...');
+async function sendBcReport(ctx: Context, period: BcReportPeriod, kind: BcReportKind): Promise<void> {
+  const commandLabel = commandLabelForKind(kind);
+  const waitMessage = await ctx.reply(
+    kind === 'other'
+      ? 'Đang tổng hợp dữ liệu sales và TikTok Ads cho mã MKT khác...'
+      : 'Đang tổng hợp dữ liệu sales và TikTok Ads...'
+  );
 
   try {
-    const targetCodes = await getBcTargetMktCodes();
-    // Các mã MKT chạy song song; mỗi mã vẫn là một báo cáo hoàn chỉnh theo format /bc.
+    const targetCodes = await getMktCodesForKind(kind);
+
+    if (targetCodes.length === 0) {
+      const chatId = ctx.chat?.id;
+      const emptyMessage = [
+        `<b>BÁO CÁO DOANH SỐ MKT KHÁC</b>`,
+        '',
+        'Chưa có mã MKT khác để báo cáo.',
+        'Đặt <code>OTHER_MKT_CODE</code> hoặc gắn Mã MKT khác trên TKQC trong dashboard.',
+      ].join('\n');
+
+      if (chatId) {
+        await ctx.telegram.editMessageText(
+          chatId,
+          waitMessage.message_id,
+          undefined,
+          emptyMessage,
+          { parse_mode: 'HTML' }
+        );
+        return;
+      }
+
+      await ctx.reply(emptyMessage, { parse_mode: 'HTML' });
+      return;
+    }
+
+    // Mỗi mã MKT là một báo cáo hoàn chỉnh (cùng format /bc), gửi riêng từng tin.
     const results = await Promise.all(targetCodes.map(async code => {
       try {
         return { code, report: await buildBcSalesReport({ ...period, targetMktCode: code }) };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        console.error(`[bc] report failed for ${code}:`, error);
-        return { code, failedMessage: `❌ Không thể tạo báo cáo <b>${escapeHtml(code)}</b>:\n${escapeHtml(errorMessage)}` };
+        console.error(`[${kind === 'other' ? 'bckhac' : 'bc'}] report failed for ${code}:`, error);
+        return {
+          code,
+          failedMessage: `❌ Không thể tạo báo cáo <b>${escapeHtml(code)}</b>:\n${escapeHtml(errorMessage)}`,
+        };
       }
     }));
 
@@ -299,15 +358,16 @@ async function sendBcReport(ctx: Context, period: BcReportPeriod): Promise<void>
         chatId,
         waitMessage.message_id,
         undefined,
-        `Không thể tạo báo cáo /bc:\n${escapeHtml(errorMessage)}`,
+        `Không thể tạo báo cáo ${commandLabel}:\n${escapeHtml(errorMessage)}`,
         { parse_mode: 'HTML' }
       );
       return;
     }
 
-    await ctx.reply(`Không thể tạo báo cáo /bc:\n${errorMessage}`);
+    await ctx.reply(`Không thể tạo báo cáo ${commandLabel}:\n${errorMessage}`);
   }
 }
+
 function clearExpiredPendingCustomReports(): void {
   const now = Date.now();
 
@@ -327,6 +387,7 @@ async function handleCustomText(ctx: Context, next: NextFunction): Promise<void>
     return;
   }
 
+  const pending = pendingCustomReports.get(pendingKey)!;
   const messageText = getMessageText(ctx).trim();
 
   if (!messageText) {
@@ -350,7 +411,7 @@ async function handleCustomText(ctx: Context, next: NextFunction): Promise<void>
     const period = parseCustomBcReportPeriod(messageText);
     pendingCustomReports.delete(pendingKey);
 
-    await sendBcReport(ctx, period);
+    await sendBcReport(ctx, period, pending.kind);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     await ctx.reply(
@@ -370,51 +431,38 @@ async function handleCustomText(ctx: Context, next: NextFunction): Promise<void>
   }
 }
 
-function parseDirectBcCommandPeriod(ctx: Context): BcReportPeriod | undefined {
+function parseDirectCommandPeriod(ctx: Context, command: 'bc' | 'bckhac'): BcReportPeriod | undefined {
   const messageText = getMessageText(ctx);
-  const commandArgs = messageText.replace(/^\/bc(?:@\w+)?/i, '').trim();
+  const commandArgs = messageText.replace(new RegExp(`^\\/${command}(?:@\\w+)?`, 'i'), '').trim();
 
   return commandArgs ? parseCustomBcReportPeriod(commandArgs) : undefined;
 }
-export function setupBcSalesHandlers(bot: Telegraf): void {
-  bot.command('bc', async (ctx) => {
-    try {
-      const directPeriod = parseDirectBcCommandPeriod(ctx);
 
-      if (directPeriod) {
-        await sendBcReport(ctx, directPeriod);
-        return;
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      await ctx.reply(`Sai cú pháp /bc: ${errorMessage}`);
-      return;
-    }
+function registerPeriodActions(bot: Telegraf, kind: BcReportKind): void {
+  const prefix = callbackPrefixForKind(kind);
+  const commandLabel = commandLabelForKind(kind);
 
-    await sendBcMenu(ctx);
-  });
-
-  bot.action(`${BC_CALLBACK_PREFIX}:today`, async (ctx) => {
+  bot.action(`${prefix}:today`, async (ctx) => {
     await ctx.answerCbQuery();
-    await sendBcReport(ctx, getTodayBcReportPeriod());
+    await sendBcReport(ctx, getTodayBcReportPeriod(), kind);
   });
 
-  bot.action(`${BC_CALLBACK_PREFIX}:month`, async (ctx) => {
+  bot.action(`${prefix}:month`, async (ctx) => {
     await ctx.answerCbQuery();
-    await sendBcReport(ctx, getMonthBcReportPeriod());
+    await sendBcReport(ctx, getMonthBcReportPeriod(), kind);
   });
 
-  bot.action(`${BC_CALLBACK_PREFIX}:custom`, async (ctx) => {
+  bot.action(`${prefix}:custom`, async (ctx) => {
     const pendingKey = getPendingKey(ctx);
 
     if (pendingKey) {
-      pendingCustomReports.set(pendingKey, { createdAt: Date.now() });
+      pendingCustomReports.set(pendingKey, { createdAt: Date.now(), kind });
     }
 
     await ctx.answerCbQuery();
     await ctx.reply(
       [
-        'Nhập thời gian custom cho báo cáo /bc.',
+        `Nhập thời gian custom cho báo cáo ${commandLabel}.`,
         '',
         'Có thể nhập một ngày hoặc một khoảng ngày:',
         '<code>02</code>',
@@ -428,6 +476,45 @@ export function setupBcSalesHandlers(bot: Telegraf): void {
       { parse_mode: 'HTML' }
     );
   });
+}
+
+export function setupBcSalesHandlers(bot: Telegraf): void {
+  bot.command('bc', async (ctx) => {
+    try {
+      const directPeriod = parseDirectCommandPeriod(ctx, 'bc');
+
+      if (directPeriod) {
+        await sendBcReport(ctx, directPeriod, 'primary');
+        return;
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      await ctx.reply(`Sai cú pháp /bc: ${errorMessage}`);
+      return;
+    }
+
+    await sendBcMenu(ctx);
+  });
+
+  bot.command('bckhac', async (ctx) => {
+    try {
+      const directPeriod = parseDirectCommandPeriod(ctx, 'bckhac');
+
+      if (directPeriod) {
+        await sendBcReport(ctx, directPeriod, 'other');
+        return;
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      await ctx.reply(`Sai cú pháp /bckhac: ${errorMessage}`);
+      return;
+    }
+
+    await sendBcOtherMenu(ctx);
+  });
+
+  registerPeriodActions(bot, 'primary');
+  registerPeriodActions(bot, 'other');
 
   bot.action(new RegExp(`^${BC_ISSUES_CALLBACK_PREFIX}:([^:]+):(\\d+)$`), async (ctx) => {
     clearExpiredBcIssueCallbacks();
@@ -437,7 +524,7 @@ export function setupBcSalesHandlers(bot: Telegraf): void {
     const callbackContext = bcIssueCallbacks.get(token);
 
     if (!callbackContext) {
-      await ctx.answerCbQuery('Nút đã hết hạn. Vui lòng chạy lại /bc.');
+      await ctx.answerCbQuery('Nút đã hết hạn. Vui lòng chạy lại /bc hoặc /bckhac.');
       return;
     }
 
